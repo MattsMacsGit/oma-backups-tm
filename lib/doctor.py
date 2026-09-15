@@ -1,0 +1,109 @@
+#!/usr/bin/env python3
+"""Check skip-paths vs compiled excludes vs files on the mounted dest."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from compile_excludes import load_paths, split_paths, user_home  # noqa: E402
+
+
+def dest_home() -> Path | None:
+    candidates = [
+        Path("/run/omarchy-backups/home/current"),
+    ]
+    media = Path("/run/media")
+    if media.is_dir():
+        for userdir in media.iterdir():
+            candidates.append(userdir / "OMARCHY-TM" / "home" / "current")
+            candidates.append(userdir / "OMARCHY-BACKUPS" / "home" / "current")
+    for p in candidates:
+        if p.is_dir():
+            return p
+    return None
+
+
+def nonempty(p: Path) -> bool:
+    if p.is_file() and p.stat().st_size:
+        return True
+    if p.is_dir():
+        try:
+            return any(p.iterdir())
+        except OSError:
+            return False
+    return False
+
+
+def main() -> int:
+    home = user_home()
+    skip = home / ".config" / "omarchy-backups" / "skip-paths.txt"
+    etc_home = Path("/etc/omarchy-backups/excludes-home.txt")
+    etc_os = Path("/etc/omarchy-backups/excludes-os.txt")
+    user_home_ex = home / ".config" / "omarchy-backups" / "excludes-home.txt"
+    dest = dest_home()
+    paths = load_paths(skip)
+    want_home, want_os = split_paths(paths, Path("/home"))
+    compiled_home = load_paths(user_home_ex) if user_home_ex.is_file() else []
+    got_home = load_paths(etc_home) if etc_home.is_file() else []
+    got_os = load_paths(etc_os) if etc_os.is_file() else []
+
+    print(f"skip-paths:     {skip} ({len(paths)} user entries)")
+    for p in paths:
+        print(f"  {p}")
+    print(f"user compiled:  {compiled_home}")
+    print(f"/etc home:      {got_home}")
+    print(f"/etc os:        {got_os}")
+    print(f"user home skips:{want_home}")
+    print(f"user os skips:  {want_os}")
+
+    rc = 0
+    missing = [p for p in want_home if p not in compiled_home and p not in got_home]
+    if missing:
+        print(f"FAIL: compiled excludes missing user skips {missing}")
+        rc = 1
+    elif want_home and not compiled_home and not got_home:
+        print("FAIL: skip-paths has entries but no compiled excludes")
+        rc = 1
+    else:
+        print("OK:   compiled excludes include user skip-paths")
+
+    if os.geteuid() == 0 and not os.environ.get("SUDO_USER"):
+        print("FAIL: running as root with no SUDO_USER (skip list would be /root)")
+        rc = 1
+
+    if dest is None:
+        print("dest not mounted (checked /run/omarchy-backups and /run/media/*/OMARCHY-TM)")
+        return rc
+
+    print(f"dest: {dest}")
+    for rel in want_home:
+        p = dest / rel
+        bad = nonempty(p)
+        print(f"  skip {rel}: dest {'HAS FILES (bad)' if bad else 'empty/absent (ok)'}")
+        if bad:
+            rc = 1
+
+    live = Path("/home")
+    login = os.environ.get("SUDO_USER") or os.environ.get("USER") or "test"
+    for name in (f"{login}/Pictures", f"{login}/Videos"):
+        if name in want_home:
+            continue
+        live_p = live / name
+        dest_p = dest / name
+        live_has = nonempty(live_p)
+        dest_has = nonempty(dest_p)
+        if live_has and not dest_has:
+            print(f"  FAIL: live has {name} but dest current does not")
+            rc = 1
+        elif live_has and dest_has:
+            print(f"  OK:   {name} present on dest (not skipped)")
+        elif not live_has:
+            print(f"  skip-check {name}: live empty (nothing to compare)")
+    return rc
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

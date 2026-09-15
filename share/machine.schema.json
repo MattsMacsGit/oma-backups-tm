@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://omarchy.local/omarchy-tm/machine.schema.json",
+  "title": "Omarchy Time Capsule machine metadata",
+  "description": "Identity of the source machine plus the index of restore points. A restore point is VALID only if os+home+esp exist for the same timestamp.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "hostname",
+    "machine_id",
+    "luks_used",
+    "source",
+    "snapshots"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "minimum": 1 },
+    "hostname": { "type": "string", "minLength": 1 },
+    "machine_id": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "luks_used": { "type": "boolean" },
+    "kernel": { "type": "string" },
+    "limine": {
+      "type": "object",
+      "properties": {
+        "esp_path": { "type": "string" },
+        "conf": { "type": "string" },
+        "uki": { "type": "boolean" },
+        "defaults_conf": { "type": "string" }
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": ["btrfs_uuid", "subvolumes"],
+      "properties": {
+        "btrfs_uuid": { "type": "string" },
+        "root_device": { "type": "string" },
+        "luks_uuid": { "type": ["string", "null"] },
+        "luks_partuuid": { "type": ["string", "null"] },
+        "esp_uuid": { "type": ["string", "null"] },
+        "subvolumes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "subvolid": { "type": "integer" },
+              "uuid": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    },
+    "anchor_timestamp": {
+      "type": ["string", "null"],
+      "description": "Pinned first full send; never pruned."
+    },
+    "snapshots": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/restore_point" }
+    }
+  },
+  "$defs": {
+    "restore_point": {
+      "type": "object",
+      "required": ["timestamp", "valid", "os", "home", "esp"],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "pattern": "^[0-9]{8}T[0-9]{6}Z$"
+        },
+        "created_at": { "type": "string" },
+        "kind": { "enum": ["full", "incremental"] },
+        "parent_timestamp": { "type": ["string", "null"] },
+        "valid": {
+          "type": "boolean",
+          "description": "true only if os+home+esp all exist for this timestamp"
+        },
+        "os": {
+          "type": "object",
+          "properties": {
+            "received_path": { "type": "string" },
+            "source_snapshot": { "type": "string" },
+            "parent_snapshot": { "type": ["string", "null"] },
+            "received_uuid": { "type": ["string", "null"] }
+          }
+        },
+        "home": {
+          "type": "object",
+          "properties": {
+            "received_path": { "type": "string" },
+            "source_snapshot": { "type": "string" },
+            "parent_snapshot": { "type": ["string", "null"] },
+            "received_uuid": { "type": ["string", "null"] }
+          }
+        },
+        "esp": {
+          "type": "object",
+          "properties": {
+            "path": { "type": "string" }
+          }
+        },
+        "restic": {
+          "type": ["object", "null"],
+          "properties": {
+            "snapshot_id": { "type": ["string", "null"] }
+          }
+        },
+        "kernel": { "type": "string" },
+        "pinned": { "type": "boolean" }
+      }
+    }
+  }
+}

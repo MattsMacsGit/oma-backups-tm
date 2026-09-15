@@ -1,0 +1,30 @@
+OmaBackups — boot this USB to restore
+=====================================
+
+Firmware boot menu → this USB.
+
+Limine shows “OmaBackups Restore” (or the text-console entry if the
+screen is blank). That boots the official Arch Linux live environment
+and starts a text wizard:
+
+  1. Unlock the backup (the password you set when you formatted this USB)
+  2. Pick a restore point (date)
+  3. Pick the destination disk — every disk is listed, including
+     internal drives and installer sticks. You choose.
+  4. Type the disk name, then YES
+
+That wipes the destination permanently and copies the snapshot so the
+machine unlocks LUKS and logs in as the same user.
+
+The ESP (OMARCHY-EFI) and live partition (OMARCHY-LIVE) are not encrypted.
+Backups live on LUKS (OMARCHY-TM / OMARCHY-BACKUPS).
+
+If the wizard is not running:
+
+  mkdir -p /run/oma-usb && mount -L OMARCHY-LIVE /run/oma-usb
+  bash /run/oma-usb/oma-backups/share/rescue-run.sh
+
+  oma-backups mount
+  oma-backups snapshots
+  oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP --dry-run
+  oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP --allow-internal

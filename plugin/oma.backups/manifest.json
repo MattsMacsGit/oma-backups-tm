@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "oma.backups",
+  "name": "OmaBackups",
+  "version": "1.0.0",
+  "author": "OmaBackups",
+  "license": "MIT",
+  "description": "Time Machine-style encrypted backups for Omarchy. USB disk, skip list, dated restore points, bootable restore.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaBackups",
+    "description": "Backup disk, skip folders, and restore points",
+    "category": "Files",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

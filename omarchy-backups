@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# OmaBackups CLI — engine for the plugin and the boot restore TUI.
+set -euo pipefail
+
+OMARCHY_TM_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+export OMARCHY_TM_ROOT OMARCHY_BACKUPS_ROOT="$OMARCHY_TM_ROOT"
+# shellcheck source=lib/common.sh
+source "$OMARCHY_TM_ROOT/lib/common.sh"
+
+usage() {
+  cat <<'EOF'
+oma-backups — encrypted Omarchy system+home backups
+
+  oma-backups detect [--json]
+  oma-backups disks [--json] [--all]
+  oma-backups init-config
+  oma-backups compile-excludes
+  oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--allow-internal]
+  oma-backups mount [--disk /dev/sdX]
+  oma-backups umount
+  oma-backups backup [--dry-run] [--yes] [--home-only]
+  oma-backups stop
+  oma-backups snapshots
+  oma-backups files SNAPSHOT [PATH]
+  oma-backups copy SNAPSHOT SRC DEST
+  oma-backups restore-to-disk /dev/TARGET --snapshot TS [--dry-run] [--allow-internal]
+  oma-backups restore-tui
+  oma-backups refresh-rescue [--boot-only]
+  oma-backups doctor
+  oma-backups first-run /dev/sdX
+  oma-backups status
+  oma-backups root
+  oma-backups version
+
+USB disks only by default. Internal disks need --all / --allow-internal.
+Live root disk is always refused for format/restore.
+EOF
+}
+
+init_config() {
+  require_root init-config
+  local etc=/etc/omarchy-backups
+  mkdir -p "$etc"
+  if [[ ! -f $etc/config.toml ]]; then
+    cp "$OMARCHY_TM_ROOT/share/defaults.toml" "$etc/config.toml"
+    log "wrote $etc/config.toml"
+  fi
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py"
+  chmod 644 "$etc"/*.txt "$etc"/config.toml 2>/dev/null || true
+  echo "Config in $etc and ~/.config/omarchy-backups"
+  echo "User skip list: ~/.config/omarchy-backups/skip-paths.txt"
+}
+
+disks_cmd() {
+  local all=0 json=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --all) all=1; shift ;;
+      --json) json=1; shift ;;
+      *) die "unknown argument: $1" ;;
+    esac
+  done
+  local raw
+  raw="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/detect.py" --json)"
+  if [[ $json == 1 ]]; then
+    if [[ $all == 1 ]]; then
+      printf '%s\n' "$raw" | jq '{hostname, live_root_disk, disks}'
+    else
+      printf '%s\n' "$raw" | jq '{
+        hostname, live_root_disk,
+        disks: [.disks[] | select(.hidden_by_default != true)]
+      }'
+    fi
+    return 0
+  fi
+  if [[ $all == 1 ]]; then
+    printf '%s\n' "$raw" | jq -r '
+      .disks[] |
+      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .protected then "\tREFUSE:"+(.protected_reason // "") else "" end)"
+    '
+  else
+    printf '%s\n' "$raw" | jq -r '
+      .disks[] | select(.hidden_by_default != true) |
+      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))"
+    '
+  fi
+}
+
+while [[ $# -gt 0 ]]; do
+  case "${1:-}" in
+    --dry-run) export OMARCHY_TM_DRY_RUN=1; shift ;;
+    --yes) export OMARCHY_TM_YES=1; shift ;;
+    --force) export OMARCHY_TM_FORCE=1; shift ;;
+    --allow-internal) export OMARCHY_TM_ALLOW_INTERNAL=1; shift ;;
+    --home-only) export OMARCHY_TM_HOME_ONLY=1; shift ;;
+    *) break ;;
+  esac
+done
+
+cmd="${1:-}"
+shift || true
+
+case "$cmd" in
+  -h|--help|help|"") usage; exit 0 ;;
+  detect) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/detect.py" "$@" ;;
+  init-config) init_config ;;
+  format-disk) exec "$OMARCHY_TM_ROOT/format-disk.sh" "$@" ;;
+  mount|umount) exec "$OMARCHY_TM_ROOT/mount.sh" "$cmd" "$@" ;;
+  backup)
+    extra=()
+    [[ ${OMARCHY_TM_HOME_ONLY:-0} == 1 ]] && extra+=(--home-only)
+    exec "$OMARCHY_TM_ROOT/backup.sh" "$@" "${extra[@]}"
+    ;;
+  snapshots)
+    extra=()
+    [[ ${1:-} == --json ]] && extra+=(--json)
+    exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "${extra[@]}"
+    ;;
+  open)
+    ts=${1:-}
+    [[ -n $ts ]] || die "usage: oma-backups open TIMESTAMP"
+    exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" --open "$ts"
+    ;;
+  files) exec "$OMARCHY_TM_ROOT/backup.sh" --files "$@" ;;
+  copy) exec "$OMARCHY_TM_ROOT/backup.sh" --copy "$@" ;;
+  restore-to-disk) exec "$OMARCHY_TM_ROOT/restore-to-disk.sh" "$@" ;;
+  restore-tui) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/restore_tui.py" "$@" ;;
+  refresh-rescue) exec "$OMARCHY_TM_ROOT/refresh-rescue.sh" "$@" ;;
+  compile-excludes)
+    exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "$@"
+    ;;
+  doctor)
+    exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/doctor.py" "$@"
+    ;;
+  disks) disks_cmd "$@" ;;
+  first-run)
+    disk=${1:-}
+    [[ -n $disk ]] || die "usage: oma-backups first-run /dev/sdX"
+    init_config
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py"
+    echo "Using excludes from skip-paths + defaults"
+    export OMARCHY_TM_YES=1
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" phase setup || true
+    if ! "$OMARCHY_TM_ROOT/format-disk.sh" "$disk" --yes --force; then
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" fail "USB setup failed" || true
+      echo "Setup failed. Existing backups were not wiped. Not starting a backup."
+      exit 130
+    fi
+    echo "Disk is re-encrypted. Unlock it with the NEW password only."
+    "$OMARCHY_TM_ROOT/mount.sh" mount --disk "$disk"
+    extra=()
+    [[ ${OMARCHY_TM_HOME_ONLY:-0} == 1 ]] && extra+=(--home-only)
+    exec "$OMARCHY_TM_ROOT/backup.sh" --yes "${extra[@]}"
+    ;;
+  stop)
+    require_root stop
+    stop_backup
+    ;;
+  status) status_json ;;
+  root) printf '%s\n' "$OMARCHY_TM_ROOT" ;;
+  version) echo "oma-backups 1.0.0" ;;
+  *)
+    log_err "unknown command: $cmd"
+    usage >&2
+    exit 1
+    ;;
+esac

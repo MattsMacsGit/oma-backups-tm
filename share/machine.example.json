@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "hostname": "omarchy",
+  "machine_id": "9c5c1596a10d4ecd81297ef96987afc1",
+  "luks_used": true,
+  "kernel": "7.2.3-arch1-3",
+  "limine": {
+    "esp_path": "/boot",
+    "conf": "/boot/limine.conf",
+    "uki": true,
+    "defaults_conf": "/etc/default/limine"
+  },
+  "source": {
+    "btrfs_uuid": "4228e5bc-0ab1-48d2-86af-40fe8e138d65",
+    "root_device": "/dev/mapper/root",
+    "luks_uuid": "dff4896e-5dd0-4f0f-a0ae-1a7d575a9768",
+    "luks_partuuid": "668832c7-26ee-421b-92d1-35dc76f76687",
+    "esp_uuid": "81E2-3510",
+    "subvolumes": {
+      "@": { "name": "@", "subvolid": 256, "uuid": null },
+      "@home": { "name": "@home", "subvolid": 257, "uuid": null },
+      "@log": { "name": "@log", "subvolid": 258, "uuid": null },
+      "@pkg": { "name": "@pkg", "subvolid": 259, "uuid": null }
+    }
+  },
+  "anchor_timestamp": "20260912T180000Z",
+  "snapshots": [
+    {
+      "timestamp": "20260912T180000Z",
+      "created_at": "2026-09-12T18:00:00+00:00",
+      "kind": "full",
+      "parent_timestamp": null,
+      "valid": true,
+      "os": {
+        "received_path": "/os/20260912T180000Z",
+        "source_snapshot": "/@omarchy-tm-send/os/20260912T180000Z",
+        "parent_snapshot": null,
+        "received_uuid": null
+      },
+      "home": {
+        "received_path": "/home/20260912T180000Z",
+        "source_snapshot": "/@omarchy-tm-send/home/20260912T180000Z",
+        "parent_snapshot": null,
+        "received_uuid": null
+      },
+      "esp": { "path": "/esp/20260912T180000Z" },
+      "restic": { "snapshot_id": "a1b2c3d4" },
+      "kernel": "7.2.3-arch1-3",
+      "pinned": true
+    }
+  ]
+}

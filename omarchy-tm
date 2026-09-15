@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# Back-compat alias. Prefer omarchy-backups.
+exec "$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)/omarchy-backups" "$@"

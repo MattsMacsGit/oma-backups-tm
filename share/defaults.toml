@@ -1,0 +1,41 @@
+# OmaBackups — defaults. Overlay: ~/.config/omarchy-backups/config.toml
+# then /etc/omarchy-backups/config.toml
+
+[paths]
+mountpoint = "/run/omarchy-backups"
+source_toplevel = "/run/omarchy-backups-src"
+source_snap_subvol = "@omarchy-backups-src"
+status_file = "/run/omarchy-backups.status"
+pid_file = "/run/omarchy-backups.pid"
+state_dir = "~/.local/state/omarchy-backups"
+
+[layout]
+efi_size = "1G"
+efi_label = "OMARCHY-EFI"
+live_size = "16G"
+live_label = "OMARCHY-LIVE"
+tm_label = "OMARCHY-TM"
+luks_mapper = "omarchy-backups"
+
+[restore_layout]
+esp_size = "2G"
+esp_label = "OMARCHY"
+luks_mapper = "omarchy-restore"
+
+[backup]
+os = true
+home = true
+esp = true
+# Rescue kernel refresh is noisy and slow; do it from `oma-backups refresh-rescue`.
+refresh_rescue_boot = false
+
+[ui]
+# true: privileged work opens a floating terminal (sudo). Good while testing.
+# false: pkexec + the Omarchy polkit dialog (no terminal).
+show_terminal = true
+
+[retention]
+daily = 7
+weekly = 4
+monthly = 6
+keep_anchor = true
