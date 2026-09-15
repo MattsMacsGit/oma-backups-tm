@@ -1,11 +1,7 @@
-# restic exclude patterns for omarchy-tm file history
-# Syntax: restic --exclude-file (gitignore-like).
-# These do NOT affect btrfs send of @home — send is whole-subvolume.
-# To skip huge media from the disaster copy, either:
-#   - put it on a separate btrfs subvolume and add that name to send.skip, or
-#   - use a capsule disk large enough for the full @home send (2TB+ on this machine).
+# Default rsync excludes for OmaBackups (caches and junk).
+# User skip list is ~/.config/omarchy-backups/skip-paths.txt
+# (absolute paths, compiled at the start of every backup).
 
-# Caches and package junk
 **/.cache/
 **/.thumbnails/
 **/.local/share/Trash/
@@ -26,7 +22,6 @@
 **/.venv/
 **/lost+found/
 
-# Steam / Flatpak / VMs (Pika-style)
 **/.local/share/Steam/
 **/.steam/
 **/steamapps/common/
@@ -36,17 +31,6 @@
 **/.local/share/libvirt/
 **/.local/share/gnome-boxes/
 
-# Browser caches (keep profiles; drop cache)
 **/.mozilla/firefox/*/cache2/
 **/.config/chromium/*/Cache/
 **/.config/google-chrome/*/Cache/
-
-# Optional media. Prefer ~/.config/omarchy-tm/config.toml restic.extra_excludes
-# so you can turn it back on without editing this file.
-# /home/matt/Videos
-# /home/*/Downloads
-
-# Optional: local LLM weights
-# **/.lmstudio/
-# **/.ollama/
-# **/.cache/huggingface/

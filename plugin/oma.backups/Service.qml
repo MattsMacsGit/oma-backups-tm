@@ -82,6 +82,7 @@ Item {
   property string _detectOut: ""
   ListModel { id: skipListModel }
   readonly property var skipModel: skipListModel
+  readonly property int skipCount: skipListModel.count
 
   function privileged(args) {
     var cmd
@@ -259,6 +260,7 @@ Item {
           root.snapshots = []
           snapList.clear()
         }
+        if (!root.backupRunning) root.lastError = ""
       } catch (e) {
         root.lastError = "Could not list disks"
       }
@@ -366,12 +368,14 @@ Item {
       if (root.pendingFirstRunDisk !== "") {
         var disk = root.pendingFirstRunDisk
         root.pendingFirstRunDisk = ""
+        root.lastError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
         root.privileged(["first-run", disk])
       } else if (root.pendingBackup) {
         root.pendingBackup = false
+        root.lastError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false

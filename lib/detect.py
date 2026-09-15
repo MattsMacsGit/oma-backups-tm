@@ -338,9 +338,7 @@ def tools() -> dict:
         "parted",
         "wipefs",
         "pv",
-        "restic",
         "sgdisk",
-        "btrbk",
         "arch-chroot",
     ]
     return {n: bool(_which(n)) for n in names}
@@ -486,7 +484,7 @@ def detect() -> dict:
     hostname = (_read("/etc/hostname") or os.uname().nodename).strip()
 
     missing_tools = [k for k, v in tools().items() if not v and k in {"btrfs", "cryptsetup", "mkfs.btrfs", "mkfs.fat", "rsync", "sfdisk"}]
-    optional_missing = [k for k, v in tools().items() if not v and k in {"restic", "pv", "sgdisk", "btrbk", "arch-chroot"}]
+    optional_missing = [k for k, v in tools().items() if not v and k in {"pv", "sgdisk", "arch-chroot"}]
 
     snapshots = []
     backup_mounted = False
@@ -642,7 +640,7 @@ def print_human(d: dict) -> None:
         print(
             "Missing optional tools:",
             ", ".join(d["missing_optional_tools"]),
-            "  (restic/pv/arch-chroot recommended before a real backup)",
+            "  (pv/sgdisk/arch-chroot recommended)",
         )
     if d["warnings"]:
         print("Warnings:")

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://omarchy.local/omarchy-tm/machine.schema.json",
-  "title": "Omarchy Time Capsule machine metadata",
+  "$id": "https://github.com/MattsMacsGit/oma-backups-tm/share/machine.schema.json",
+  "title": "OmaBackups machine metadata",
   "description": "Identity of the source machine plus the index of restore points. A restore point is VALID only if os+home+esp exist for the same timestamp.",
   "type": "object",
   "required": [
@@ -100,12 +100,6 @@
           "type": "object",
           "properties": {
             "path": { "type": "string" }
-          }
-        },
-        "restic": {
-          "type": ["object", "null"],
-          "properties": {
-            "snapshot_id": { "type": ["string", "null"] }
           }
         },
         "kernel": { "type": "string" },

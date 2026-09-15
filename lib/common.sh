@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared helpers for omarchy-tm. Source from every command script.
+# Shared helpers for oma-backups. Source from every command script.
 
 [[ -n ${OMARCHY_TM_COMMON_LOADED:-} ]] && return 0
 OMARCHY_TM_COMMON_LOADED=1
@@ -26,16 +26,16 @@ _tm_user_home() {
 }
 
 OMARCHY_TM_USER_HOME="$(_tm_user_home)"
-OMARCHY_TM_STATE="${OMARCHY_TM_STATE:-$OMARCHY_TM_USER_HOME/.local/state/omarchy-tm}"
+OMARCHY_TM_STATE="${OMARCHY_TM_STATE:-$OMARCHY_TM_USER_HOME/.local/state/omarchy-backups}"
 mkdir -p "$OMARCHY_TM_STATE"
 
 if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
-  OMARCHY_TM_LOG_DIR="${OMARCHY_TM_LOG_DIR:-/var/log/omarchy-tm}"
+  OMARCHY_TM_LOG_DIR="${OMARCHY_TM_LOG_DIR:-/var/log/omarchy-backups}"
   mkdir -p "$OMARCHY_TM_LOG_DIR" 2>/dev/null || OMARCHY_TM_LOG_DIR="$OMARCHY_TM_STATE"
 else
   OMARCHY_TM_LOG_DIR="$OMARCHY_TM_STATE"
 fi
-OMARCHY_TM_LOG="${OMARCHY_TM_LOG:-$OMARCHY_TM_LOG_DIR/omarchy-tm.log}"
+OMARCHY_TM_LOG="${OMARCHY_TM_LOG:-$OMARCHY_TM_LOG_DIR/oma-backups.log}"
 
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
@@ -51,7 +51,7 @@ log_err() {
   local line
   line="$(ts) ERROR $*"
   printf '%s\n' "$line" >>"$OMARCHY_TM_LOG" || true
-  printf 'omarchy-tm: %s\n' "$*" >&2
+  printf 'oma-backups: %s\n' "$*" >&2
 }
 
 die() {

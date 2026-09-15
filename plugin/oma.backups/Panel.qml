@@ -62,8 +62,8 @@ Panel {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: svc.backupRunning
-      ? ("OmaBackups — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
-      : (svc.hasCapsule ? "OmaBackups" : "OmaBackups — set up a disk")
+      ? ("OmaBackups (beta) — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
+      : (svc.hasCapsule ? "OmaBackups (beta)" : "OmaBackups (beta) — set up a disk")
     onPressed: root.toggle()
   }
 
@@ -127,7 +127,7 @@ Panel {
                 title: "OmaBackups"
                 meta: svc.backupRunning
                   ? (Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%")
-                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready") : "No backup disk yet")
+                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  beta 0.9.1") : "beta 0.9.1  ·  no backup disk yet")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -349,7 +349,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "Skip folders, terminal, erase disk"
+              meta: "beta 0.9.1  ·  skip folders, terminal, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -358,6 +358,14 @@ Panel {
               text: "SKIP"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+            Text {
+              visible: svc.skipCount === 0
+              width: parent.width
+              text: "Nothing skipped yet."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
             }
             Text {
               width: parent.width

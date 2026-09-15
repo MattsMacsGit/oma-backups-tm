@@ -72,8 +72,8 @@ import sys
 sys.path.insert(0, sys.argv[1] + "/lib")
 import patch_boot_cmdline as p
 old = "cryptdevice=PARTUUID=aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee:root resume= resume_offset=1"
-new = p.patch_text(old, "7e0a055c-ad29-401c-a984-672de32f8db3")
-assert "7e0a055c-ad29-401c-a984-672de32f8db3" in new
+new = p.patch_text(old, "00000000-1111-2222-3333-444444444444")
+assert "00000000-1111-2222-3333-444444444444" in new
 assert "aaaaaaaa" not in new
 assert "resume" not in new
 PY

@@ -11,7 +11,7 @@ source "$OMARCHY_TM_ROOT/lib/install-rescue.sh"
 
 usage() {
   cat <<'EOF'
-Usage: omarchy-tm format-disk /dev/sdX [--dry-run] [--yes] [--force] [--skip-live]
+Usage: oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--force] [--skip-live]
 
 GPT:
   1. ~1G FAT32   OMARCHY-EFI    UEFI ESP (Limine + Arch ISO kernel)
@@ -152,7 +152,7 @@ if is_dry_run; then
 [dry-run] cryptsetup open $P3 ${LUKS_MAPPER}
 [dry-run] mkfs.btrfs -L ${TM_LABEL} /dev/mapper/${LUKS_MAPPER}
 [dry-run] extract official Arch ISO onto $P2; limine-install $DISK
-[dry-run] mkdir ${MNT}/{meta,os,home,esp,files/restic}
+[dry-run] mkdir ${MNT}/{meta,os,home,esp}
 EOF
   echo "No changes made."
   exit 0
@@ -242,7 +242,7 @@ install_live() {
 if [[ $SKIP_LIVE != 1 ]]; then
   install_live
 else
-  EFI_MNT=/run/omarchy-tm-efi
+  EFI_MNT=/run/omarchy-backups-efi
   mkdir -p "$EFI_MNT"
   mount "$P1" "$EFI_MNT"
   cp "$OMARCHY_TM_ROOT/share/RESTORE.txt" "$EFI_MNT/RESTORE.txt"
@@ -253,5 +253,5 @@ sync
 run umount "$MNT"
 run cryptsetup close "$LUKS_MAPPER"
 
-log "formatted $DISK as a bootable Time Capsule."
-log "Firmware boot this USB for rescue. Next: omarchy-tm mount --disk $DISK && omarchy-tm backup"
+log "formatted $DISK as an OmaBackups USB."
+log "Firmware boot this USB for rescue. Next: oma-backups mount --disk $DISK && oma-backups backup"

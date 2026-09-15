@@ -306,8 +306,8 @@ def kind_tag(d: dict) -> str:
 
 
 def pick_target(disks: list[dict] | None = None) -> dict | None:
-    # Only this backup/rescue stick is omitted. Other USB cards (testrig,
-    # Ventoy, spare disks) stay on the list even if they look "live".
+    # Only this backup/rescue stick is omitted. Other USB disks (installer
+    # sticks, extra cards) stay on the list even if they look "live".
     hidden_kinds = {"backup-usb"}
     while True:
         settle_block_devices()
