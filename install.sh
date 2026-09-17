@@ -3,12 +3,20 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+export OMARCHY_TM_ROOT="$ROOT"
+# shellcheck source=lib/common.sh
+source "$ROOT/lib/common.sh"
+
 BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/oma-backups"
 PLUGIN="$HOME/.config/omarchy/plugins/oma.backups"
 CFG="$HOME/.config/omarchy-backups"
 
 mkdir -p "$BINDIR" "$CFG" "$(dirname "$PLUGIN")" "$(dirname "$SHARE")"
+
+echo "Checking dependencies..."
+ensure_deps rsync btrfs cryptsetup mkfs.fat mkfs.ext4 sgdisk curl \
+  unsquashfs mksquashfs jq lsblk wipefs sfdisk
 
 COPY=0
 [[ ${1:-} == --copy ]] && COPY=1

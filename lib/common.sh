@@ -63,6 +63,55 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || die "missing command: $1"
 }
 
+# Command -> pacman package, for auto-install. Commands not listed here
+# fall back to using the command name itself as the package name.
+declare -A OMARCHY_TM_PKG_OF=(
+  [btrfs]=btrfs-progs
+  [mkfs.btrfs]=btrfs-progs
+  [cryptsetup]=cryptsetup
+  [mkfs.fat]=dosfstools
+  [mkfs.ext4]=e2fsprogs
+  [rsync]=rsync
+  [sfdisk]=util-linux
+  [lsblk]=util-linux
+  [wipefs]=util-linux
+  [sgdisk]=gptfdisk
+  [curl]=curl
+  [unsquashfs]=squashfs-tools
+  [mksquashfs]=squashfs-tools
+  [jq]=jq
+  [pv]=pv
+  [arch-chroot]=arch-install-scripts
+)
+
+# Ensure each named command is present, auto-installing its pacman package
+# (via sudo if not already root) when it is missing. This is the product's
+# job, not the user's — never tell someone to go run pacman themselves.
+# Dies with a clear message if the install attempt itself fails (no
+# network, renamed package, etc.) rather than silently continuing.
+ensure_deps() {
+  local missing=() pkgs=() c
+  for c in "$@"; do
+    command -v "$c" >/dev/null 2>&1 || missing+=("$c")
+  done
+  [[ ${#missing[@]} -eq 0 ]] && return 0
+  for c in "${missing[@]}"; do
+    pkgs+=("${OMARCHY_TM_PKG_OF[$c]:-$c}")
+  done
+  mapfile -t pkgs < <(printf '%s\n' "${pkgs[@]}" | sort -u)
+  log "installing missing packages: ${pkgs[*]} (for: ${missing[*]})"
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    pacman -S --needed --noconfirm "${pkgs[@]}" ||
+      die "could not install ${pkgs[*]} — check network/pacman and re-run"
+  else
+    sudo pacman -S --needed --noconfirm "${pkgs[@]}" ||
+      die "could not install ${pkgs[*]} — check network/pacman and re-run"
+  fi
+  for c in "${missing[@]}"; do
+    command -v "$c" >/dev/null 2>&1 || die "still missing after install attempt: $c"
+  done
+}
+
 mnt_is_ro() {
   local opts
   opts="$(findmnt -n -o OPTIONS "$1" 2>/dev/null || true)"

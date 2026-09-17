@@ -41,6 +41,7 @@ arch_iso_cache_path() {
 
 ensure_arch_iso() {
   local iso dest dir sums want got
+  ensure_deps curl
   iso="$(arch_iso_cache_path)"
   if [[ -f $iso && -s $iso ]]; then
     printf '%s\n' "$iso"
@@ -132,8 +133,7 @@ patch_airootfs() {
   local sfs="$live/arch/x86_64/airootfs.sfs"
   local work launch
   [[ -f $sfs ]] || die "missing $sfs"
-  need_cmd unsquashfs
-  need_cmd mksquashfs
+  ensure_deps unsquashfs mksquashfs
   rescue_umask
   launch="$OMARCHY_TM_ROOT/share/oma-rescue-launch.sh"
   [[ -f $launch ]] || die "missing $launch"
