@@ -191,6 +191,13 @@ run btrfs subvolume create "$NEW_ROOT/@"
 run btrfs subvolume create "$NEW_ROOT/@home"
 run btrfs subvolume create "$NEW_ROOT/@log"
 run btrfs subvolume create "$NEW_ROOT/@pkg"
+# @log and @pkg are never rsynced from the backup (regenerable caches), so
+# unlike @ and @home they never inherit real permissions from the source
+# system. A bare `btrfs subvolume create` can leave them 0700 root:root,
+# which breaks pacman's DownloadUser=alpm sandbox (needs 'other' rx into
+# the pkg cache) on every restored system until someone notices. Match a
+# normal install.
+chmod 755 "$NEW_ROOT/@log" "$NEW_ROOT/@pkg"
 
 log "rsync OS snapshot"
 rsync -aHAX --numeric-ids --info=progress2 --delete \
