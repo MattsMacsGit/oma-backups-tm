@@ -112,19 +112,26 @@ EOF
 
 ask_new_luks_pass() {
   local tty=/dev/tty
-  [[ -r $tty && -w $tty ]] || die "need a real terminal to set the disk encryption password"
-  {
-    echo
-    echo "============================================================"
-    echo " NEW encryption password for this backup disk"
-    echo " (not your login password — you will need this to restore)"
-    echo "============================================================"
-  } >"$tty"
   local p1="" p2=""
-  read -r -s -p "Encryption password: " p1 <"$tty" || true
-  echo >"$tty"
-  read -r -s -p "Confirm password:    " p2 <"$tty" || true
-  echo >"$tty"
+  if [[ -r $tty && -w $tty ]]; then
+    {
+      echo
+      echo "============================================================"
+      echo " NEW encryption password for this backup disk"
+      echo " (not your login password — you will need this to restore)"
+      echo "============================================================"
+    } >"$tty"
+    read -r -s -p "Encryption password: " p1 <"$tty" || true
+    echo >"$tty"
+    read -r -s -p "Confirm password:    " p2 <"$tty" || true
+    echo >"$tty"
+  else
+    # No controlling terminal (plugin-driven run with "show terminal" off)
+    # — the plugin prompts for the password itself and sends it over
+    # stdin instead, two lines: password, confirm.
+    IFS= read -r p1 || true
+    IFS= read -r p2 || true
+  fi
   [[ -n $p1 && $p1 == "$p2" ]] || die "passwords empty or did not match — disk was NOT erased"
   LUKS_PASS="$p1"
   p1="" p2=""
@@ -132,6 +139,7 @@ ask_new_luks_pass() {
 
 if ! is_dry_run; then
   confirm "Wipe $DISK and write a bootable Time Capsule?"
+  progress phase "waiting-input"
   ask_new_luks_pass
 fi
 

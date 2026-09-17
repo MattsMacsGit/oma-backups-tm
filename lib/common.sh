@@ -483,6 +483,25 @@ clear_pid() {
   rm -f "$(pid_file)"
 }
 
+# Marks whether the last backup attempt ran to completion. Set once a
+# backup genuinely starts (write_pid time); cleared only on a clean
+# finish. Lets the plugin offer "Resume backup" instead of "Backup now"
+# after a stop/crash/interruption, without guessing from status alone.
+incomplete_flag() {
+  printf '%s\n' "$OMARCHY_TM_STATE/incomplete"
+}
+
+mark_incomplete() {
+  local f
+  f="$(incomplete_flag)"
+  touch "$f" 2>/dev/null || true
+  chmod 644 "$f" 2>/dev/null || true
+}
+
+clear_incomplete() {
+  rm -f "$(incomplete_flag)"
+}
+
 kill_tree() {
   local p=$1 c
   [[ -n $p ]] || return 0
@@ -517,10 +536,12 @@ stop_backup() {
 
 status_json() {
   local f="${OMARCHY_TM_STATUS_FILE:-/run/omarchy-backups.status}"
-  local pidf pid raw
+  local pidf pid raw incomplete
   pidf="$(pid_file)"
   pid=""
   [[ -f $pidf ]] && pid="$(tr -d '[:space:]' <"$pidf")"
+  incomplete=false
+  [[ -f $(incomplete_flag) ]] && incomplete=true
   if [[ -f $f ]]; then
     raw="$(cat "$f" 2>/dev/null || true)"
   else
@@ -528,18 +549,20 @@ status_json() {
   fi
   if printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
     if [[ -n $pid ]] && pid_alive "$pid"; then
-      printf '%s\n' "$raw" | jq -c --arg pid "$pid" '.pid=$pid | .stale=false'
+      printf '%s\n' "$raw" | jq -c --arg pid "$pid" --argjson incomplete "$incomplete" \
+        '.pid=$pid | .stale=false | .incomplete=$incomplete'
       return 0
     fi
-    printf '%s\n' "$raw" | jq -c '.running=false | .stale=true | .pid=null'
+    printf '%s\n' "$raw" | jq -c --argjson incomplete "$incomplete" \
+      '.running=false | .stale=true | .pid=null | .incomplete=$incomplete'
     return 0
   fi
   if [[ -n $pid ]] && pid_alive "$pid"; then
-    jq -n -c --arg line "$raw" --arg pid "$pid" \
-      '{running:true, phase:"unknown", percent:0, speed:"", eta:"", line:$line, pid:$pid, stale:false}'
+    jq -n -c --arg line "$raw" --arg pid "$pid" --argjson incomplete "$incomplete" \
+      '{running:true, phase:"unknown", percent:0, speed:"", eta:"", line:$line, pid:$pid, stale:false, incomplete:$incomplete}'
   else
-    jq -n -c --arg line "$raw" \
-      '{running:false, phase:"idle", percent:0, speed:"", eta:"", line:$line, stale:true}'
+    jq -n -c --arg line "$raw" --argjson incomplete "$incomplete" \
+      '{running:false, phase:"idle", percent:0, speed:"", eta:"", line:$line, stale:true, incomplete:$incomplete}'
   fi
 }
 

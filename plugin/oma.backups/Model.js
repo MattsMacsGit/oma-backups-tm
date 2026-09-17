@@ -76,6 +76,7 @@ function phaseLabel(phase) {
   if (p === "finalize") return "Finish"
   if (p === "unlock") return "Unlock"
   if (p === "setup") return "Setting up USB"
+  if (p === "waiting-input") return "Waiting for you — enter the new disk password"
   if (p === "error") return "Failed"
   if (p === "done") return "Done"
   return p || "Backup"

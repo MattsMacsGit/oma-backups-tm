@@ -187,30 +187,30 @@ Panel {
               }
             }
 
+            Button {
+              width: parent.width
+              visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
+              text: svc.backupIncomplete ? "Resume backup" : "Backup now"
+              foreground: Color.background
+              background: Color.accent
+              accent: Color.accent
+              fontFamily: root.fontFamily
+              onClicked: svc.startBackup()
+            }
+            Button {
+              width: parent.width
+              visible: svc.backupRunning || svc.launchedBackup
+              text: "Stop backup"
+              foreground: root.urgent
+              bordered: true
+              fontFamily: root.fontFamily
+              onClicked: svc.stopBackup()
+            }
+
             Column {
-              visible: svc.hasCapsule
+              visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
               width: parent.width
               spacing: Style.space(10)
-
-              Button {
-                width: parent.width
-                visible: !svc.backupRunning && !svc.launchedBackup
-                text: "Backup now"
-                foreground: Color.background
-                background: Color.accent
-                accent: Color.accent
-                fontFamily: root.fontFamily
-                onClicked: svc.startBackup()
-              }
-              Button {
-                width: parent.width
-                visible: svc.backupRunning || svc.launchedBackup
-                text: "Stop backup"
-                foreground: root.urgent
-                bordered: true
-                fontFamily: root.fontFamily
-                onClicked: svc.stopBackup()
-              }
 
               PanelSectionHeader {
                 text: svc.snapshotCount ? ("RESTORE POINTS  ·  " + svc.snapshotCount) : "RESTORE POINTS"
@@ -281,7 +281,7 @@ Panel {
             }
 
             Column {
-              visible: !svc.hasCapsule
+              visible: !svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
               width: parent.width
               spacing: Style.space(10)
               Text {
@@ -319,6 +319,43 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
               }
+              Column {
+                visible: svc.wipeConfirmed && !svc.showTerminal
+                width: parent.width
+                spacing: Style.space(6)
+                Text {
+                  width: parent.width
+                  text: "New encryption password for this disk (not your login password)"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                TextField {
+                  id: newPass1
+                  width: parent.width
+                  password: true
+                  placeholderText: "Encryption password"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+                TextField {
+                  id: newPass2
+                  width: parent.width
+                  password: true
+                  placeholderText: "Confirm password"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+                Text {
+                  visible: newPass1.text.length > 0 && newPass2.text.length > 0 && newPass1.text !== newPass2.text
+                  width: parent.width
+                  text: "Passwords don't match"
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
               Button {
                 width: parent.width
                 text: "Erase USB and start first backup"
@@ -326,8 +363,14 @@ Panel {
                 background: Color.accent
                 accent: Color.accent
                 enabled: !svc.backupRunning && svc.selectedDisk !== "" && svc.wipeConfirmed
+                  && (svc.showTerminal || (newPass1.text.length > 0 && newPass1.text === newPass2.text))
                 fontFamily: root.fontFamily
-                onClicked: svc.startFirstRun(svc.selectedDisk)
+                onClicked: {
+                  var pass = svc.showTerminal ? "" : newPass1.text
+                  svc.startFirstRun(svc.selectedDisk, pass)
+                  newPass1.text = ""
+                  newPass2.text = ""
+                }
               }
             }
           }
@@ -508,14 +551,57 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
               }
+              Column {
+                visible: svc.wipeConfirmed && !svc.showTerminal
+                width: parent.width
+                spacing: Style.space(6)
+                Text {
+                  width: parent.width
+                  text: "New encryption password for this disk (not your login password)"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                TextField {
+                  id: startOverPass1
+                  width: parent.width
+                  password: true
+                  placeholderText: "Encryption password"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+                TextField {
+                  id: startOverPass2
+                  width: parent.width
+                  password: true
+                  placeholderText: "Confirm password"
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                }
+                Text {
+                  visible: startOverPass1.text.length > 0 && startOverPass2.text.length > 0 && startOverPass1.text !== startOverPass2.text
+                  width: parent.width
+                  text: "Passwords don't match"
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+              }
               Button {
                 width: parent.width
                 text: "Erase USB and start over"
                 foreground: root.urgent
                 bordered: true
                 enabled: !svc.backupRunning && svc.wipeConfirmed && svc.selectedDisk !== ""
+                  && (svc.showTerminal || (startOverPass1.text.length > 0 && startOverPass1.text === startOverPass2.text))
                 fontFamily: root.fontFamily
-                onClicked: svc.startFirstRun(svc.selectedDisk)
+                onClicked: {
+                  var pass = svc.showTerminal ? "" : startOverPass1.text
+                  svc.startFirstRun(svc.selectedDisk, pass)
+                  startOverPass1.text = ""
+                  startOverPass2.text = ""
+                }
               }
             }
           }

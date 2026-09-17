@@ -159,6 +159,8 @@ on_backup_exit() {
   clear_pid
   if [[ $rc -ne 0 ]]; then
     progress idle
+  else
+    clear_incomplete
   fi
 }
 
@@ -191,6 +193,7 @@ cmd_backup() {
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
 
   write_pid
+  mark_incomplete
   trap on_backup_exit EXIT INT TERM
   progress phase "snapshot"
 

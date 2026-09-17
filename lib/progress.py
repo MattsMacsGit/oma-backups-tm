@@ -29,6 +29,7 @@ PHASE_LABEL = {
     "snapshot": "Snapshot",
     "unlock": "Unlock",
     "setup": "Setting up USB",
+    "waiting-input": "Waiting for you — enter the new disk password",
     "finalize": "Finish",
 }
 

@@ -28,6 +28,7 @@ Item {
   property bool wipeConfirmed: false
   property bool showTerminal: true
   property bool skipLoaded: false
+  property bool backupIncomplete: false
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string cli: home + "/.local/bin/oma-backups"
@@ -187,7 +188,9 @@ Item {
     compileProc.running = true
   }
 
-  function startFirstRun(disk) {
+  property string _pendingNewPass: ""
+
+  function startFirstRun(disk, newPass) {
     if (!disk) {
       lastError = "Pick a disk first"
       return
@@ -196,12 +199,17 @@ Item {
       lastError = "Confirm that this will erase the disk"
       return
     }
+    if (!root.showTerminal && !newPass) {
+      lastError = "Enter the new disk password"
+      return
+    }
     var live = detect && detect.live_root_disk
     if (live && disk === live) {
       lastError = "That is the disk this computer is running from. Plug in the backup USB."
       return
     }
     selectedDisk = disk
+    root._pendingNewPass = newPass || ""
     compileThen("first")
   }
 
@@ -323,6 +331,7 @@ Item {
     } else if (typeof j.running === "boolean") {
       root.backupRunning = j.running
     }
+    if (typeof j.incomplete === "boolean") root.backupIncomplete = j.incomplete
     if (typeof j.percent === "number" || (j.percent && String(j.percent).length))
       root.progressPercent = parseInt(j.percent, 10) || 0
     root.progressEta = j.eta || ""
@@ -368,6 +377,18 @@ Item {
   }
 
   Process { id: persistProc }
+
+  // Only used for first-run when "show terminal" is off — kept as a live
+  // (non-detached) process, unlike privileged()'s usual execDetached, so
+  // the new disk password can be written to its stdin. Known tradeoff:
+  // this ties the setup process's lifetime to the plugin instance, unlike
+  // the detached terminal path. Narrow window (only mid first-run), but
+  // real — if the bar restarts mid-setup this process goes with it.
+  Process {
+    id: firstRunProc
+    stdinEnabled: true
+  }
+
   Process {
     id: compileProc
     onExited: function (code) {
@@ -382,7 +403,21 @@ Item {
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        root.privileged(["first-run", disk])
+        if (root.showTerminal) {
+          root.privileged(["first-run", disk])
+        } else {
+          // No visible terminal to type the new disk password into —
+          // send it over this process's own stdin instead. format-disk.sh
+          // falls back to reading stdin when it has no controlling tty.
+          var pass = root._pendingNewPass
+          root._pendingNewPass = ""
+          firstRunProc.command = ["pkexec", "/usr/lib/oma-backups/pkexec-wrapper.sh", "first-run", disk]
+          firstRunProc.running = true
+          Qt.callLater(function () {
+            firstRunProc.write(pass + "\n" + pass + "\n")
+            pass = ""
+          })
+        }
       } else if (root.pendingBackup) {
         root.pendingBackup = false
         root.lastError = ""
