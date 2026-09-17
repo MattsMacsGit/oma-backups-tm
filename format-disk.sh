@@ -64,6 +64,11 @@ need_cmd jq
 if ! is_dry_run; then
   need_cmd mkfs.ext4
   command -v sgdisk >/dev/null || die "need sgdisk (pacman -S gptfdisk)"
+  if [[ $SKIP_LIVE != 1 ]]; then
+    command -v curl >/dev/null || die "need curl (pacman -S curl)"
+    command -v unsquashfs >/dev/null || die "need unsquashfs (pacman -S squashfs-tools)"
+    command -v mksquashfs >/dev/null || die "need mksquashfs (pacman -S squashfs-tools)"
+  fi
 fi
 
 EFI_SIZE="$(cfg '.layout.efi_size')"
