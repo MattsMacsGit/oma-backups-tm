@@ -186,6 +186,7 @@ close_crypt_on_disk "$DISK" || true
 if lsblk -nr -o TYPE "$DISK" | grep -qx crypt; then
   fail_setup "old LUKS volume is still unlocked (Files/GNOME reopened it)"
 fi
+progress set setup 15
 
 # Encrypt FIRST so a later EFI/live failure cannot leave the old volume in place.
 wipe_luks_header "$P3"
@@ -204,6 +205,7 @@ if ! printf '%s' "$LUKS_PASS" | cryptsetup open --key-file=- "$P3" "$LUKS_MAPPER
   fail_setup "could not open the new LUKS volume with the password you just set"
 fi
 unset LUKS_PASS
+progress set setup 22
 run mkfs.btrfs -f -L "$TM_LABEL" "/dev/mapper/${LUKS_MAPPER}"
 mkdir -p "$MNT"
 run mount -o compress=zstd:3 "/dev/mapper/${LUKS_MAPPER}" "$MNT"
@@ -212,9 +214,11 @@ if compgen -G "$MNT/home/20*" >/dev/null || compgen -G "$MNT/os/20*" >/dev/null;
 fi
 run mkdir -p "$MNT/meta" "$MNT/os" "$MNT/home" "$MNT/esp"
 chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || true
+progress set setup 30
 
 run mkfs.fat -F32 -n "$EFI_LABEL" "$P1"
 run mkfs.ext4 -F -L "$LIVE_LABEL" "$P2"
+progress set setup 35
 
 install_live() {
   need_cmd curl
@@ -243,6 +247,7 @@ else
   cp "$OMARCHY_TM_ROOT/share/RESTORE.txt" "$EFI_MNT/RESTORE.txt"
   umount "$EFI_MNT"
 fi
+progress set setup 100
 
 sync
 run umount "$MNT"

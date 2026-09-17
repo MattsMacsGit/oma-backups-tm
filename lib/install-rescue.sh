@@ -73,8 +73,10 @@ extract_arch_iso() {
   local live=$1
   local iso loop
   rescue_umask
+  progress set setup 40
   iso="$(ensure_arch_iso | tail -n 1)"
   [[ -f $iso ]] || die "Arch ISO not found ($iso)"
+  progress set setup 55
   loop=$(mktemp -d /run/oma-archiso-XXXXXX)
   mount -o loop,ro "$iso" "$loop"
   [[ -d $loop/arch ]] || { umount "$loop"; rmdir "$loop"; die "ISO has no /arch — not an Arch ISO"; }
@@ -83,6 +85,7 @@ extract_arch_iso() {
   umount "$loop"
   rmdir "$loop"
   [[ -d $live/arch/x86_64 || -d $live/arch/boot ]] || die "extracted ISO missing arch/boot or arch/x86_64"
+  progress set setup 65
   log "official Arch ISO extracted onto LIVE"
 }
 
@@ -139,7 +142,9 @@ patch_airootfs() {
   [[ -f $launch ]] || die "missing $launch"
   work=$(mktemp -d /var/tmp/oma-airoot.XXXXXX)
   log "patching Arch live image with restore launcher (this takes a few minutes)"
+  progress set setup 68
   unsquashfs -f -d "$work" "$sfs" >/dev/null
+  progress set setup 80
   mkdir -p "$work/usr/local/bin" "$work/root"
   cp "$launch" "$work/usr/local/bin/oma-rescue-launch"
   chmod 755 "$work/usr/local/bin/oma-rescue-launch"
@@ -160,6 +165,7 @@ Z
   local newsfs=/var/tmp/oma-airootfs.sfs.new
   rm -f "$newsfs"
   mksquashfs "$work" "$newsfs" -noappend -comp xz -b 1048576 -Xbcj x86
+  progress set setup 92
   mv -f "$newsfs" "$sfs"
   (cd "$live/arch/x86_64" && sha512sum airootfs.sfs >airootfs.sha512)
   rm -rf "$work"
@@ -232,6 +238,7 @@ LIM
     limine-install "$disk" || true
   fi
   [[ -f $efi/EFI/BOOT/BOOTX64.EFI ]] || log "WARNING: no BOOTX64.EFI — USB may not UEFI-boot"
+  progress set setup 99
 }
 
 # Full LIVE+EFI populate used by format-disk and refresh-rescue.
@@ -247,6 +254,7 @@ install_archiso_rescue() {
   patch_airootfs "$live"
   install_rescue_files "$live" "$efi"
   install_rescue_kernel "$live" "$efi"
+  progress set setup 96
 }
 
 # Back-compat names used by format-disk.sh / refresh-rescue.sh
