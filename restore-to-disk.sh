@@ -290,7 +290,7 @@ fi
 umount "$NEW_ROOT"
 mkdir -p "$NEW_ROOT"
 run mount -o subvol=@,compress=zstd:3 "/dev/mapper/$MAPPER" "$NEW_ROOT"
-mkdir -p "$NEW_ROOT/home" "$NEW_ROOT/var/log" "$NEW_ROOT/var/cache/pacman/pkg" "$NEW_ROOT/boot"
+mkdir -p "$NEW_ROOT/home" "$NEW_ROOT/var/log" "$NEW_ROOT/var/cache/pacman/pkg" "$NEW_ROOT/boot" "$NEW_ROOT/tmp"
 run mount -o subvol=@home,compress=zstd:3 "/dev/mapper/$MAPPER" "$NEW_ROOT/home"
 run mount -o subvol=@log,compress=zstd:3 "/dev/mapper/$MAPPER" "$NEW_ROOT/var/log"
 run mount -o subvol=@pkg,compress=zstd:3 "/dev/mapper/$MAPPER" "$NEW_ROOT/var/cache/pacman/pkg"
