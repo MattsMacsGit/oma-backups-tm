@@ -27,9 +27,13 @@ fi
 
 if [[ -d /etc/omarchy-backups ]]; then
   echo "Removing /etc/omarchy-backups (needs sudo)..."
-  sudo rm -rf /etc/omarchy-backups
+  sudo rm -rf /etc/omarchy-backups ||
+    echo "  could not remove it — remove yourself: sudo rm -rf /etc/omarchy-backups"
 fi
-[[ -d /var/log/omarchy-backups ]] && sudo rm -rf /var/log/omarchy-backups 2>/dev/null || true
+if [[ -d /var/log/omarchy-backups ]]; then
+  sudo rm -rf /var/log/omarchy-backups 2>/dev/null ||
+    echo "  could not remove /var/log/omarchy-backups — remove yourself: sudo rm -rf /var/log/omarchy-backups"
+fi
 
 if [[ $PURGE == 1 ]]; then
   rm -rf "$CFG"
