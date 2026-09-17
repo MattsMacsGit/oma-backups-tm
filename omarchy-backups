@@ -145,6 +145,10 @@ case "$cmd" in
     if ! "$OMARCHY_TM_ROOT/format-disk.sh" "$disk" --yes --force; then
       "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" fail "USB setup failed" || true
       echo "Setup failed. Existing backups were not wiped. Not starting a backup."
+      # format-disk.sh can die() before it reaches its own "press enter" pause
+      # (e.g. a missing dependency) — pause here too, or the plugin's terminal
+      # closes before the error above is readable.
+      [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
       exit 130
     fi
     echo "Disk is re-encrypted. Unlock it with the NEW password only."

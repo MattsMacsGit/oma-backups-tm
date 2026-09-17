@@ -340,6 +340,9 @@ def tools() -> dict:
         "pv",
         "sgdisk",
         "arch-chroot",
+        "curl",
+        "unsquashfs",
+        "mksquashfs",
     ]
     return {n: bool(_which(n)) for n in names}
 
@@ -483,8 +486,18 @@ def detect() -> dict:
     machine_id = (_read("/etc/machine-id") or "").strip()
     hostname = (_read("/etc/hostname") or os.uname().nodename).strip()
 
-    missing_tools = [k for k, v in tools().items() if not v and k in {"btrfs", "cryptsetup", "mkfs.btrfs", "mkfs.fat", "rsync", "sfdisk"}]
-    optional_missing = [k for k, v in tools().items() if not v and k in {"pv", "sgdisk", "arch-chroot"}]
+    # sgdisk/curl/unsquashfs/mksquashfs are hard requirements of format-disk.sh's
+    # default (non---skip-live) path — see lib/install-rescue.sh need_cmd calls
+    # and format-disk.sh's own `command -v sgdisk` check. Not installed by a
+    # base Omarchy system, so this must be required, not merely recommended.
+    missing_tools = [
+        k
+        for k, v in tools().items()
+        if not v
+        and k in {"btrfs", "cryptsetup", "mkfs.btrfs", "mkfs.fat", "rsync", "sfdisk", "sgdisk", "curl", "unsquashfs", "mksquashfs"}
+    ]
+    # pv is cosmetic (progress bar); arch-chroot is only used by restore-to-disk.sh.
+    optional_missing = [k for k, v in tools().items() if not v and k in {"pv", "arch-chroot"}]
 
     snapshots = []
     backup_mounted = False
@@ -635,12 +648,19 @@ def print_human(d: dict) -> None:
         )
     print()
     if d["missing_required_tools"]:
+        pkg_of = {
+            "sgdisk": "gptfdisk",
+            "unsquashfs": "squashfs-tools",
+            "mksquashfs": "squashfs-tools",
+        }
+        pkgs = sorted({pkg_of.get(t, t) for t in d["missing_required_tools"]})
         print("Missing required tools:", ", ".join(d["missing_required_tools"]))
+        print("  install with: sudo pacman -S", " ".join(pkgs))
     if d["missing_optional_tools"]:
         print(
             "Missing optional tools:",
             ", ".join(d["missing_optional_tools"]),
-            "  (pv/sgdisk/arch-chroot recommended)",
+            "  (pv/arch-chroot recommended)",
         )
     if d["warnings"]:
         print("Warnings:")
