@@ -43,10 +43,12 @@ fi
 
 if command -v omarchy >/dev/null; then
   omarchy plugin validate "$PLUGIN" || true
-  omarchy plugin enable oma.backups || true
 fi
 if command -v omarchy-shell >/dev/null; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
+fi
+if command -v omarchy >/dev/null; then
+  omarchy plugin enable oma.backups || true
 fi
 
 case ":$PATH:" in
