@@ -337,7 +337,7 @@ Panel {
                   password: true
                   placeholderText: "Encryption password"
                   foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  font.family: root.fontFamily
                 }
                 TextField {
                   id: newPass2
@@ -345,7 +345,7 @@ Panel {
                   password: true
                   placeholderText: "Confirm password"
                   foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  font.family: root.fontFamily
                 }
                 Text {
                   visible: newPass1.text.length > 0 && newPass2.text.length > 0 && newPass1.text !== newPass2.text
@@ -569,7 +569,7 @@ Panel {
                   password: true
                   placeholderText: "Encryption password"
                   foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  font.family: root.fontFamily
                 }
                 TextField {
                   id: startOverPass2
@@ -577,7 +577,7 @@ Panel {
                   password: true
                   placeholderText: "Confirm password"
                   foreground: root.foreground
-                  fontFamily: root.fontFamily
+                  font.family: root.fontFamily
                 }
                 Text {
                   visible: startOverPass1.text.length > 0 && startOverPass2.text.length > 0 && startOverPass1.text !== startOverPass2.text
