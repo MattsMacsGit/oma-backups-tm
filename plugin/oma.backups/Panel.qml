@@ -319,43 +319,6 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
               }
-              Column {
-                visible: svc.wipeConfirmed && !svc.showTerminal
-                width: parent.width
-                spacing: Style.space(6)
-                Text {
-                  width: parent.width
-                  text: "New encryption password for this disk (not your login password)"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
-                }
-                TextField {
-                  id: newPass1
-                  width: parent.width
-                  password: true
-                  placeholderText: "Encryption password"
-                  foreground: root.foreground
-                  font.family: root.fontFamily
-                }
-                TextField {
-                  id: newPass2
-                  width: parent.width
-                  password: true
-                  placeholderText: "Confirm password"
-                  foreground: root.foreground
-                  font.family: root.fontFamily
-                }
-                Text {
-                  visible: newPass1.text.length > 0 && newPass2.text.length > 0 && newPass1.text !== newPass2.text
-                  width: parent.width
-                  text: "Passwords don't match"
-                  color: root.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
               Button {
                 width: parent.width
                 text: "Erase USB and start first backup"
@@ -363,14 +326,8 @@ Panel {
                 background: Color.accent
                 accent: Color.accent
                 enabled: !svc.backupRunning && svc.selectedDisk !== "" && svc.wipeConfirmed
-                  && (svc.showTerminal || (newPass1.text.length > 0 && newPass1.text === newPass2.text))
                 fontFamily: root.fontFamily
-                onClicked: {
-                  var pass = svc.showTerminal ? "" : newPass1.text
-                  svc.startFirstRun(svc.selectedDisk, pass)
-                  newPass1.text = ""
-                  newPass2.text = ""
-                }
+                onClicked: svc.startFirstRun(svc.selectedDisk)
               }
             }
           }
@@ -481,16 +438,6 @@ Panel {
 
             Toggle {
               width: parent.width
-              label: "Show backup terminal"
-              description: "Shows sudo and the encryption password prompt."
-              checked: svc.showTerminal
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.showTerminal = !svc.showTerminal
-            }
-
-            Toggle {
-              width: parent.width
               label: "Show all disks"
               description: "Includes internal drives. Easy to wipe the computer’s own disk."
               checked: svc.showAllDisks
@@ -551,57 +498,14 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
               }
-              Column {
-                visible: svc.wipeConfirmed && !svc.showTerminal
-                width: parent.width
-                spacing: Style.space(6)
-                Text {
-                  width: parent.width
-                  text: "New encryption password for this disk (not your login password)"
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  wrapMode: Text.WordWrap
-                }
-                TextField {
-                  id: startOverPass1
-                  width: parent.width
-                  password: true
-                  placeholderText: "Encryption password"
-                  foreground: root.foreground
-                  font.family: root.fontFamily
-                }
-                TextField {
-                  id: startOverPass2
-                  width: parent.width
-                  password: true
-                  placeholderText: "Confirm password"
-                  foreground: root.foreground
-                  font.family: root.fontFamily
-                }
-                Text {
-                  visible: startOverPass1.text.length > 0 && startOverPass2.text.length > 0 && startOverPass1.text !== startOverPass2.text
-                  width: parent.width
-                  text: "Passwords don't match"
-                  color: root.urgent
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                }
-              }
               Button {
                 width: parent.width
                 text: "Erase USB and start over"
                 foreground: root.urgent
                 bordered: true
                 enabled: !svc.backupRunning && svc.wipeConfirmed && svc.selectedDisk !== ""
-                  && (svc.showTerminal || (startOverPass1.text.length > 0 && startOverPass1.text === startOverPass2.text))
                 fontFamily: root.fontFamily
-                onClicked: {
-                  var pass = svc.showTerminal ? "" : startOverPass1.text
-                  svc.startFirstRun(svc.selectedDisk, pass)
-                  startOverPass1.text = ""
-                  startOverPass2.text = ""
-                }
+                onClicked: svc.startFirstRun(svc.selectedDisk)
               }
             }
           }

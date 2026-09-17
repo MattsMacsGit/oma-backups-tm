@@ -26,7 +26,6 @@ Item {
   property string selectedDisk: ""
   property bool showAllDisks: false
   property bool wipeConfirmed: false
-  property bool showTerminal: true
   property bool skipLoaded: false
   property bool backupIncomplete: false
 
@@ -86,12 +85,11 @@ Item {
   readonly property int skipCount: skipListModel.count
 
   function privileged(args) {
-    var cmd
-    if (root.showTerminal) {
-      cmd = ["omarchy-launch-floating-terminal-with-presentation", "sudo", root.cli].concat(args)
-    } else {
-      cmd = ["pkexec", "/usr/lib/oma-backups/pkexec-wrapper.sh"].concat(args)
-    }
+    // Always a visible terminal: sudo/pkexec's own auth prompt (password
+    // or fingerprint) happens before our code even runs, so a hidden
+    // pkexec route can't show progress for it either way — the terminal
+    // is the one place that prompt is actually visible.
+    var cmd = ["omarchy-launch-floating-terminal-with-presentation", "sudo", root.cli].concat(args)
     Quickshell.execDetached(cmd)
   }
 
@@ -188,9 +186,7 @@ Item {
     compileProc.running = true
   }
 
-  property string _pendingNewPass: ""
-
-  function startFirstRun(disk, newPass) {
+  function startFirstRun(disk) {
     if (!disk) {
       lastError = "Pick a disk first"
       return
@@ -199,17 +195,12 @@ Item {
       lastError = "Confirm that this will erase the disk"
       return
     }
-    if (!root.showTerminal && !newPass) {
-      lastError = "Enter the new disk password"
-      return
-    }
     var live = detect && detect.live_root_disk
     if (live && disk === live) {
       lastError = "That is the disk this computer is running from. Plug in the backup USB."
       return
     }
     selectedDisk = disk
-    root._pendingNewPass = newPass || ""
     compileThen("first")
   }
 
@@ -378,17 +369,6 @@ Item {
 
   Process { id: persistProc }
 
-  // Only used for first-run when "show terminal" is off — kept as a live
-  // (non-detached) process, unlike privileged()'s usual execDetached, so
-  // the new disk password can be written to its stdin. Known tradeoff:
-  // this ties the setup process's lifetime to the plugin instance, unlike
-  // the detached terminal path. Narrow window (only mid first-run), but
-  // real — if the bar restarts mid-setup this process goes with it.
-  Process {
-    id: firstRunProc
-    stdinEnabled: true
-  }
-
   Process {
     id: compileProc
     onExited: function (code) {
@@ -403,21 +383,7 @@ Item {
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        if (root.showTerminal) {
-          root.privileged(["first-run", disk])
-        } else {
-          // No visible terminal to type the new disk password into —
-          // send it over this process's own stdin instead. format-disk.sh
-          // falls back to reading stdin when it has no controlling tty.
-          var pass = root._pendingNewPass
-          root._pendingNewPass = ""
-          firstRunProc.command = ["pkexec", "/usr/lib/oma-backups/pkexec-wrapper.sh", "first-run", disk]
-          firstRunProc.running = true
-          Qt.callLater(function () {
-            firstRunProc.write(pass + "\n" + pass + "\n")
-            pass = ""
-          })
-        }
+        root.privileged(["first-run", disk])
       } else if (root.pendingBackup) {
         root.pendingBackup = false
         root.lastError = ""

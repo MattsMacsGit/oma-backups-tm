@@ -74,7 +74,7 @@ The intended path is **booting the USB**.
 ## UI
 
 - **Home:** last copy, Backup now / Stop, last 5 restore points, **More**, gear
-- **Settings:** skip list, show terminal, show all disks, erase / start over
+- **Settings:** skip list, show all disks, erase / start over
 
 Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Compiled into rsync
 excludes at the start of **every** backup.

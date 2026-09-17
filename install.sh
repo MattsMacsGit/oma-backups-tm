@@ -74,7 +74,4 @@ OmaBackups installed.
 
 Open the bar icon. Plug in a USB disk. The panel walks you through setup.
 Full restore: firmware-boot that USB (Limine entry “OmaBackups Restore”).
-
-Optional (hides the sudo terminal; uses polkit instead):
-  sudo $SHARE/install-polkit.sh
 EOF
