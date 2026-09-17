@@ -463,7 +463,12 @@ pid_file() {
 pid_alive() {
   local pid=${1:-}
   [[ -n $pid && $pid =~ ^[0-9]+$ ]] || return 1
-  kill -0 "$pid" 2>/dev/null
+  # /proc existence, not kill -0: the backup runs as root (via sudo), but
+  # this is also called unprivileged by the plugin's status poll — kill -0
+  # against a root-owned pid from a non-root caller fails with EPERM even
+  # when the process is alive, which made status_json report "stale" for
+  # the entire duration of every real backup.
+  [[ -d /proc/$pid ]]
 }
 
 write_pid() {

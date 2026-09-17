@@ -292,10 +292,20 @@ Item {
     try { j = JSON.parse(raw) } catch (e) { return }
     if (!j || typeof j !== "object") return
     if (j.phase === "error") {
-      root.backupRunning = false
-      root.launchedBackup = false
-      root.sawBackupStatus = false
-      if (j.line) root.lastError = String(j.line)
+      // If we just launched this attempt and haven't seen it report
+      // running yet, an "error" here is leftover from a *previous*,
+      // unrelated failure that hasn't been overwritten on disk yet (e.g.
+      // the sudo/fingerprint-auth window before backup.sh writes its own
+      // first status) — not a failure of this attempt. Ignore it rather
+      // than tearing down state we just set.
+      if (root.launchedBackup && !root.sawBackupStatus) {
+        // stale leftover — ignore
+      } else {
+        root.backupRunning = false
+        root.launchedBackup = false
+        root.sawBackupStatus = false
+        if (j.line) root.lastError = String(j.line)
+      }
     } else if (j.stale === true) {
       if (root.launchedBackup && j.phase !== "error") root.backupRunning = true
       else if (typeof j.running === "boolean") root.backupRunning = false
