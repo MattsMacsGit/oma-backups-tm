@@ -33,6 +33,16 @@ cd ~/src/oma-backups
 
 Open the **OmaBackups** disk icon on the bar. Plug in a USB disk.
 
+## Uninstall
+
+```bash
+~/src/oma-backups/uninstall.sh          # keeps your skip list / settings
+~/src/oma-backups/uninstall.sh --purge  # removes those too
+```
+
+Doesn't touch any backup USB disk, or the cloned repo folder itself — the
+uninstaller just undoes what `install.sh` set up on this account.
+
 Do **not** run `omarchy refresh shell` — that resets the bar and drops
 third-party plugins. If the icon is missing: `omarchy plugin enable oma.backups`
 then `omarchy-restart-shell` (restart is OK; refresh is not).
