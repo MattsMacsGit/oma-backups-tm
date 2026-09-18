@@ -11,8 +11,58 @@ from __future__ import annotations
 
 import os
 import pwd
+import re
 import sys
 from pathlib import Path
+
+# The fixed set of standard XDG user-dir keys (freedesktop.org spec) —
+# NOT every "XDG_*_DIR" key that might appear in user-dirs.dirs. Tools
+# like xdg-user-dirs-update let people add their own custom entries
+# (e.g. XDG_PROJECTS_DIR) alongside the real ones; only these 8 count as
+# "a default folder every fresh install has", never a custom addition.
+XDG_DIR_KEYS = {
+    "XDG_DESKTOP_DIR": "Desktop",
+    "XDG_DOWNLOAD_DIR": "Downloads",
+    "XDG_TEMPLATES_DIR": "Templates",
+    "XDG_PUBLICSHARE_DIR": "Public",
+    "XDG_DOCUMENTS_DIR": "Documents",
+    "XDG_MUSIC_DIR": "Music",
+    "XDG_PICTURES_DIR": "Pictures",
+    "XDG_VIDEOS_DIR": "Videos",
+}
+
+
+def default_xdg_names(home: Path) -> set[str]:
+    """Names of the standard XDG folders (Videos, Pictures, ...) that
+    should exist empty on a restore even if skipped. Always includes the
+    standard English defaults (what a fresh Omarchy/most Linux installs
+    have) as a floor, plus any renamed/localized equivalent found in
+    ~/.config/user-dirs.dirs (non-English systems). A user currently
+    pointing one at "$HOME/" itself (merged/disabled) doesn't remove it
+    from this set — that's about GLib bookmarks, not about whether the
+    folder is still one of the standard categories. Never trusts a
+    custom XDG_*_DIR key that isn't one of the fixed 8 above (people can
+    and do add their own, e.g. XDG_PROJECTS_DIR — not a default)."""
+    names = set(XDG_DIR_KEYS.values())
+    conf = home / ".config" / "user-dirs.dirs"
+    if not conf.is_file():
+        return names
+    try:
+        text = conf.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return names
+    for key, default_name in XDG_DIR_KEYS.items():
+        m = re.search(rf'^{key}="([^"]*)"', text, re.MULTILINE)
+        if not m:
+            continue
+        val = m.group(1).replace("$HOME", str(home))
+        try:
+            rel = Path(val).resolve().relative_to(home.resolve())
+        except (OSError, ValueError):
+            continue
+        if len(rel.parts) == 1 and rel.parts[0] != default_name:
+            names.add(rel.parts[0])
+    return names
 
 
 def repo_root() -> Path:
@@ -58,7 +108,11 @@ def uniq(xs: list[str]) -> list[str]:
     return out
 
 
-def split_paths(paths: list[str], home_root: Path) -> tuple[list[str], list[str]]:
+def split_paths(
+    paths: list[str], home_root: Path, xdg_names: set[str] | None = None
+) -> tuple[list[str], list[str]]:
+    if xdg_names is None:
+        xdg_names = default_xdg_names(user_home())
     home_ex: list[str] = []
     os_ex: list[str] = []
     home_root = home_root.resolve()
@@ -73,14 +127,25 @@ def split_paths(paths: list[str], home_root: Path) -> tuple[list[str], list[str]
             rel_home = resolved.relative_to(home_root)
             rel = str(rel_home).strip("/")
             if rel and rel != ".":
-                # Exclude contents only (not "rel"/"rel/", and not the
-                # "rel/***" shorthand — rsync's manpage: that's equivalent
-                # to "rel/" + "rel/**" combined, i.e. it excludes the
-                # directory entry itself too). A skipped XDG folder like
-                # Videos should still exist empty on the destination, the
-                # way a fresh Linux home has it — file choosers and other
-                # apps expect these well-known dirs to be present.
-                home_ex.append(rel + "/**")
+                parts = rel.split("/")
+                # "<user>/<DefaultDirName>" exactly — a top-level default
+                # XDG folder (Videos, Pictures, ...), not a nested path
+                # inside one and not some other user-created top-level
+                # folder that happens to share a home. Only those get an
+                # empty placeholder restored; anything else the user
+                # skipped is skipped entirely, as expected.
+                if len(parts) == 2 and parts[1] in xdg_names:
+                    # Exclude contents only, not the directory entry
+                    # itself — rsync's manpage: a trailing "***" means
+                    # "the directory and everything inside," so it (and
+                    # a bare/trailing-slash entry) would exclude the
+                    # entry itself too. Keeps the folder present but
+                    # empty, the way a fresh Linux home has it.
+                    home_ex.append(rel + "/**")
+                else:
+                    home_ex.append(rel)
+                    home_ex.append(rel + "/")
+                    home_ex.append(rel + "/***")
             continue
         except ValueError:
             pass
@@ -113,7 +178,7 @@ def compile_from(skip_file: Path | None = None) -> tuple[list[str], list[str], P
     defaults_home = load_paths(root / "share" / "excludes-home.txt")
     defaults_os = load_paths(root / "share" / "excludes-os.txt")
     paths = load_paths(skip_file)
-    user_home_ex, user_os_ex = split_paths(paths, Path("/home"))
+    user_home_ex, user_os_ex = split_paths(paths, Path("/home"), default_xdg_names(home))
     home_ex = uniq(defaults_home + user_home_ex)
     os_ex = uniq(defaults_os + user_os_ex)
 
