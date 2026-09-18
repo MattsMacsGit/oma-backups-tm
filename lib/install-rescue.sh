@@ -193,10 +193,17 @@ install_rescue_kernel() {
 
 install_rescue_limine() {
   local disk=$1 efi=$2
-  local ucode=""
   rescue_umask
-  [[ -f $efi/amd-ucode.img ]] && ucode+=$'\n    module_path: boot():/amd-ucode.img'
-  [[ -f $efi/intel-ucode.img ]] && ucode+=$'\n    module_path: boot():/intel-ucode.img'
+  # Lines, not a single string with an embedded leading newline — the old
+  # "\n    module_path: ..." form always left a stray blank line in the
+  # middle of each entry's property block once concatenated after the
+  # heredoc above it (visible with `cat -A`; happened even with zero
+  # ucode files, since printf '%s\n' "" alone emits a blank line). Whether
+  # or not that's what made Limine's own menu show a phantom duplicate,
+  # it was malformed config either way.
+  local -a ucode_lines=()
+  [[ -f $efi/amd-ucode.img ]] && ucode_lines+=("    module_path: boot():/amd-ucode.img")
+  [[ -f $efi/intel-ucode.img ]] && ucode_lines+=("    module_path: boot():/intel-ucode.img")
   # Real Omarchy live environment (archiso under the hood). script= is
   # archiso automated_script on tty1. Safe entry adds nomodeset if a GPU
   # still blanks the console.
@@ -209,7 +216,7 @@ interface_branding: OmaBackups
 LIM
   # Append ucode + initramfs + cmdline (variable parts).
   {
-    printf '%s\n' "$ucode"
+    ((${#ucode_lines[@]})) && printf '%s\n' "${ucode_lines[@]}"
     cat <<LIM
     module_path: boot():/initramfs-linux.img
     cmdline: archisobasedir=arch archisolabel=OMARCHY-LIVE cms_verify=n
@@ -217,7 +224,7 @@ LIM
     protocol: linux
     path: boot():/vmlinuz-linux
 LIM
-    printf '%s\n' "$ucode"
+    ((${#ucode_lines[@]})) && printf '%s\n' "${ucode_lines[@]}"
     cat <<'LIM'
     module_path: boot():/initramfs-linux.img
     cmdline: archisobasedir=arch archisolabel=OMARCHY-LIVE nomodeset cms_verify=n
