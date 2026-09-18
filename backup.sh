@@ -71,18 +71,21 @@ refresh_excludes_from_user() {
   load_config_json
   EX_HOME="$(cfg '._excludes_home')"
   EX_OS="$(cfg '._excludes_os')"
-  log "skip list:"
-  awk '!/^#/ && NF {print "  home "$0}' "$EX_HOME" 2>/dev/null || true
-  awk '!/^#/ && NF {print "  os   "$0}' "$EX_OS" 2>/dev/null || true
+  local n_home n_os line
+  n_home=$(grep -v '^#' "$EX_HOME" 2>/dev/null | grep -vc '^$')
+  n_os=$(grep -v '^#' "$EX_OS" 2>/dev/null | grep -vc '^$')
+  while IFS= read -r line; do log_file "  home $line"; done < <(grep -v '^#' "$EX_HOME" 2>/dev/null | grep -v '^$')
+  while IFS= read -r line; do log_file "  os   $line"; done < <(grep -v '^#' "$EX_OS" 2>/dev/null | grep -v '^$')
+  step "Skip list: $n_home home, $n_os os entries excluded"
 }
 
 ensure_src_top() {
   mkdir -p "$SRC_TOP"
   if ! findmnt -n "$SRC_TOP" >/dev/null 2>&1; then
-    run mount -o subvolid=5,compress=zstd:3 "$ROOT_DEV" "$SRC_TOP"
+    run_quiet mount -o subvolid=5,compress=zstd:3 "$ROOT_DEV" "$SRC_TOP"
   fi
   if [[ ! -e $SRC_TOP/$SNAP_SUB ]]; then
-    run btrfs subvolume create "$SRC_TOP/$SNAP_SUB"
+    run_quiet btrfs subvolume create "$SRC_TOP/$SNAP_SUB"
   fi
 }
 
@@ -91,14 +94,16 @@ ensure_dest_current() {
   mkdir -p "$MNT/$kind"
   if ! btrfs subvolume show "$MNT/$kind/current" >/dev/null 2>&1; then
     if [[ -e $MNT/$kind/current ]]; then
-      die "$MNT/$kind/current exists but is not a btrfs subvolume"
+      fail_backup "$MNT/$kind/current exists but is not a btrfs subvolume"
     fi
-    run btrfs subvolume create "$MNT/$kind/current"
+    run_quiet btrfs subvolume create "$MNT/$kind/current"
   fi
   # A read-only "current" cannot receive the next backup.
   btrfs property set -ts "$MNT/$kind/current" ro false 2>/dev/null || true
 }
 
+# Literal command dump for --dry-run only — real runs get announce_backup's
+# short gum-styled summary instead.
 print_plan() {
   local ts=$1
   cat <<EOF
@@ -124,6 +129,18 @@ btrfs subvolume snapshot -r $MNT/home/current $MNT/home/$ts
 EOF
 }
 
+# Short gum-styled summary shown once at the start of a real backup —
+# print_plan's literal command dump is for --dry-run only.
+announce_backup() {
+  local ts=$1
+  echo
+  gum style --bold "Backing up $HOSTNAME"
+  echo
+  gum style --foreground 8 "  source:  $ROOT_DEV  Omarchy $OS_VER  kernel $KERNEL"
+  gum style --foreground 8 "  restore point: $ts"
+  echo
+}
+
 # Parse rsync progress2 on stderr without a PTY and without du.
 rsync_tree() {
   local src=$1 dest=$2 ex=$3 label=$4
@@ -132,6 +149,7 @@ rsync_tree() {
     echo "[dry-run] rsync -aHAX --numeric-ids --delete --info=progress2 --no-inc-recursive --exclude-from=$ex $src/ $dest/"
     return 0
   fi
+  step "Backing up $label — live progress in the plugin panel"
   mkdir -p "$dest"
   set +e
   set +o pipefail
@@ -146,10 +164,10 @@ rsync_tree() {
   # 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
   # None of those should abort the restore point.
   if [[ $rc -ne 0 && $rc -ne 23 && $rc -ne 24 ]]; then
-    die "rsync $label failed (exit $rc)"
+    fail_backup "rsync $label failed (exit $rc)"
   fi
   if [[ $rc -ne 0 ]]; then
-    log "rsync $label finished with warnings (exit $rc) — restore point will still be saved"
+    warn "rsync $label finished with warnings (exit $rc) — restore point will still be saved"
   fi
   progress set "$label" 100
 }
@@ -164,6 +182,14 @@ on_backup_exit() {
   fi
 }
 
+fail_backup() {
+  echo
+  gum style --bold --foreground 1 "Backup failed."
+  gum style --foreground 8 "$*"
+  gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
+  exit 130
+}
+
 cmd_backup() {
   require_excludes_visible
   dest_mounted() { findmnt -n "$MNT" >/dev/null 2>&1; }
@@ -172,20 +198,21 @@ cmd_backup() {
   if [[ $(id -u) -eq 0 ]]; then
     refresh_excludes_from_user
   fi
-  print_plan "$ts"
   if is_dry_run; then
+    print_plan "$ts"
     echo "Dry-run only."
     exit 0
   fi
   require_root "${ORIG_ARGS[@]}"
   refresh_excludes_from_user
+  announce_backup "$ts"
   if ! dest_mounted; then
-    log "backup disk not mounted — unlocking"
+    step "Backup disk not mounted — unlocking"
     progress phase "unlock"
     "$OMARCHY_TM_ROOT/mount.sh" mount
   fi
   ensure_rw_mount "$MNT"
-  dest_mounted || die "capsule not mounted at $MNT"
+  dest_mounted || fail_backup "capsule not mounted at $MNT"
   while [[ -e $MNT/os/$ts || -e $MNT/home/$ts ]]; do
     sleep 1
     ts="$(now_timestamp)"
@@ -195,6 +222,7 @@ cmd_backup() {
   write_pid
   mark_incomplete
   trap on_backup_exit EXIT INT TERM
+  trap 'fail_backup "unexpected failure"' ERR
   progress phase "snapshot"
 
   ensure_src_top
@@ -202,16 +230,18 @@ cmd_backup() {
   ensure_dest_current home
   mkdir -p "$MNT/esp" "$MNT/meta"
 
+  step "Snapshotting the current system"
   if [[ $HOME_ONLY != 1 ]]; then
-    run btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
+    run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
   fi
-  run btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
+  run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
 
   if [[ $HOME_ONLY != 1 ]]; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$MNT/os/current" "$EX_OS" os
   fi
   rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$MNT/home/current" "$EX_HOME" home
   mkdir -p "$MNT/esp/$ts"
+  step "Backing up the boot partition"
   progress phase "esp"
   set +o pipefail
   rsync -a --info=progress2 /boot/ "$MNT/esp/$ts/" \
@@ -221,21 +251,23 @@ cmd_backup() {
   if [[ $(cfg '.backup.refresh_rescue_boot') == true ]]; then
     progress phase "rescue"
     if [[ -x $OMARCHY_TM_ROOT/refresh-rescue.sh ]]; then
-      "$OMARCHY_TM_ROOT/refresh-rescue.sh" --boot-only || log "rescue EFI refresh failed (backup data is still valid)"
+      step "Refreshing the rescue USB's boot files"
+      "$OMARCHY_TM_ROOT/refresh-rescue.sh" --boot-only || warn "rescue EFI refresh failed (backup data is still valid)"
     fi
   fi
 
+  step "Saving this as a restore point"
   progress phase "finalize"
-  if [[ -e $MNT/os/$ts ]]; then die "dest os/$ts already exists"; fi
+  if [[ -e $MNT/os/$ts ]]; then fail_backup "dest os/$ts already exists"; fi
   if [[ $HOME_ONLY != 1 ]]; then
-    run btrfs subvolume snapshot -r "$MNT/os/current" "$MNT/os/$ts"
+    run_quiet btrfs subvolume snapshot -r "$MNT/os/current" "$MNT/os/$ts"
   fi
-  run btrfs subvolume snapshot -r "$MNT/home/current" "$MNT/home/$ts"
+  run_quiet btrfs subvolume snapshot -r "$MNT/home/current" "$MNT/home/$ts"
 
   if [[ $HOME_ONLY != 1 ]]; then
-    run btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/os-$ts" || true
+    run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/os-$ts" || true
   fi
-  run btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
+  run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
 
   local valid=true
   if [[ $HOME_ONLY == 1 ]]; then
@@ -270,13 +302,14 @@ cmd_backup() {
   if [[ -n $user_name && -d $MNT/home/$ts/$user_name ]]; then
     chmod 755 "$MNT/home/$ts/$user_name" 2>/dev/null || true
   fi
+  trap - ERR
   progress done "valid=$valid ts=$ts"
-  log "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
+  log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json >/dev/null || true
   echo
-  echo "============================================================"
-  echo " Backup finished. Restore points on this disk:"
-  echo "============================================================"
+  gum style --bold --foreground 2 "● Backup finished."
+  gum style --foreground 8 "  Restore points on this disk:"
+  echo
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" || true
   echo
 }
