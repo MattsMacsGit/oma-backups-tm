@@ -73,5 +73,5 @@ OmaBackups installed.
   Skips:   $CFG/skip-paths.txt
 
 Open the bar icon. Plug in a USB disk. The panel walks you through setup.
-Full restore: firmware-boot that USB (Limine entry “OmaBackups Restore”).
+Full restore: firmware-boot that USB (Limine entry “Rescue Disk”).
 EOF

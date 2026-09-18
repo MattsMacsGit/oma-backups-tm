@@ -204,23 +204,17 @@ install_rescue_limine() {
   local -a ucode_lines=()
   [[ -f $efi/amd-ucode.img ]] && ucode_lines+=("    module_path: boot():/amd-ucode.img")
   [[ -f $efi/intel-ucode.img ]] && ucode_lines+=("    module_path: boot():/intel-ucode.img")
-  # Real Omarchy live environment (archiso under the hood). script= is
-  # archiso automated_script on tty1. Safe entry adds nomodeset if a GPU
-  # still blanks the console.
-  cat >"$efi/limine.conf" <<'LIM'
+  # One entry, not two: this USB only ever does one job (the text restore
+  # wizard), so a separate "text console" fallback entry offered nothing
+  # that always-on nomodeset doesn't already cover — nomodeset is harmless
+  # for a plain text console and removes a choice that was really just an
+  # internal compatibility fallback, not a real decision for the user to
+  # make. Matt: "just one option... should say Rescue Disk."
+  {
+    cat <<'LIM'
 timeout: 8
 interface_branding: OmaBackups
-/OmaBackups Restore
-    protocol: linux
-    path: boot():/vmlinuz-linux
-LIM
-  # Append ucode + initramfs + cmdline (variable parts).
-  {
-    ((${#ucode_lines[@]})) && printf '%s\n' "${ucode_lines[@]}"
-    cat <<LIM
-    module_path: boot():/initramfs-linux.img
-    cmdline: archisobasedir=arch archisolabel=OMARCHY-LIVE cms_verify=n
-/OmaBackups Restore (text console)
+/Rescue Disk
     protocol: linux
     path: boot():/vmlinuz-linux
 LIM
@@ -229,7 +223,7 @@ LIM
     module_path: boot():/initramfs-linux.img
     cmdline: archisobasedir=arch archisolabel=OMARCHY-LIVE nomodeset cms_verify=n
 LIM
-  } >>"$efi/limine.conf"
+  } >"$efi/limine.conf"
 
   mkdir -p "$efi/EFI/BOOT" "$efi/EFI/limine"
   local efi_src

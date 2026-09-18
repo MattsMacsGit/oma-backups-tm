@@ -19,7 +19,7 @@ update.”
 1. **Bar plugin** — disk icon. Backup now, stop, dated restore points, settings.
 2. **Encrypted backup USB** — plug in, set it up from the plugin (wipe is explicit).
 3. **File history** — pick a date, browse that copy, copy files out.
-4. **Bare-metal restore** — firmware-boot the USB (Limine: “OmaBackups Restore”).
+4. **Bare-metal restore** — firmware-boot the USB (Limine: “Rescue Disk”).
    Real Omarchy live environment + a restore wizard. Pick a date, pick a disk,
    type the name and YES.
 
