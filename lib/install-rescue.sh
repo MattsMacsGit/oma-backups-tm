@@ -27,24 +27,87 @@ OMARCHY_ISO_INFO_URL="https://omarchy.org/"
 # common.sh uses umask 077 for secrets; rescue files on LIVE/EFI must be readable.
 rescue_umask() { umask 022; }
 
+# Oldest Omarchy release this rescue flow is built/tested against (real
+# archiso layout, gum/binutils/jq etc already in the package set — see
+# the file header). An older ISO a user still happens to have lying
+# around in Downloads is not safe to assume compatible; bump this only
+# if a verified-working older version turns up, never lower it to make
+# an error go away.
+OMARCHY_ISO_MIN_VERSION="4.0"
+
+# Version comes from the filename (official releases are always
+# omarchy-X.Y.Z-N.iso) — cheap, no need to mount anything just to check.
+# Empty if the filename doesn't match that pattern at all.
+omarchy_iso_version_of() {
+  local base
+  base="$(basename "$1")"
+  if [[ $base =~ omarchy-([0-9]+(\.[0-9]+)*) ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  fi
+  # Always exit 0: called as `ver="$(omarchy_iso_version_of "$p")"`, an
+  # unprotected assignment under this file's `set -e` — a non-match
+  # here must mean "unknown version" (empty string), never abort the
+  # whole script.
+  return 0
+}
+
+omarchy_iso_version_ok() {
+  local ver=$1
+  [[ -n $ver ]] || return 1
+  local lowest
+  lowest="$(printf '%s\n%s\n' "$ver" "$OMARCHY_ISO_MIN_VERSION" | sort -V | head -1)"
+  [[ $lowest == "$OMARCHY_ISO_MIN_VERSION" ]]
+}
+
+# omarchy_iso_path() communicates via these two globals, not stdout+exit
+# code — it's called as a plain statement (never `x="$(omarchy_iso_path)"`),
+# because a command-substitution caller runs it in a subshell, and these
+# globals would then be invisible to the caller the instant that subshell
+# exits (a real bug caught by testing: OMARCHY_ISO_REJECTED always came
+# back empty when called the $(...) way, even though the function set it
+# correctly — right value, wrong shell).
+OMARCHY_ISO_FOUND=""
+# "path:version" for the first candidate that existed but didn't meet
+# OMARCHY_ISO_MIN_VERSION, so ensure_omarchy_iso can say "found X but
+# it's too old" instead of a generic "nothing found" when the user does
+# have an ISO, just not a new enough one.
+OMARCHY_ISO_REJECTED=""
+
 # Where a real Omarchy ISO might already be, checked in order. OMARCHY_TM_ISO
 # (settable via format-disk.sh --iso) always wins; then anywhere a prior run
-# cached one; then the newest omarchy*.iso sitting in the user's own
-# Downloads, since that is where https://omarchy.org/ naturally lands one.
+# cached one; then the newest-by-version omarchy*.iso sitting in the user's
+# own Downloads, since that is where https://omarchy.org/ naturally lands
+# one. A candidate below OMARCHY_ISO_MIN_VERSION is skipped, not just
+# deprioritized — an old ISO left over from a previous install must never
+# silently win just for being the newest *file* present.
 omarchy_iso_path() {
-  local p
+  local p ver
+  OMARCHY_ISO_FOUND=""
   for p in \
     "${OMARCHY_TM_ISO:-}" \
     /var/cache/oma-backups/omarchy.iso \
     "${OMARCHY_TM_USER_HOME:-$HOME}/.cache/oma-backups/omarchy.iso"
   do
-    [[ -n $p && -f $p ]] && { printf '%s\n' "$p"; return 0; }
+    [[ -n $p && -f $p ]] || continue
+    ver="$(omarchy_iso_version_of "$p")"
+    if omarchy_iso_version_ok "$ver"; then
+      OMARCHY_ISO_FOUND="$p"
+      return 0
+    fi
+    [[ -z $OMARCHY_ISO_REJECTED ]] && OMARCHY_ISO_REJECTED="$p:${ver:-unknown}"
   done
   local downloads="${OMARCHY_TM_USER_HOME:-$HOME}/Downloads"
   if [[ -d $downloads ]]; then
-    p="$(find "$downloads" -maxdepth 1 -iname 'omarchy*.iso' -printf '%T@ %p\n' 2>/dev/null \
-      | sort -rn | head -1 | cut -d' ' -f2-)"
-    [[ -n $p && -f $p ]] && { printf '%s\n' "$p"; return 0; }
+    while IFS= read -r p; do
+      [[ -n $p ]] || continue
+      ver="$(omarchy_iso_version_of "$p")"
+      if omarchy_iso_version_ok "$ver"; then
+        OMARCHY_ISO_FOUND="$p"
+        return 0
+      fi
+      [[ -z $OMARCHY_ISO_REJECTED ]] && OMARCHY_ISO_REJECTED="$p:${ver:-unknown}"
+    done < <(find "$downloads" -maxdepth 1 -iname 'omarchy*.iso' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | cut -d' ' -f2-)
   fi
   return 1
 }
@@ -57,22 +120,34 @@ omarchy_iso_looks_valid() {
 }
 
 ensure_omarchy_iso() {
-  local iso
-  if iso="$(omarchy_iso_path)" && omarchy_iso_looks_valid "$iso"; then
-    printf '%s\n' "$iso"
+  if omarchy_iso_path && omarchy_iso_looks_valid "$OMARCHY_ISO_FOUND"; then
+    printf '%s\n' "$OMARCHY_ISO_FOUND"
     return 0
   fi
-  gum style --bold --foreground 3 "No Omarchy installer ISO found."
-  echo
-  gum style "This rescue USB boots the real Omarchy installer, so restoring a"
-  gum style "machine feels like the machine itself — not a bare rescue shell."
-  echo
-  gum style "Get it from $OMARCHY_ISO_INFO_URL, then either:"
-  gum style "  • leave it in ~/Downloads (it's picked up automatically), or"
-  gum style "  • point at it directly: OMARCHY_TM_ISO=/path/to/omarchy.iso oma-backups first-run /dev/sdX"
-  gum style "    (or: oma-backups format-disk /dev/sdX --iso /path/to/omarchy.iso)"
-  echo
-  gum style --foreground 8 "It's yours either way — also just a normal bootable Omarchy USB."
+  # Everything here goes to stderr on purpose: callers doing a plain
+  # `ensure_omarchy_iso >/dev/null` preflight check to fail fast (see
+  # format-disk.sh) must not also silence the only explanation the user
+  # gets — that happened for real, is why this comment exists, and cost
+  # a confusing "just dumped to the terminal" bug report to catch.
+  {
+    if [[ -n $OMARCHY_ISO_REJECTED ]]; then
+      local rej_file=${OMARCHY_ISO_REJECTED%%:*} rej_ver=${OMARCHY_ISO_REJECTED##*:}
+      gum style --bold --foreground 3 "Found $(basename "$rej_file") (version $rej_ver), but it's older than $OMARCHY_ISO_MIN_VERSION."
+      gum style "This rescue USB needs Omarchy $OMARCHY_ISO_MIN_VERSION or newer."
+    else
+      gum style --bold --foreground 3 "No Omarchy installer ISO found."
+    fi
+    echo
+    gum style "This rescue USB boots the real Omarchy installer, so restoring a"
+    gum style "machine feels like the machine itself — not a bare rescue shell."
+    echo
+    gum style "Get a current one from $OMARCHY_ISO_INFO_URL, then either:"
+    gum style "  • leave it in ~/Downloads (it's picked up automatically) and run this again, or"
+    gum style "  • point at it directly: OMARCHY_TM_ISO=/path/to/omarchy.iso oma-backups first-run /dev/sdX"
+    gum style "    (or: oma-backups format-disk /dev/sdX --iso /path/to/omarchy.iso)"
+    echo
+    gum style --foreground 8 "It's yours either way — also just a normal bootable Omarchy USB."
+  } >&2
   die "waiting on an Omarchy ISO — run this again once you have one"
 }
 
