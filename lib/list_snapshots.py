@@ -132,6 +132,14 @@ def scan(mnt: Path) -> list[dict]:
                 "has_esp": has_esp,
                 "omarchy_version": meta.get("omarchy_version") or "",
                 "kernel": meta.get("kernel") or "",
+                # Computed once, at backup time, from a fresh btrfs
+                # subvolume (see backup.sh) — never recomputed here, this
+                # is just carrying the stored value forward on every
+                # rescan so a live du/qgroup walk never sits on this
+                # frequently-polled path. null for snapshots taken
+                # before this field existed.
+                "size_total": meta.get("size_total"),
+                "size_exclusive": meta.get("size_exclusive"),
                 "mount": str(mnt),
                 "open_path": str(open_path),
             }

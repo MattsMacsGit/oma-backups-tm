@@ -66,6 +66,19 @@ function snapshotTitle(s) {
   return s.label || prettyStamp(s.timestamp || "")
 }
 
+function formatSize(bytes) {
+  var n = Number(bytes)
+  if (!isFinite(n) || n < 0) return ""
+  var units = ["B", "K", "M", "G", "T"]
+  var i = 0
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024
+    i++
+  }
+  var digits = (i === 0 || n >= 10) ? 0 : 1
+  return n.toFixed(digits) + units[i]
+}
+
 function phaseLabel(phase) {
   var p = String(phase || "")
   if (p === "os") return "OS"

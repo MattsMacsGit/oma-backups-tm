@@ -276,10 +276,36 @@ cmd_backup() {
     [[ -e $MNT/os/$ts && -e $MNT/home/$ts && -e $MNT/esp/$ts ]] || valid=false
   fi
 
+  # One btrfs filesystem du per side, right now while the snapshot is
+  # fresh — the only place this is ever computed. Stored in machine.json
+  # and carried forward by list_snapshots.py on every later (frequent,
+  # plugin-polled) scan, never recomputed. "Total" is the snapshot's
+  # apparent size; "exclusive" is what deleting *only* this snapshot
+  # would actually free (btrfs COW shares data with other snapshots, so
+  # total overstates that) — exclusive is what a future "delete to make
+  # space" feature should sort/act on.
+  step "Measuring this restore point's size"
+  snapshot_du() {
+    local path=$1 line
+    line="$(btrfs filesystem du -s --raw "$path" 2>/dev/null | awk 'NR==2{print $1, $2}')"
+    [[ -n $line ]] && printf '%s\n' "$line" || printf '0 0\n'
+  }
+  local os_total=0 os_excl=0 home_total=0 home_excl=0
+  if [[ $HOME_ONLY != 1 && -d $MNT/os/$ts ]]; then
+    read -r os_total os_excl < <(snapshot_du "$MNT/os/$ts")
+  fi
+  if [[ -d $MNT/home/$ts ]]; then
+    read -r home_total home_excl < <(snapshot_du "$MNT/home/$ts")
+  fi
+  local size_total=$((os_total + home_total))
+  local size_excl=$((os_excl + home_excl))
+
   local meta="$MNT/meta/machine.json"
   local user_name="${SUDO_USER:-${USER:-}}"
   local snaps_json
   snaps_json="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json)"
+  snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" --argjson excl "$size_excl" \
+    'map(if .timestamp == $ts then . + {size_total: $total, size_exclusive: $excl} else . end)')"
   jq -n \
     --arg host "$HOSTNAME" --arg mid "$MACHINE_ID" --arg ker "$KERNEL" \
     --arg ver "$OS_VER" --arg user "$user_name" --argjson snaps "$snaps_json" \

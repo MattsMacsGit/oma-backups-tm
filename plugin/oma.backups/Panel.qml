@@ -19,6 +19,11 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
+  readonly property var quickSkips: [
+    { label: "Downloads", path: svc.home + "/Downloads" },
+    { label: "Trash", path: svc.home + "/.local/share/Trash" },
+    { label: "Caches", path: svc.home + "/.cache" }
+  ]
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -185,6 +190,40 @@ Panel {
               }
             }
 
+            Column {
+              visible: svc.hasCapsule && svc.capsuleDisk !== null
+              width: parent.width
+              spacing: Style.space(4)
+              Text {
+                width: parent.width
+                text: {
+                  var d = svc.capsuleDisk
+                  if (!d) return ""
+                  return "Backup disk  \u00b7  " + Model.formatSize(d.free) + " free of " + Model.formatSize(d.total)
+                }
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Rectangle {
+                width: parent.width
+                height: 6
+                radius: 3
+                color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                Rectangle {
+                  readonly property real frac: {
+                    var d = svc.capsuleDisk
+                    if (!d || !d.total) return 0
+                    return Math.min(1, Math.max(0, d.used / d.total))
+                  }
+                  width: Math.max(6, parent.width * frac)
+                  height: parent.height
+                  radius: 3
+                  color: frac > 0.9 ? root.urgent : root.dim
+                }
+              }
+            }
+
             Text {
               visible: svc.lastError !== ""
               width: parent.width
@@ -274,6 +313,7 @@ Panel {
                   required property int index
                   required property string whenText
                   required property string snapId
+                  required property string sizeText
                   visible: root.showAllSnaps || index < 5
                   width: column.width
                   height: visible ? (rpTxt.implicitHeight + Style.space(10)) : 0
@@ -284,15 +324,26 @@ Panel {
                   Text {
                     id: rpTxt
                     anchors.left: parent.left
-                    anchors.right: parent.right
+                    anchors.right: rpSize.visible ? rpSize.left : parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(8)
-                    anchors.rightMargin: Style.space(8)
+                    anchors.rightMargin: Style.space(6)
                     text: whenText
                     color: root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     elide: Text.ElideRight
+                  }
+                  Text {
+                    id: rpSize
+                    visible: sizeText !== ""
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Style.space(8)
+                    text: sizeText
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
                   }
                   MouseArea {
                     anchors.fill: parent
@@ -390,9 +441,38 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "beta 0.9.1  ·  skip folders, terminal, erase disk"
+              meta: "beta 0.9.1  ·  skip folders, disks, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+
+            PanelSectionHeader {
+              text: "QUICK SKIPS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Text {
+              width: parent.width
+              text: "One-click common skips. Caches and Trash are always left off backups anyway — these just make that visible and toggleable."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Repeater {
+              model: root.quickSkips
+              delegate: Toggle {
+                required property var modelData
+                width: parent.width
+                label: modelData.label
+                checked: svc.hasSkip(modelData.path)
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  if (svc.hasSkip(modelData.path)) svc.removeSkip(modelData.path)
+                  else svc.addSkip(modelData.path)
+                }
+              }
             }
 
             PanelSectionHeader {

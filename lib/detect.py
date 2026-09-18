@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -501,6 +502,7 @@ def detect() -> dict:
 
     snapshots = []
     backup_mounted = False
+    capsule_disk = None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from list_snapshots import find_mount, scan, write_cache
@@ -510,6 +512,14 @@ def detect() -> dict:
         if mnt is not None:
             snapshots = scan(mnt)
             write_cache(snapshots)
+            # Whole-filesystem stat, not a tree walk — cheap enough for
+            # every detect() poll. Per-snapshot sizes are a different
+            # matter (see backup.sh) and are never recomputed here.
+            try:
+                du = shutil.disk_usage(mnt)
+                capsule_disk = {"total": du.total, "used": du.used, "free": du.free}
+            except OSError:
+                capsule_disk = None
         else:
             write_cache([])
     except Exception:
@@ -559,6 +569,7 @@ def detect() -> dict:
         "disks": disks,
         "snapshots": snapshots,
         "backup_mounted": backup_mounted,
+        "capsule_disk": capsule_disk,
         "limine": limine_info(),
         "snapper": snapper_info(),
         "subvolume_list": try_subvolume_list(),

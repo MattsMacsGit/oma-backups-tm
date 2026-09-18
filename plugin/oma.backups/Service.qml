@@ -68,6 +68,7 @@ Item {
   }
   readonly property bool hasCapsule: capsule !== null
   readonly property bool backupMounted: detect && detect.backup_mounted === true
+  readonly property var capsuleDisk: (detect && detect.capsule_disk) || null
   readonly property string selectedDiskLabel: {
     var d = disks
     for (var i = 0; i < d.length; i++) {
@@ -83,6 +84,13 @@ Item {
   ListModel { id: skipListModel }
   readonly property var skipModel: skipListModel
   readonly property int skipCount: skipListModel.count
+
+  function hasSkip(path) {
+    for (var i = 0; i < skipListModel.count; i++) {
+      if (skipListModel.get(i).path === path) return true
+    }
+    return false
+  }
 
   function privileged(args) {
     // Always a visible terminal: sudo/pkexec's own auth prompt (password
@@ -126,7 +134,9 @@ Item {
       var title = String((s && s.label) || "")
       if (!title || /^\d{8}T\d{6}Z$/.test(title)) title = Model.prettyStamp(stamp)
       if (!title) title = stamp
-      snapList.append({ whenText: title, snapId: stamp })
+      var sizeText = (s && s.size_total !== undefined && s.size_total !== null)
+        ? Model.formatSize(s.size_total) : ""
+      snapList.append({ whenText: title, snapId: stamp, sizeText: sizeText })
     }
   }
 
