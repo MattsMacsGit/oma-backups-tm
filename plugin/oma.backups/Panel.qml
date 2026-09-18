@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Layouts
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -52,13 +53,53 @@ Panel {
     duration: 800
   }
 
+  Component {
+    id: safeIcon
+    Item {
+      readonly property color tint: svc.backupRunning ? root.urgent : root.foreground
+
+      Image {
+        id: safeBodyImg
+        anchors.fill: parent
+        source: "safe-body.png"
+        fillMode: Image.PreserveAspectFit
+        visible: false
+        layer.enabled: true
+      }
+      MultiEffect {
+        anchors.fill: safeBodyImg
+        source: safeBodyImg
+        colorization: 1.0
+        colorizationColor: parent.tint
+      }
+
+      // Only the dial wheel spins during a backup — the safe body and
+      // its ring/bezel stay put. Two separately-cropped image layers of
+      // the same source icon, overlaid so they read as one icon at rest.
+      Image {
+        id: safeDialImg
+        anchors.fill: parent
+        source: "safe-dial.png"
+        fillMode: Image.PreserveAspectFit
+        visible: false
+        layer.enabled: true
+      }
+      MultiEffect {
+        anchors.fill: safeDialImg
+        source: safeDialImg
+        colorization: 1.0
+        colorizationColor: parent.tint
+        rotation: svc.backupRunning ? root.spin : 0
+        transformOrigin: Item.Center
+      }
+    }
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
-    text: "\uf0a0"
-    textRotation: svc.backupRunning ? root.spin : 0
-    foreground: svc.backupRunning ? root.urgent : root.foreground
+    iconComponent: safeIcon
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: svc.backupRunning
