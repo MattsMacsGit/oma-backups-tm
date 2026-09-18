@@ -73,9 +73,14 @@ def split_paths(paths: list[str], home_root: Path) -> tuple[list[str], list[str]
             rel_home = resolved.relative_to(home_root)
             rel = str(rel_home).strip("/")
             if rel and rel != ".":
-                home_ex.append(rel)
-                home_ex.append(rel + "/")
-                home_ex.append(rel + "/***")
+                # Exclude contents only (not "rel"/"rel/", and not the
+                # "rel/***" shorthand — rsync's manpage: that's equivalent
+                # to "rel/" + "rel/**" combined, i.e. it excludes the
+                # directory entry itself too). A skipped XDG folder like
+                # Videos should still exist empty on the destination, the
+                # way a fresh Linux home has it — file choosers and other
+                # apps expect these well-known dirs to be present.
+                home_ex.append(rel + "/**")
             continue
         except ValueError:
             pass
