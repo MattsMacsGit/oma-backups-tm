@@ -25,9 +25,15 @@ def patch_text(text: str, partuuid: str) -> str:
     text = PARTUUID_RE.sub(f"cryptdevice=PARTUUID={partuuid}", text)
     text = re.sub(r"\s*resume_offset=\S+", "", text)
     text = re.sub(r"\s*resume=\S*", "", text)
-    # Limine hash on the path rejects an objcopy-edited UKI.
+    # Limine hash on the path rejects an objcopy-edited UKI. Match any UKI
+    # under EFI/Linux, not just the exact default name — Omarchy suffixes
+    # this with the hostname (e.g. omarchy_linux-omarchy.efi) or a kernel
+    # preset, and a hardcoded literal filename here misses those, leaving
+    # a stale hash pin that fails Limine's integrity check at boot (seen
+    # live: "WARNING: Blake2b hash for URI '.../omarchy_linux-omarchy.efi'
+    # does not match!").
     text = re.sub(
-        r"(path:\s*boot\(\):/EFI/Linux/omarchy_linux\.efi)#[0-9a-f]+",
+        r"(path:\s*boot\(\):/EFI/Linux/[^\s#]+\.efi)#[0-9a-fA-F]+",
         r"\1",
         text,
     )
