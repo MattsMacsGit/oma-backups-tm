@@ -58,9 +58,10 @@ ln -sfn "$ROOT/omarchy-backups" /usr/local/bin/oma-backups 2>/dev/null || true
 ln -sfn "$ROOT/omarchy-backups" /usr/local/bin/omarchy-backups 2>/dev/null || true
 
 cd /
-if command -v python3 >/dev/null; then
+if command -v python3 >/dev/null && command -v gum >/dev/null; then
   python3 "$ROOT/lib/restore_tui.py" || true
 else
-  echo "python3 is missing on this live image."
+  command -v python3 >/dev/null || echo "python3 is missing on this live image."
+  command -v gum >/dev/null || echo "gum is missing on this live image (the wizard needs it)."
   echo "  oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP --allow-internal"
 fi

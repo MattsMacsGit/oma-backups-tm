@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """OmaBackups restore wizard. Runs on the rescue USB (tty1 autologin).
 
-Stdlib only. Step-through prompts, not a full desktop.
+Stdlib plus `gum` for all interactive UI (choose/confirm/input) and
+styled text, matching format-disk.sh/backup.sh's house style — gum ships
+in the real Omarchy ISO's package set, confirmed present in its squashfs
+before relying on it here. Step-through prompts, not a full desktop.
 """
 
 from __future__ import annotations
@@ -28,39 +31,85 @@ def out(msg: str = "") -> None:
     sys.stdout.flush()
 
 
+# gum house style, matching format-disk.sh/backup.sh: foreground 1=error,
+# 2=success, 3=warning, 8=dim. gum's interactive widgets (choose/confirm/
+# input) render their UI to stderr and print only the chosen/typed value
+# to stdout — so these only capture stdout, never stderr, or the picker
+# itself would never be visible (confirmed against Omarchy's own
+# omarchy-drive-select, which uses the same convention).
+
+
+def gum_style(*args: str) -> None:
+    subprocess.run(["gum", "style", *args], check=False)
+
+
+def gum_choose(options: list[str], header: str = "Choose:") -> str | None:
+    if not options:
+        return None
+    proc = subprocess.run(
+        ["gum", "choose", "--header", header, *options],
+        stdout=subprocess.PIPE,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    choice = proc.stdout.rstrip("\n")
+    return choice or None
+
+
+def gum_confirm(prompt: str) -> bool:
+    return subprocess.run(["gum", "confirm", prompt], check=False).returncode == 0
+
+
+def gum_input(
+    header: str = "",
+    placeholder: str = "",
+    password: bool = False,
+) -> str | None:
+    argv = ["gum", "input"]
+    if header:
+        argv += ["--header", header]
+    if placeholder:
+        argv += ["--placeholder", placeholder]
+    if password:
+        argv.append("--password")
+    proc = subprocess.run(argv, stdout=subprocess.PIPE, text=True, check=False)
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.rstrip("\n")
+
+
 def quiet_console() -> None:
-    """Keep printk from drowning the wizard; Arch ISO still has a real console."""
+    """Keep printk from drowning the wizard; the live ISO still has a real console."""
     subprocess.run(["dmesg", "-n", "4"], check=False, capture_output=True)
 
 
 def banner() -> None:
     os.system("clear") if sys.stdout.isatty() else None
     out()
-    out("  ════════════════════════════════════════")
-    out("   OmaBackups — restore")
-    out("  ════════════════════════════════════════")
-    out()
-    out("  This USB can put your Omarchy machine")
-    out("  back onto a blank disk: same user, same")
-    out("  packages, same home as a backup date.")
+    gum_style("--bold", "OmaBackups — restore")
+    gum_style(
+        "--foreground",
+        "8",
+        "This USB can put your Omarchy machine back onto a blank disk:",
+    )
+    gum_style("--foreground", "8", "same user, same packages, same home as a backup date.")
     out()
 
 
-def pause(msg: str = "Press Enter to continue, or q to shell.") -> bool:
-    try:
-        s = input(msg + " ").strip().lower()
-    except EOFError:
+def pause(msg: str = "Press Enter to continue, or q for a shell.") -> bool:
+    s = gum_input(header=msg, placeholder="")
+    if s is None:
         return False
-    return s not in {"q", "quit", "exit"}
+    return s.strip().lower() not in {"q", "quit", "exit"}
 
 
 def ask(prompt: str, default: str = "") -> str:
-    suffix = f" [{default}]" if default else ""
-    try:
-        s = input(f"{prompt}{suffix}: ").strip()
-    except EOFError:
+    s = gum_input(header=prompt, placeholder=default)
+    if s is None:
         return default
-    return s or default
+    return s.strip() or default
 
 
 def run(argv: list[str], check: bool = False, capture: bool = True) -> subprocess.CompletedProcess:
@@ -247,16 +296,22 @@ def list_disks() -> list[dict]:
 
 def unlock_backup() -> bool:
     if (MNT / "meta" / "machine.json").is_file():
-        out(f"Backup disk already mounted at {MNT}")
+        gum_style("--foreground", "8", f"Backup disk already mounted at {MNT}")
         return True
-    out("Unlocking the backup disk (LUKS password from when you set it up).")
+    gum_style("--foreground", "8", "Unlocking the backup disk (LUKS password from when you set it up).")
     env = os.environ.copy()
     env["OMARCHY_TM_ROOT"] = str(ROOT)
     env["OMARCHY_TM_YES"] = "1"
+    # cryptsetup's own interactive prompt handles the passphrase — the
+    # right tool for that job, not something to route through gum.
     proc = subprocess.run([str(CLI), "mount"], env=env)
     if proc.returncode != 0:
-        out("Could not unlock the backup disk.")
-        out("On this rescue USB the backups are the LUKS partition next to OMARCHY-LIVE.")
+        gum_style("--foreground", "1", "Could not unlock the backup disk.")
+        gum_style(
+            "--foreground",
+            "8",
+            "On this rescue USB the backups are the LUKS partition next to OMARCHY-LIVE.",
+        )
         out("Try: oma-backups mount")
         return False
     return True
@@ -275,24 +330,25 @@ def load_snapshots() -> list[dict]:
 
 def pick_snapshot(snaps: list[dict]) -> dict | None:
     if not snaps:
-        out("No full restore points on this disk (need os+home+esp).")
+        gum_style("--foreground", "3", "No full restore points on this disk (need os+home+esp).")
         return None
-    out("Restore points:")
-    for i, s in enumerate(snaps, 1):
+    by_label: dict[str, dict] = {}
+    options: list[str] = []
+    for s in snaps:
         label = s.get("label") or s.get("timestamp") or "?"
         ver = s.get("omarchy_version") or ""
-        extra = f"  Omarchy {ver}" if ver else ""
-        out(f"  {i}. {label}{extra}")
-    raw = ask("Choose a restore point", "1")
-    if raw.lower() in {"q", "quit"}:
+        display = f"{label}  Omarchy {ver}" if ver else label
+        # Two snapshots could share a display string in principle (rare —
+        # same label, same/missing version) — keep the first, the rest
+        # are still reachable by their raw timestamp being distinct.
+        if display not in by_label:
+            by_label[display] = s
+            options.append(display)
+    options.append("Cancel")
+    choice = gum_choose(options, header="Choose a restore point")
+    if choice is None or choice == "Cancel":
         return None
-    try:
-        idx = int(raw)
-    except ValueError:
-        return None
-    if 1 <= idx <= len(snaps):
-        return snaps[idx - 1]
-    return None
+    return by_label.get(choice)
 
 
 def kind_tag(d: dict) -> str:
@@ -315,7 +371,7 @@ def pick_target(disks: list[dict] | None = None) -> dict | None:
         skipped = [d for d in disks if d["kind"] in hidden_kinds]
         candidates = [d for d in disks if d["kind"] not in hidden_kinds]
         out()
-        out("Disks the kernel can see:")
+        gum_style("--foreground", "8", "Disks the kernel can see:")
         if not disks:
             out("  (none yet)")
         for d in disks:
@@ -326,50 +382,57 @@ def pick_target(disks: list[dict] | None = None) -> dict | None:
             )
         out()
         if skipped:
-            out("This backup/rescue USB is not offered as a restore target.")
+            gum_style("--foreground", "8", "This backup/rescue USB is not offered as a restore target.")
             out()
         if not candidates:
-            out("No other disks yet (USB card readers are often slow).")
-            raw = ask("r to scan again, q to shell", "r")
-            if raw.lower() in {"q", "quit", "exit"}:
+            gum_style("--foreground", "3", "No other disks yet (USB card readers are often slow).")
+            if not gum_confirm("Scan again?"):
                 return None
             continue
-        out("Choose a disk to ERASE. Type the name and YES on the next screen.")
-        for i, d in enumerate(candidates, 1):
+        by_label: dict[str, dict] = {}
+        options: list[str] = []
+        for d in candidates:
             labs = ",".join(d.get("labels") or []) or "-"
-            out(
-                f"  {i}. {d['path']:14}  {d['size']:>8}  {d['model'] or '-':16}  "
+            display = (
+                f"{d['path']:14}  {d['size']:>8}  {d['model'] or '-':16}  "
                 f"{d['tran'] or '-':4}  {kind_tag(d)}  {labs}"
             )
-        raw = ask("Number, or r to rescan, q to quit", "")
-        if raw.lower() in {"q", "quit", "exit", ""}:
+            by_label[display] = d
+            options.append(display)
+        options.append("Rescan")
+        options.append("Cancel")
+        choice = gum_choose(options, header="Choose a disk to ERASE (confirmed on the next screen)")
+        if choice is None or choice == "Cancel":
             return None
-        if raw.lower() in {"r", "rescan", "retry"}:
+        if choice == "Rescan":
             continue
-        try:
-            idx = int(raw)
-        except ValueError:
-            out("Not a number.")
-            continue
-        if 1 <= idx <= len(candidates):
-            return candidates[idx - 1]
-        out("That number is not in the list.")
+        target = by_label.get(choice)
+        if target:
+            return target
 
 
 def confirm_wipe(target: dict, snap: dict) -> bool:
     out()
-    out("  THIS ERASES THE WHOLE DISK PERMANENTLY:")
-    out(f"    {target['path']}  {target['size']}  {target['model']}  ({kind_tag(target)})")
-    out(f"  Restore point: {snap.get('timestamp')}")
+    gum_style("--bold", "--foreground", "1", "THIS ERASES THE WHOLE DISK PERMANENTLY:")
+    gum_style(
+        "--foreground",
+        "8",
+        f"  {target['path']}  {target['size']}  {target['model']}  ({kind_tag(target)})",
+    )
+    gum_style("--foreground", "8", f"  Restore point: {snap.get('timestamp')}")
     if target["kind"] in {"live-usb", "backup-usb"}:
         out()
-        out("  That is this backup/rescue USB. Restoring onto it destroys")
-        out("  the copy you are restoring from.")
+        gum_style(
+            "--foreground",
+            "3",
+            "That is this backup/rescue USB — restoring onto it destroys the copy",
+        )
+        gum_style("--foreground", "3", "you are restoring from.")
     out()
     name = Path(target["path"]).name
     typed = ask(f"Type the disk name to confirm ({name})")
     if typed != name:
-        out("Name did not match. Aborting.")
+        gum_style("--foreground", "1", "Name did not match. Aborting.")
         return False
     yes = ask("Type YES to erase and restore")
     return yes == "YES"
@@ -391,14 +454,14 @@ def run_restore(target: dict, snap: dict) -> int:
     env["OMARCHY_TM_YES"] = "1"
     env["OMARCHY_TM_ALLOW_INTERNAL"] = "1"
     out()
-    out("Starting restore. This takes a while.")
+    gum_style("--bold", "Starting restore. This takes a while.")
     out()
     return subprocess.call(argv, env=env)
 
 
 def drop_to_shell() -> None:
     out()
-    out("Shell. Useful commands:")
+    gum_style("--foreground", "8", "Shell. Useful commands:")
     out("  oma-backups mount")
     out("  oma-backups snapshots")
     out("  oma-backups restore-to-disk /dev/TARGET --snapshot TS --dry-run")
@@ -428,7 +491,7 @@ def main() -> int:
         drop_to_shell()
         return 1
     out()
-    out("Plan (dry-run):")
+    gum_style("--foreground", "8", "Plan (dry-run):")
     env = os.environ.copy()
     env["OMARCHY_TM_ROOT"] = str(ROOT)
     env["OMARCHY_TM_ALLOW_INTERNAL"] = "1"
@@ -450,10 +513,11 @@ def main() -> int:
     rc = run_restore(target, snap)
     if rc == 0:
         out()
-        out("Restore finished. Remove this USB and boot the restored disk.")
+        gum_style("--bold", "--foreground", "2", "● Restore finished.")
+        gum_style("--foreground", "8", "  Remove this USB and boot the restored disk.")
         pause("Press Enter for a shell.")
     else:
-        out(f"Restore failed (exit {rc}).")
+        gum_style("--bold", "--foreground", "1", f"Restore failed (exit {rc}).")
         drop_to_shell()
     return rc
 
