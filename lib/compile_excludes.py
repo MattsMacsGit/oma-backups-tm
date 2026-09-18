@@ -18,8 +18,11 @@ from pathlib import Path
 # The fixed set of standard XDG user-dir keys (freedesktop.org spec) —
 # NOT every "XDG_*_DIR" key that might appear in user-dirs.dirs. Tools
 # like xdg-user-dirs-update let people add their own custom entries
-# (e.g. XDG_PROJECTS_DIR) alongside the real ones; only these 8 count as
-# "a default folder every fresh install has", never a custom addition.
+# alongside the real ones; only these count as "a default folder every
+# fresh install has", never a custom addition. Includes XDG_PROJECTS_DIR:
+# added as an official 9th standard directory in xdg-user-dirs 0.20
+# (freedesktop.org, April 2026) — not a custom addition on current
+# systems even though it looks like one against older references.
 XDG_DIR_KEYS = {
     "XDG_DESKTOP_DIR": "Desktop",
     "XDG_DOWNLOAD_DIR": "Downloads",
@@ -29,6 +32,7 @@ XDG_DIR_KEYS = {
     "XDG_MUSIC_DIR": "Music",
     "XDG_PICTURES_DIR": "Pictures",
     "XDG_VIDEOS_DIR": "Videos",
+    "XDG_PROJECTS_DIR": "Projects",
 }
 
 
@@ -41,8 +45,8 @@ def default_xdg_names(home: Path) -> set[str]:
     pointing one at "$HOME/" itself (merged/disabled) doesn't remove it
     from this set — that's about GLib bookmarks, not about whether the
     folder is still one of the standard categories. Never trusts a
-    custom XDG_*_DIR key that isn't one of the fixed 8 above (people can
-    and do add their own, e.g. XDG_PROJECTS_DIR — not a default)."""
+    custom XDG_*_DIR key that isn't one of the fixed set above — people
+    can and do add their own beyond even the real standard ones."""
     names = set(XDG_DIR_KEYS.values())
     conf = home / ".config" / "user-dirs.dirs"
     if not conf.is_file():
