@@ -137,17 +137,25 @@ patch_airootfs() {
   cp "$launch" "$work/usr/local/bin/oma-rescue-launch"
   chmod 755 "$work/usr/local/bin/oma-rescue-launch"
   touch "$work/etc/oma-backups-rescue"
-  if [[ -f $work/root/.zlogin ]] && grep -q oma-rescue-launch "$work/root/.zlogin"; then
-    :
-  else
-    cat >>"$work/root/.zlogin" <<'Z'
+  # Replace outright, don't append: the real Omarchy ISO's own .zlogin
+  # ends by calling ~/.automated_script.sh, which launches Omarchy's own
+  # interactive OS-install configurator and blocks there — appending
+  # after it never actually gets reached, the rescue USB just boots
+  # straight into "install a new Omarchy" instead of our restore wizard.
+  # This rescue USB only ever does one thing, so it owns tty1 outright.
+  # (Keeps Omarchy's own screen-reader accessibility check — harmless
+  # and worth preserving.)
+  cat >"$work/root/.zlogin" <<'Z'
+# fix for screen readers
+if grep -Fqa 'accessibility=' /proc/cmdline &> /dev/null; then
+    setopt SINGLE_LINE_ZLE
+fi
 
-# OmaBackups — start restore wizard on tty1
+# OmaBackups — start the restore wizard on tty1
 if [[ -x /usr/local/bin/oma-rescue-launch && $(tty 2>/dev/null) == /dev/tty1 ]]; then
   /usr/local/bin/oma-rescue-launch || true
 fi
 Z
-  fi
   # Signature of the stock ISO no longer matches; do not leave a stale sig.
   rm -f "$live/arch/x86_64/airootfs.sfs.cms.sig"
   local newsfs=/var/tmp/oma-airootfs.sfs.new
@@ -228,9 +236,10 @@ LIM
       break
     fi
   done
-  if command -v limine-install >/dev/null && [[ -n $disk && -b $disk ]]; then
-    limine-install "$disk" || true
-  fi
+  # limine-install (Omarchy's system tool) manages the *current* system's
+  # own bootloader via $ESP_PATH — it has no way to target an arbitrary
+  # disk, doesn't take one as an argument, and was never applicable here.
+  # We already write everything the USB needs directly, above.
   [[ -f $efi/EFI/BOOT/BOOTX64.EFI ]] || warn "no BOOTX64.EFI — USB may not UEFI-boot"
   progress set setup 99
 }
