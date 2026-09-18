@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # Populate or refresh the rescue OS on OMARCHY-LIVE + OMARCHY-EFI.
 #
-# Rescue is the official Arch Linux ISO (installer environment): working
-# console, linux-firmware, iwd/network later. Our scripts live next to
-# the ISO files on OMARCHY-LIVE and start via archiso's script= cmdline.
+# Rescue is the real Omarchy installer ISO — same archiso layout as a
+# plain Arch ISO (arch/x86_64/airootfs.sfs etc.), so extraction/patching
+# work the same way, but it already ships gum, binutils, btrfs-progs,
+# cryptsetup, jq, rsync and everything else our tooling needs, and
+# restoring a machine boots into something that actually looks like
+# Omarchy. Our scripts live next to the ISO files on OMARCHY-LIVE and
+# start via archiso's script= cmdline.
 # Sourced or executed. Expects OMARCHY_TM_ROOT. Root required.
 set -euo pipefail
 
@@ -14,97 +18,82 @@ fi
 # shellcheck source=lib/common.sh
 source "$OMARCHY_TM_ROOT/lib/common.sh"
 
-ARCH_ISO_URL="${OMARCHY_TM_ARCH_ISO_URL:-https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso}"
-ARCH_ISO_SUMS_URL="${OMARCHY_TM_ARCH_ISO_SUMS_URL:-https://geo.mirror.pkgbuild.com/iso/latest/sha256sums.txt}"
+# Omarchy ISO releases are version-specific filenames (no stable "latest"
+# URL to curl), so this never auto-downloads on its own — the user gets
+# it from https://omarchy.org/ themselves (or already has a copy). It's
+# theirs to keep either way: also just a normal bootable Omarchy USB.
+OMARCHY_ISO_INFO_URL="https://omarchy.org/"
 
 # common.sh uses umask 077 for secrets; rescue files on LIVE/EFI must be readable.
 rescue_umask() { umask 022; }
 
-arch_iso_cache_path() {
-  if [[ -n ${OMARCHY_TM_ISO:-} && -f ${OMARCHY_TM_ISO} ]]; then
-    printf '%s\n' "$OMARCHY_TM_ISO"
-    return 0
-  fi
+# Where a real Omarchy ISO might already be, checked in order. OMARCHY_TM_ISO
+# (settable via format-disk.sh --iso) always wins; then anywhere a prior run
+# cached one; then the newest omarchy*.iso sitting in the user's own
+# Downloads, since that is where https://omarchy.org/ naturally lands one.
+omarchy_iso_path() {
   local p
   for p in \
-    /var/cache/oma-backups/archlinux-x86_64.iso \
-    "${OMARCHY_TM_USER_HOME:-$HOME}/.cache/oma-backups/archlinux-x86_64.iso" \
-    "$OMARCHY_TM_ROOT/.cache/archlinux-x86_64.iso"
+    "${OMARCHY_TM_ISO:-}" \
+    /var/cache/oma-backups/omarchy.iso \
+    "${OMARCHY_TM_USER_HOME:-$HOME}/.cache/oma-backups/omarchy.iso"
   do
-    if [[ -f $p ]]; then
-      printf '%s\n' "$p"
-      return 0
-    fi
+    [[ -n $p && -f $p ]] && { printf '%s\n' "$p"; return 0; }
   done
-  printf '%s\n' "${OMARCHY_TM_USER_HOME:-$HOME}/.cache/oma-backups/archlinux-x86_64.iso"
+  local downloads="${OMARCHY_TM_USER_HOME:-$HOME}/Downloads"
+  if [[ -d $downloads ]]; then
+    p="$(find "$downloads" -maxdepth 1 -iname 'omarchy*.iso' -printf '%T@ %p\n' 2>/dev/null \
+      | sort -rn | head -1 | cut -d' ' -f2-)"
+    [[ -n $p && -f $p ]] && { printf '%s\n' "$p"; return 0; }
+  fi
+  return 1
 }
 
-ensure_arch_iso() {
-  local iso dest dir sums want got
-  ensure_deps curl
-  iso="$(arch_iso_cache_path)"
-  if [[ -f $iso && -s $iso ]]; then
+# Structural sanity check only — we don't know which version the user has,
+# so there's no checksum to verify against; just confirm it is really an
+# archiso-layout Omarchy ISO before mounting it.
+omarchy_iso_looks_valid() {
+  bsdtar -tf "$1" 2>/dev/null | grep -qx 'arch/x86_64/airootfs.sfs'
+}
+
+ensure_omarchy_iso() {
+  local iso
+  if iso="$(omarchy_iso_path)" && omarchy_iso_looks_valid "$iso"; then
     printf '%s\n' "$iso"
     return 0
   fi
-  dest="${OMARCHY_TM_USER_HOME:-$HOME}/.cache/oma-backups/archlinux-x86_64.iso"
-  if [[ ${EUID:-$(id -u)} -eq 0 && ! -w $(dirname "$dest") ]]; then
-    dest=/var/cache/oma-backups/archlinux-x86_64.iso
-  fi
-  dir="$(dirname "$dest")"
-  mkdir -p "$dir"
-  log "downloading official Arch ISO to $dest" >&2
-  curl -fL --retry 5 --retry-all-errors -C - -o "$dest.part" "$ARCH_ISO_URL"
-  mv "$dest.part" "$dest"
-  if curl -fsSL -o "$dir/sha256sums.txt" "$ARCH_ISO_SUMS_URL"; then
-    want="$(awk '/archlinux-x86_64.iso$/{print $1; exit}' "$dir/sha256sums.txt" || true)"
-    if [[ -n $want ]]; then
-      got="$(sha256sum "$dest" | awk '{print $1}')"
-      [[ $got == "$want" ]] || die "Arch ISO checksum mismatch (got $got want $want)"
-      log "Arch ISO checksum ok" >&2
-    fi
-  else
-    log "WARNING: could not fetch sha256sums.txt — ISO not verified" >&2
-  fi
-  printf '%s\n' "$dest"
+  gum style --bold --foreground 3 "No Omarchy installer ISO found."
+  echo
+  gum style "This rescue USB boots the real Omarchy installer, so restoring a"
+  gum style "machine feels like the machine itself — not a bare rescue shell."
+  echo
+  gum style "Get it from $OMARCHY_ISO_INFO_URL, then either:"
+  gum style "  • leave it in ~/Downloads (it's picked up automatically), or"
+  gum style "  • point at it directly: OMARCHY_TM_ISO=/path/to/omarchy.iso oma-backups first-run /dev/sdX"
+  gum style "    (or: oma-backups format-disk /dev/sdX --iso /path/to/omarchy.iso)"
+  echo
+  gum style --foreground 8 "It's yours either way — also just a normal bootable Omarchy USB."
+  die "waiting on an Omarchy ISO — run this again once you have one"
 }
 
-extract_arch_iso() {
+extract_omarchy_iso() {
   local live=$1
   local iso loop
   rescue_umask
   progress set setup 40
-  iso="$(ensure_arch_iso | tail -n 1)"
-  [[ -f $iso ]] || die "Arch ISO not found ($iso)"
-  progress set setup 55
+  iso="$(ensure_omarchy_iso)"
+  step "Using Omarchy ISO: $(basename "$iso")"
+  progress set setup 45
   loop=$(mktemp -d /run/oma-archiso-XXXXXX)
   mount -o loop,ro "$iso" "$loop"
-  [[ -d $loop/arch ]] || { umount "$loop"; rmdir "$loop"; die "ISO has no /arch — not an Arch ISO"; }
-  mkdir -p "$live/arch"
+  [[ -d $loop/arch ]] || { umount "$loop"; rmdir "$loop"; die "ISO has no /arch — not an archiso-layout Omarchy ISO"; }
+  step "Extracting the Omarchy live system (this is the big one — it's ~6GB)"
   rsync -a --delete "$loop/arch/" "$live/arch/"
   umount "$loop"
   rmdir "$loop"
   [[ -d $live/arch/x86_64 || -d $live/arch/boot ]] || die "extracted ISO missing arch/boot or arch/x86_64"
   progress set setup 65
-  log "official Arch ISO extracted onto LIVE"
-}
-
-install_rescue_extras() {
-  local live=$1
-  rescue_umask
-  mkdir -p "$live/oma-extra"
-  # jq is used by the restore engine and is not on the stock Arch ISO.
-  local pkg
-  pkg="$(ls -1 /var/cache/pacman/pkg/jq-*.pkg.tar.zst 2>/dev/null | tail -1 || true)"
-  if [[ -z $pkg ]]; then
-    pacman -Sw --noconfirm jq >/dev/null 2>&1 || true
-    pkg="$(ls -1 /var/cache/pacman/pkg/jq-*.pkg.tar.zst 2>/dev/null | tail -1 || true)"
-  fi
-  if [[ -n $pkg && -f $pkg ]]; then
-    bsdtar -x -C "$live/oma-extra" -f "$pkg"
-  else
-    log "WARNING: jq package not available — restore engine needs jq"
-  fi
+  step "Omarchy live system extracted"
 }
 
 install_rescue_files() {
@@ -121,7 +110,6 @@ install_rescue_files() {
   chmod 755 "$live/oma-backups/share/rescue-run.sh" \
     "$live/oma-backups/share/oma-rescue-launch.sh"
   cp "$OMARCHY_TM_ROOT/share/RESTORE.txt" "$efi/RESTORE.txt"
-  install_rescue_extras "$live"
   if [[ -f /etc/omarchy-backups/config.toml ]]; then
     mkdir -p "$live/oma-backups/etc-omarchy-backups"
     cp /etc/omarchy-backups/config.toml "$live/oma-backups/etc-omarchy-backups/config.toml"
@@ -141,7 +129,7 @@ patch_airootfs() {
   launch="$OMARCHY_TM_ROOT/share/oma-rescue-launch.sh"
   [[ -f $launch ]] || die "missing $launch"
   work=$(mktemp -d /var/tmp/oma-airoot.XXXXXX)
-  log "patching Arch live image with restore launcher (this takes a few minutes)"
+  step "Patching the rescue image with the restore launcher (the slow part — repacking ~6GB, can take a while)"
   progress set setup 68
   unsquashfs -f -d "$work" "$sfs" >/dev/null
   progress set setup 80
@@ -169,7 +157,7 @@ Z
   mv -f "$newsfs" "$sfs"
   (cd "$live/arch/x86_64" && sha512sum airootfs.sfs >airootfs.sha512)
   rm -rf "$work"
-  log "Arch live image patched"
+  step "Rescue image patched"
 }
 
 install_rescue_kernel() {
@@ -178,16 +166,21 @@ install_rescue_kernel() {
   rescue_umask
   mkdir -p "$efi"
   rm -f "$efi/amd-ucode.img" "$efi/intel-ucode.img"
-  src="$(find "$live/arch/boot" -type f -name 'vmlinuz-linux' 2>/dev/null | head -1 || true)"
-  [[ -n $src ]] || die "no vmlinuz-linux on LIVE — extract the Arch ISO first"
+  # Omarchy's kernel build is suffixed (e.g. vmlinuz-linux-t2), not the
+  # plain "vmlinuz-linux" a stock Arch ISO ships — glob it rather than
+  # assuming the exact name. Our own boot config always references the
+  # fixed destination names below, so nothing downstream needs to know
+  # which variant was actually on the ISO.
+  src="$(find "$live/arch/boot" -type f -name 'vmlinuz-linux*' 2>/dev/null | head -1 || true)"
+  [[ -n $src ]] || die "no vmlinuz-linux* on LIVE — extract the Omarchy ISO first"
   cp "$src" "$efi/vmlinuz-linux"
-  src="$(find "$live/arch/boot" -type f -name 'initramfs-linux.img' 2>/dev/null | head -1 || true)"
-  [[ -n $src ]] || die "no initramfs-linux.img on LIVE — extract the Arch ISO first"
+  src="$(find "$live/arch/boot" -type f -name 'initramfs-linux*.img' 2>/dev/null | head -1 || true)"
+  [[ -n $src ]] || die "no initramfs-linux*.img on LIVE — extract the Omarchy ISO first"
   cp "$src" "$efi/initramfs-linux.img"
   for src in "$live/arch/boot/amd-ucode.img" "$live/arch/boot/intel-ucode.img"; do
     [[ -f $src ]] && cp "$src" "$efi/"
   done
-  log "copied Arch ISO kernel to EFI"
+  step "Kernel copied to the boot partition"
 }
 
 install_rescue_limine() {
@@ -196,8 +189,9 @@ install_rescue_limine() {
   rescue_umask
   [[ -f $efi/amd-ucode.img ]] && ucode+=$'\n    module_path: boot():/amd-ucode.img'
   [[ -f $efi/intel-ucode.img ]] && ucode+=$'\n    module_path: boot():/intel-ucode.img'
-  # Official Arch live. script= is archiso automated_script on tty1.
-  # Safe entry adds nomodeset if a GPU still blanks the console.
+  # Real Omarchy live environment (archiso under the hood). script= is
+  # archiso automated_script on tty1. Safe entry adds nomodeset if a GPU
+  # still blanks the console.
   cat >"$efi/limine.conf" <<'LIM'
 timeout: 8
 interface_branding: OmaBackups
@@ -237,7 +231,7 @@ LIM
   if command -v limine-install >/dev/null && [[ -n $disk && -b $disk ]]; then
     limine-install "$disk" || true
   fi
-  [[ -f $efi/EFI/BOOT/BOOTX64.EFI ]] || log "WARNING: no BOOTX64.EFI — USB may not UEFI-boot"
+  [[ -f $efi/EFI/BOOT/BOOTX64.EFI ]] || warn "no BOOTX64.EFI — USB may not UEFI-boot"
   progress set setup 99
 }
 
@@ -247,20 +241,14 @@ install_archiso_rescue() {
   rescue_umask
   mkdir -p "$live" "$efi"
   if [[ -d $live/usr && ! -d $live/arch ]]; then
-    log "replacing old pacstrap rescue with official Arch ISO"
+    step "Replacing the old rescue image"
     find "$live" -mindepth 1 -maxdepth 1 ! -name lost+found -exec rm -rf {} +
   fi
-  extract_arch_iso "$live"
+  extract_omarchy_iso "$live"
   patch_airootfs "$live"
   install_rescue_files "$live" "$efi"
   install_rescue_kernel "$live" "$efi"
   progress set setup 96
-}
-
-# Back-compat names used by format-disk.sh / refresh-rescue.sh
-pacstrap_rescue() {
-  local live=$1
-  extract_arch_iso "$live"
 }
 
 write_rescue_fstab() {

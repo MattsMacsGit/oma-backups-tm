@@ -20,7 +20,7 @@ update.”
 2. **Encrypted backup USB** — plug in, set it up from the plugin (wipe is explicit).
 3. **File history** — pick a date, browse that copy, copy files out.
 4. **Bare-metal restore** — firmware-boot the USB (Limine: “OmaBackups Restore”).
-   Official Arch live environment + a restore wizard. Pick a date, pick a disk,
+   Real Omarchy live environment + a restore wizard. Pick a date, pick a disk,
    type the name and YES.
 
 ## Install (Omarchy)
@@ -99,8 +99,8 @@ oma-backups restore-to-disk /dev/TARGET --snapshot TS --dry-run
 
 | Partition | Size | Filesystem | Role |
 |---|---|---|---|
-| `OMARCHY-EFI` | 1G | FAT32 | Limine + Arch ISO kernel |
-| `OMARCHY-LIVE` | 16G | ext4 | Official Arch ISO (`arch/`) + restore scripts |
+| `OMARCHY-EFI` | 1G | FAT32 | Limine + Omarchy ISO kernel |
+| `OMARCHY-LIVE` | 16G | ext4 | Real Omarchy ISO (`arch/`) + restore scripts |
 | LUKS → `OMARCHY-TM` | rest | btrfs zstd | `os/`, `home/`, `esp/`, `meta/` |
 
 Disk names (`sda` / `nvme0n1` / …) shuffle. Identify by **label** and `lsblk TRAN`.

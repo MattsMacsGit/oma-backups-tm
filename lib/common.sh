@@ -47,6 +47,29 @@ log() {
   printf '%s\n' "$*"
 }
 
+# File-only counterpart to log() — full detail for debugging, never the
+# terminal. Pair with step()/warn() for what the user actually sees.
+log_file() {
+  local line
+  line="$(ts) $*"
+  mkdir -p "$(dirname "$OMARCHY_TM_LOG")"
+  printf '%s\n' "$line" >>"$OMARCHY_TM_LOG" || true
+}
+
+# One quiet, dim narrated status line — the house style Omarchy's own
+# scripts use (gum style --foreground 8), e.g. omarchy-system-factory-reset.
+# Always also recorded to the log file.
+step() {
+  log_file "$1"
+  gum style --foreground 8 "  $1"
+}
+
+# Same, but for a non-fatal warning worth the user's attention (yellow).
+warn() {
+  log_file "WARNING: $1"
+  gum style --foreground 3 "  $1"
+}
+
 log_err() {
   local line
   line="$(ts) ERROR $*"
@@ -82,6 +105,8 @@ declare -A OMARCHY_TM_PKG_OF=(
   [jq]=jq
   [pv]=pv
   [arch-chroot]=arch-install-scripts
+  [gum]=gum
+  [bsdtar]=libarchive
 )
 
 # Ensure each named command is present, auto-installing its pacman package
@@ -198,6 +223,19 @@ run() {
   "$@"
 }
 
+# Same as run(), but the command line and its own output go to the log
+# file only — never the terminal. Pair with an explicit step() call so
+# the user sees a clean narrated line instead of the raw command.
+run_quiet() {
+  if is_dry_run; then
+    printf '[dry-run] %s\n' "$*"
+    log_file "[dry-run] $*"
+    return 0
+  fi
+  log_file "+ $*"
+  "$@" >>"$OMARCHY_TM_LOG" 2>&1
+}
+
 run_sh() {
   # run_sh 'pipeline...'
   if is_dry_run; then
@@ -264,7 +302,9 @@ confirm() {
     die "refusing non-interactive run without --yes: $prompt"
   fi
   local ans
-  read -r -p "$prompt [type YES]: " ans
+  echo
+  gum style --bold --foreground 3 "$prompt"
+  ans=$(gum input --placeholder "Type 'YES' to continue" --prompt "> ") || die "aborted"
   [[ $ans == YES ]] || die "aborted"
 }
 

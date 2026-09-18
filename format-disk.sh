@@ -11,17 +11,20 @@ source "$OMARCHY_TM_ROOT/lib/install-rescue.sh"
 
 usage() {
   cat <<'EOF'
-Usage: oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--force] [--skip-live]
+Usage: oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--force] [--skip-live] [--iso PATH]
 
 GPT:
-  1. ~1G FAT32   OMARCHY-EFI    UEFI ESP (Limine + Arch ISO kernel)
-  2. ~16G ext4   OMARCHY-LIVE   official Arch ISO files + restore scripts
+  1. ~1G FAT32   OMARCHY-EFI    UEFI ESP (Limine + Omarchy ISO kernel)
+  2. ~16G ext4   OMARCHY-LIVE   real Omarchy installer ISO + restore scripts
   3. rest LUKS2→btrfs OMARCHY-TM  backups
 
-Rescue is the official Arch installer environment (not Omarchy, not a
-pacstrap of this machine). Firmware boots Limine → Arch live → restore wizard.
+Rescue is the real Omarchy installer environment (not a pacstrap of this
+machine). Firmware boots Limine → Omarchy live → restore wizard. Needs an
+Omarchy ISO from https://omarchy.org/ — picked up automatically from
+~/Downloads, or point at one directly with --iso.
 
 --skip-live   partition + LUKS + btrfs only (no ISO/Limine)
+--iso PATH    use this Omarchy ISO instead of searching for one
 EOF
 }
 
@@ -37,10 +40,10 @@ while [[ $# -gt 0 ]]; do
     --force) export OMARCHY_TM_FORCE=1; shift ;;
     --allow-internal) export OMARCHY_TM_ALLOW_INTERNAL=1; shift ;;
     --skip-live) SKIP_LIVE=1; shift ;;
-    --iso|--extract-iso)
-      log "note: --iso is ignored; rescue is a pacstrap live OS (ISO squashfs > FAT32 limit)"
-      shift
-      [[ ${1:-} == --* || -z ${1:-} ]] || shift
+    --iso)
+      [[ -n ${2:-} ]] || die "--iso needs a path"
+      export OMARCHY_TM_ISO="$2"
+      shift 2
       ;;
     --*) die "unknown flag: $1" ;;
     *)
@@ -55,10 +58,12 @@ load_config_json
 require_supported
 require_root "${ORIG_ARGS[@]}"
 
-ensure_deps wipefs cryptsetup mkfs.fat mkfs.btrfs lsblk jq
+ensure_deps wipefs cryptsetup mkfs.fat mkfs.btrfs lsblk jq gum bsdtar
 if ! is_dry_run; then
   ensure_deps mkfs.ext4 sgdisk
-  [[ $SKIP_LIVE != 1 ]] && ensure_deps curl unsquashfs mksquashfs
+  # Check early — before anything on the disk is touched — rather than
+  # discovering it's missing partway through the wipe.
+  [[ $SKIP_LIVE != 1 ]] && ensure_omarchy_iso >/dev/null
 fi
 
 EFI_SIZE="$(cfg '.layout.efi_size')"
@@ -85,7 +90,7 @@ if ! is_dry_run; then
   P3_OLD="$(partition_path "$DISK" 3)"
   if [[ -b $P3_OLD ]]; then
     OLD_LUKS_UUID="$(luks_uuid_of "$P3_OLD")"
-    [[ -n $OLD_LUKS_UUID ]] && log "existing LUKS UUID $OLD_LUKS_UUID — will refuse to continue if this does not change"
+    [[ -n $OLD_LUKS_UUID ]] && log_file "existing LUKS UUID $OLD_LUKS_UUID — will refuse to continue if this does not change"
   fi
 fi
 
@@ -93,38 +98,28 @@ P1="$(partition_path "$DISK" 1)"
 P2="$(partition_path "$DISK" 2)"
 P3="$(partition_path "$DISK" 3)"
 
-# shellcheck source=lib/install-rescue.sh
-source "$OMARCHY_TM_ROOT/lib/install-rescue.sh"
-
-cat <<EOF
-== format-disk ==
-Target:     $DISK
-            $(lsblk -n -d -o SIZE,MODEL,TRAN "$DISK" 2>/dev/null || true)
-Layout:     GPT (bootable rescue)
-  $P1   ${EFI_SIZE} FAT32  ${EFI_LABEL}   (ESP)
-  $P2   ${LIVE_SIZE} ext4  ${LIVE_LABEL}  (rescue OS)
-  $P3   rest  LUKS2→btrfs ${TM_LABEL}
-Live OS:    $([[ $SKIP_LIVE == 1 ]] && echo skipped || echo "official Arch ISO + restore wizard")
-Dry-run:    ${OMARCHY_TM_DRY_RUN:-0}
-
-THIS ERASES $DISK.
-EOF
+echo
+gum style --bold "Setting up $DISK as a backup disk"
+echo
+gum style --foreground 8 "  $(lsblk -n -d -o SIZE,MODEL,TRAN "$DISK" 2>/dev/null || true)"
+gum style --foreground 8 "  $P1   ${EFI_SIZE} FAT32  ${EFI_LABEL}   (ESP)"
+gum style --foreground 8 "  $P2   ${LIVE_SIZE} ext4  ${LIVE_LABEL}  (rescue OS)"
+gum style --foreground 8 "  $P3   rest  LUKS2→btrfs ${TM_LABEL}"
+gum style --foreground 8 "  Live OS: $([[ $SKIP_LIVE == 1 ]] && echo skipped || echo "real Omarchy installer + restore wizard")"
+is_dry_run && gum style --foreground 8 "  Dry-run: no changes will be made"
+echo
+gum style --bold --foreground 1 "This erases $DISK."
+echo
 
 ask_new_luks_pass() {
   local tty=/dev/tty
   local p1="" p2=""
   if [[ -r $tty && -w $tty ]]; then
-    {
-      echo
-      echo "============================================================"
-      echo " NEW encryption password for this backup disk"
-      echo " (not your login password — you will need this to restore)"
-      echo "============================================================"
-    } >"$tty"
-    read -r -s -p "Encryption password: " p1 <"$tty" || true
-    echo >"$tty"
-    read -r -s -p "Confirm password:    " p2 <"$tty" || true
-    echo >"$tty"
+    echo
+    gum style --foreground 8 "New encryption password for this backup disk — not your login"
+    gum style --foreground 8 "password, you will need this to restore."
+    p1=$(gum input --password --header "Encryption password") || die "aborted"
+    p2=$(gum input --password --header "Confirm password") || die "aborted"
   else
     # No controlling terminal (plugin-driven run with "show terminal" off)
     # — the plugin prompts for the password itself and sends it over
@@ -154,7 +149,7 @@ if is_dry_run; then
 [dry-run] cryptsetup luksFormat --type luks2 --batch-mode $P3
 [dry-run] cryptsetup open $P3 ${LUKS_MAPPER}
 [dry-run] mkfs.btrfs -L ${TM_LABEL} /dev/mapper/${LUKS_MAPPER}
-[dry-run] extract official Arch ISO onto $P2; limine-install $DISK
+[dry-run] extract the Omarchy ISO onto $P2; limine-install $DISK
 [dry-run] mkdir ${MNT}/{meta,os,home,esp}
 EOF
   echo "No changes made."
@@ -164,30 +159,35 @@ fi
 fail_setup() {
   unset LUKS_PASS || true
   echo
-  echo "============================================================" >&2
-  echo " SETUP FAILED — the backup disk was NOT re-encrypted." >&2
-  echo " The old password and old copies are unchanged." >&2
-  echo " $*" >&2
-  echo "============================================================" >&2
+  gum style --bold --foreground 1 "Setup failed — the backup disk was NOT re-encrypted."
+  gum style --foreground 8 "The old password and old copies are unchanged."
+  gum style --foreground 1 "$*"
   if [[ -r /dev/tty ]]; then
     read -r -p "Press Enter to close." _ < /dev/tty || true
   fi
   exit 130
 }
 
+# Safety net for a command failure we didn't explicitly check — run_quiet's
+# output only goes to the log file now, so without this the terminal would
+# otherwise just go blank with no clue what happened.
+trap 'fail_setup "unexpected failure — see $OMARCHY_TM_LOG for details"' ERR
+
 close_crypt_on_disk "$DISK" || fail_setup "could not unlock-close the old volume"
 if [[ -b $P3 ]]; then
   wipe_luks_header "$P3"
 fi
-run wipefs -a "$DISK" || true
-run sgdisk --zap-all "$DISK"
-run sgdisk \
+step "Wiping old partition signatures"
+run_quiet wipefs -a "$DISK" || true
+step "Partitioning the disk"
+run_quiet sgdisk --zap-all "$DISK"
+run_quiet sgdisk \
   -n "1:0:+${EFI_SIZE}" -t 1:ef00 -c 1:"$EFI_LABEL" \
   -n "2:0:+${LIVE_SIZE}" -t 2:8300 -c 2:"$LIVE_LABEL" \
   -n 3:0:0 -t 3:8309 -c 3:"$TM_LABEL" \
   "$DISK"
-run partprobe "$DISK" || true
-command -v udevadm >/dev/null && run udevadm settle || true
+run_quiet partprobe "$DISK" || true
+command -v udevadm >/dev/null && run_quiet udevadm settle || true
 sleep 2
 close_crypt_on_disk "$DISK" || true
 [[ -b $P1 && -b $P2 && -b $P3 ]] || fail_setup "new partitions did not appear"
@@ -198,7 +198,7 @@ progress set setup 15
 
 # Encrypt FIRST so a later EFI/live failure cannot leave the old volume in place.
 wipe_luks_header "$P3"
-log "LUKS format of $P3"
+step "Setting up encryption"
 if ! printf '%s' "$LUKS_PASS" | cryptsetup luksFormat --type luks2 --batch-mode --key-file=- "$P3"; then
   fail_setup "cryptsetup luksFormat failed"
 fi
@@ -207,25 +207,27 @@ new_uuid="$(luks_uuid_of "$P3")"
 if [[ -n $OLD_LUKS_UUID && $new_uuid == "$OLD_LUKS_UUID" ]]; then
   fail_setup "LUKS UUID did not change (still $new_uuid)"
 fi
-log "new LUKS UUID $new_uuid (was ${OLD_LUKS_UUID:-none})"
-printf '\nNew encryption UUID: %s\n(this MUST be different from the old one)\n\n' "$new_uuid" > /dev/tty || true
+log_file "new LUKS UUID $new_uuid (was ${OLD_LUKS_UUID:-none})"
 if ! printf '%s' "$LUKS_PASS" | cryptsetup open --key-file=- "$P3" "$LUKS_MAPPER"; then
   fail_setup "could not open the new LUKS volume with the password you just set"
 fi
 unset LUKS_PASS
 progress set setup 22
-run mkfs.btrfs -f -L "$TM_LABEL" "/dev/mapper/${LUKS_MAPPER}"
+
+step "Formatting the encrypted volume"
+run_quiet mkfs.btrfs -f -L "$TM_LABEL" "/dev/mapper/${LUKS_MAPPER}"
 mkdir -p "$MNT"
-run mount -o compress=zstd:3 "/dev/mapper/${LUKS_MAPPER}" "$MNT"
+run_quiet mount -o compress=zstd:3 "/dev/mapper/${LUKS_MAPPER}" "$MNT"
 if compgen -G "$MNT/home/20*" >/dev/null || compgen -G "$MNT/os/20*" >/dev/null; then
   fail_setup "old restore points are still on the disk — format did not wipe the volume"
 fi
-run mkdir -p "$MNT/meta" "$MNT/os" "$MNT/home" "$MNT/esp"
+run_quiet mkdir -p "$MNT/meta" "$MNT/os" "$MNT/home" "$MNT/esp"
 chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || true
 progress set setup 30
 
-run mkfs.fat -F32 -n "$EFI_LABEL" "$P1"
-run mkfs.ext4 -F -L "$LIVE_LABEL" "$P2"
+step "Formatting the boot and rescue partitions"
+run_quiet mkfs.fat -F32 -n "$EFI_LABEL" "$P1"
+run_quiet mkfs.ext4 -F -L "$LIVE_LABEL" "$P2"
 progress set setup 35
 
 install_live() {
@@ -236,14 +238,14 @@ install_live() {
   local live=/run/oma-backups-live
   local efi=/run/omarchy-backups-efi
   mkdir -p "$live" "$efi"
-  run mount "$P2" "$live"
-  run mount "$P1" "$efi"
+  run_quiet mount "$P2" "$live"
+  run_quiet mount "$P1" "$efi"
   install_archiso_rescue "$live" "$efi"
   install_rescue_limine "$DISK" "$efi"
   umount "$efi" || true
   umount "$live" || true
   rmdir "$live" "$efi" || true
-  log "Arch ISO rescue installed on $P2"
+  step "Rescue system installed on $LIVE_LABEL"
 }
 
 if [[ $SKIP_LIVE != 1 ]]; then
@@ -258,8 +260,11 @@ fi
 progress set setup 100
 
 sync
-run umount "$MNT"
-run cryptsetup close "$LUKS_MAPPER"
+run_quiet umount "$MNT"
+run_quiet cryptsetup close "$LUKS_MAPPER"
 
-log "formatted $DISK as an OmaBackups USB."
-log "Firmware boot this USB for rescue. Next: oma-backups mount --disk $DISK && oma-backups backup"
+trap - ERR
+echo
+gum style --bold --foreground 2 "● Backup disk ready."
+gum style --foreground 8 "  Firmware-boot this USB for a full rescue."
+gum style --foreground 8 "  Next: oma-backups mount --disk $DISK && oma-backups backup"

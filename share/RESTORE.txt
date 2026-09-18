@@ -4,7 +4,7 @@ OmaBackups — boot this USB to restore
 Firmware boot menu → this USB.
 
 Limine shows “OmaBackups Restore” (or the text-console entry if the
-screen is blank). That boots the official Arch Linux live environment
+screen is blank). That boots the real Omarchy installer environment
 and starts a text wizard:
 
   1. Unlock the backup (the password you set when you formatted this USB)

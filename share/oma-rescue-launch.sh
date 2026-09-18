@@ -50,7 +50,7 @@ ROOT="$(find_root || true)"
 if [[ -z ${ROOT:-} ]]; then
   echo
   echo "  Could not find OmaBackups on OMARCHY-LIVE / OMARCHY-EFI."
-  echo "  You are on the official Arch live prompt (network: iwctl)."
+  echo "  You are on the Omarchy live prompt (network: iwctl)."
   echo "  Try:"
   echo "    mkdir -p /run/oma-usb && mount -L OMARCHY-LIVE /run/oma-usb"
   echo "    bash /run/oma-usb/oma-backups/share/rescue-run.sh"
