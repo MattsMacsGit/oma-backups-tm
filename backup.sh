@@ -279,9 +279,6 @@ cmd_backup() {
   echo "============================================================"
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" || true
   echo
-  if [[ -t 0 ]]; then
-    read -r -p "Press Enter to close." _ || true
-  fi
 }
 
 cmd_list() {
