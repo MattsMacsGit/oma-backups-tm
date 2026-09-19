@@ -135,5 +135,8 @@ say "This Pi is ready."
 if [[ $present == True ]]; then
   step "The backup disk is already plugged in."
 else
-  step "Now plug the backup disk into the powered hub. The laptop does the rest."
+  step "Now plug in the backup disk. The laptop does the rest."
 fi
+warn "Plugging a USB-powered drive into a shared hub can briefly knock the other"
+warn "drives on it offline. Stop services that use them first (e.g. Docker), or"
+warn "give the backup disk its own power."

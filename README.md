@@ -60,6 +60,29 @@ Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
 
 Not restic. Not `btrfs send`. Not `dd`.
 
+## Back up to a Raspberry Pi (beta)
+
+Keep the backup USB plugged into an always-on Pi (Raspberry Pi OS / Debian 12
+or newer) and back up over your network or Tailscale.
+
+1. Set up the backup USB and run a backup, as usual.
+2. With it still plugged into the laptop: `oma-backups remote pair <pi-name>`
+   (a Tailscale name, IP, or ssh alias). This adds a laptop-only unlock key to
+   the disk and sets up the Pi over your normal SSH login (it asks for the
+   Pi's sudo password once).
+3. Plug the USB into the Pi. Backups now go there whenever the USB isn't
+   plugged into the laptop.
+
+The disk stays locked between backups; the laptop sends the unlock key each
+time. The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
+that unlocks this one disk and writes backups to it, nothing else on the Pi.
+Full restores still need the USB brought back and booted.
+
+**Power:** a USB-powered backup drive plugged into a hub the Pi's other drives
+share can knock those drives offline for a moment while it spins up. Stop
+services that use them (e.g. Docker) before plugging it in, or give the
+backup drive its own power.
+
 ## Safety
 
 - USB disks only, unless **Show all disks** (Settings)

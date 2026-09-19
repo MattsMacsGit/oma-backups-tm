@@ -189,8 +189,10 @@ def v_chmod755(args: list[str]) -> None:
     require_mounted()
     # Depth 3 so a restore point's user folder (home/<ts>/<user>) can be opened.
     for p in (target(a, depth=3) for a in args):
-        if p.exists():
+        try:
             os.chmod(p, 0o755)
+        except OSError as e:
+            log(f"chmod skipped: {e}")
 
 
 def v_list(args: list[str]) -> None:

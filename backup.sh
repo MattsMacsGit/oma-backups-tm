@@ -439,10 +439,9 @@ cmd_backup() {
     rgate write-meta <"$meta.tmp" 2>>"$OMARCHY_TM_LOG" ||
       fail_backup "couldn't save the restore-point list on $REMOTE_HOST"
     rm -f "$meta" "$meta.tmp"
-    local perms=(os home esp meta os/current home/current "os/$ts" "home/$ts")
-    # File manager on a restore point should show $USER, not an empty parent.
-    [[ -n $user_name ]] && perms+=("home/$ts/$user_name")
-    d_chmod755 "${perms[@]}"
+    # Restore points themselves are read-only snapshots, so only the
+    # writable parents can be opened up.
+    d_chmod755 os home esp meta os/current home/current
   else
     mv "$meta.tmp" "$meta"
     chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || true

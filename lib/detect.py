@@ -520,7 +520,9 @@ def detect() -> dict:
                 capsule_disk = {"total": du.total, "used": du.used, "free": du.free}
             except OSError:
                 capsule_disk = None
-        else:
+        elif not Path("/etc/omarchy-backups/remote.json").is_file():
+            # With a paired Pi the disk is never mounted here; its restore
+            # points come from the cache each remote backup writes.
             write_cache([])
     except Exception:
         snapshots = []
