@@ -27,6 +27,9 @@ if [[ $COPY == 1 ]]; then
     --exclude '.git/' --exclude '__pycache__/' --exclude '*.pyc' \
     "$ROOT/" "$SHARE/"
 else
+  # ln -sfn onto a real directory (left by --copy) nests the link inside it
+  # and keeps serving the stale copy, so clear it first.
+  [[ -d $SHARE && ! -L $SHARE ]] && rm -rf "$SHARE"
   ln -sfn "$ROOT" "$SHARE"
 fi
 
@@ -42,7 +45,7 @@ rsync -a "$ROOT/plugin/oma.backups/" "$PLUGIN/"
 printf '%s\n' "$SHARE" >"$CFG/root"
 if [[ ! -f $CFG/skip-paths.txt ]]; then
   cat >"$CFG/skip-paths.txt" <<'EOF'
-# OmaBackups skip list — one absolute path per line
+# OmaBackups skip list — one entry per line
 # Example: /home/you/Videos
 EOF
 fi

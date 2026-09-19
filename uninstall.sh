@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Remove OmaBackups from this user account.
+# Remove OmaBackups from this user account, and (after asking) the folder
+# this repo was cloned into.
 #
-# Does NOT touch: any backup USB disk, or the folder you cloned this repo
-# into (delete that yourself if you're done with it).
+# Does NOT touch any backup USB disk.
 set -euo pipefail
 
+SRC="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 BINDIR="${XDG_BIN_HOME:-$HOME/.local/bin}"
 SHARE="${XDG_DATA_HOME:-$HOME/.local/share}/oma-backups"
 PLUGIN="$HOME/.config/omarchy/plugins/oma.backups"
@@ -13,6 +14,22 @@ STATE="$HOME/.local/state/omarchy-backups"
 
 PURGE=0
 [[ ${1:-} == --purge ]] && PURGE=1
+
+ask() {
+  if command -v gum >/dev/null 2>&1; then
+    gum confirm "$1"
+  else
+    local reply
+    read -rp "$1 [Y/n] " reply
+    [[ -z $reply || $reply == [Yy]* ]]
+  fi
+}
+
+# Only offer to delete something that is unmistakably this repo.
+REMOVE_SRC=0
+if [[ -f $SRC/install.sh && -d $SRC/plugin/oma.backups && $SRC != "$HOME" ]]; then
+  ask "Also delete the source folder $SRC?" && REMOVE_SRC=1
+fi
 
 if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin disable oma.backups >/dev/null 2>&1 || true
@@ -43,11 +60,16 @@ else
   echo "Re-run with --purge to remove those too."
 fi
 
+if [[ $REMOVE_SRC == 1 ]]; then
+  cd "$HOME"
+  rm -rf "$SRC"
+  echo "Removed the source folder $SRC."
+else
+  echo "Kept the source folder $SRC."
+fi
+
 cat <<'EOF'
 
 OmaBackups removed from this account.
-
-Not touched:
-  - Any backup USB disk (unplug it, or wipe/reformat it yourself if done)
-  - The folder you cloned this repo into (rm -rf it yourself if done)
+Any backup USB disk was not touched (unplug it, or reformat it yourself if done).
 EOF
