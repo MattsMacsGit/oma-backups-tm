@@ -6,12 +6,16 @@ root. The request arrives in SSH_ORIGINAL_COMMAND and must be one of the verbs
 in VERBS; anything else is refused. It only ever touches the one LUKS disk
 pinned in gate.conf, mounted at /run/omarchy-backups, and only the top-level
 backup layout inside it (os/, home/, esp/, meta/).
+
+A network rescue stick has its own key, forced through `oma-gate --rescue`:
+it can unlock with the disk password, list, read, and lock. Nothing else.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import pwd
 import re
 import shlex
 import shutil
@@ -20,7 +24,7 @@ import sys
 import syslog
 from pathlib import Path
 
-VERSION = "4"
+VERSION = "5"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -30,12 +34,22 @@ UUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 LOW_PRIORITY = ["nice", "-n", "10", "ionice", "-c2", "-n7"]
 MAX_KEY = 8192
 MAX_META = 1 << 20
+ACCOUNT = "omabackups"
+RESCUE_TAG = "oma-rescue"
+PUBKEY = re.compile(r"^ssh-ed25519 [A-Za-z0-9+/=]+$")
+RESCUE = sys.argv[1:] == ["--rescue"]
 
 # Non-root runs are tests only: they may point the gate at a scratch folder.
 # In production sudo strips the environment, and root never reads these.
 TEST = os.geteuid() != 0
 CONF = Path(os.environ.get("OMA_GATE_CONF", "")) if TEST else Path("/etc/oma-backups/gate.conf")
 MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarchy-backups")
+
+
+def keys_file() -> Path:
+    if TEST:
+        return Path(os.environ.get("OMA_GATE_KEYS", ""))
+    return Path(pwd.getpwnam(ACCOUNT).pw_dir, ".ssh", "authorized_keys")
 
 
 class Refused(Exception):
@@ -273,6 +287,61 @@ def v_settle(args: list[str]) -> None:
     run("btrfs", "subvolume", "sync", str(MOUNT))
 
 
+def v_check_pass(args: list[str]) -> None:
+    """Exit 0 if the password on stdin opens the backup disk (nothing is unlocked)."""
+    dev = device()
+    if not dev.exists():
+        raise Refused("capsule not plugged in (or not powered)")
+    key = sys.stdin.buffer.read(MAX_KEY + 1)
+    if not key or len(key) > MAX_KEY:
+        raise Refused("password missing or too large")
+    r = subprocess.run(["cryptsetup", "open", "--test-passphrase", "--key-file=-", str(dev)],
+                       input=key, stdout=sys.stderr)
+    if r.returncode != 0:
+        raise Refused("that password doesn't open the backup disk")
+
+
+def v_addresses(args: list[str]) -> None:
+    """This Pi's IP addresses, so a rescue stick can find it without DNS."""
+    r = subprocess.run(["ip", "-o", "-4", "addr", "show", "scope", "global"], capture_output=True, text=True)
+    addrs = [f[3].split("/")[0] for f in (line.split() for line in r.stdout.splitlines()) if len(f) > 3]
+    print(json.dumps(addrs))
+
+
+def write_keys(lines: list[str]) -> None:
+    path = keys_file()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    if not TEST:
+        pw = pwd.getpwnam(ACCOUNT)
+        os.chown(tmp, pw.pw_uid, pw.pw_gid)
+    tmp.replace(path)
+
+
+def other_keys() -> list[str]:
+    try:
+        lines = keys_file().read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return []
+    return [line for line in lines if line.strip() and not line.rstrip().endswith(" " + RESCUE_TAG)]
+
+
+def v_set_rescue_key(args: list[str]) -> None:
+    """Install the rescue stick's key, replacing any older stick's key."""
+    key = sys.stdin.read(MAX_KEY + 1).strip()
+    if not PUBKEY.match(key):
+        raise Refused("not an ssh-ed25519 public key")
+    gate = str(Path(__file__).resolve())
+    write_keys(other_keys() + [f'restrict,command="sudo -n {gate} --rescue" {key} {RESCUE_TAG}'])
+    log("rescue stick key installed")
+
+
+def v_revoke_rescue_key(args: list[str]) -> None:
+    write_keys(other_keys())
+    log("rescue stick key removed")
+
+
 SFTP_SERVERS = ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/lib/ssh/sftp-server")
 
 
@@ -318,7 +387,8 @@ def v_rsync(argv: list[str], original: str) -> None:
         raise Refused("only rsync server mode is allowed")
     require_mounted()
     env = dict(os.environ, SSH_ORIGINAL_COMMAND=original)
-    os.execvpe(LOW_PRIORITY[0], LOW_PRIORITY + ["rrsync", str(MOUNT)], env)
+    ro = ["-ro"] if RESCUE else []
+    os.execvpe(LOW_PRIORITY[0], LOW_PRIORITY + ["rrsync", *ro, str(MOUNT)], env)
 
 
 VERBS = {
@@ -338,14 +408,21 @@ VERBS = {
     "df": (v_df, 0),
     "delete": (v_delete, 1),
     "settle": (v_settle, 0),
+    "check-pass": (v_check_pass, 0),
+    "addresses": (v_addresses, 0),
+    "set-rescue-key": (v_set_rescue_key, 0),
+    "revoke-rescue-key": (v_revoke_rescue_key, 0),
     "browse": (v_browse, 2),
     # sshfs runs a custom SFTP server only if its name contains a "/".
     "/browse": (v_browse, 2),
 }
 
+# A rescue stick only ever reads: rsync is forced read-only in v_rsync.
+RESCUE_VERBS = {v: VERBS[v] for v in ("version", "status", "unlock", "lock", "list", "exists")}
+
 
 def main() -> int:
-    syslog.openlog("oma-gate")
+    syslog.openlog("oma-gate-rescue" if RESCUE else "oma-gate")
     original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
     try:
         try:
@@ -357,7 +434,7 @@ def main() -> int:
         if argv[0] == "rsync":
             v_rsync(argv, original)
             return 0
-        verb = VERBS.get(argv[0])
+        verb = (RESCUE_VERBS if RESCUE else VERBS).get(argv[0])
         if verb is None:
             raise Refused(f"unknown command {argv[0]!r}")
         fn, nargs = verb
