@@ -95,6 +95,25 @@ Item {
     return (r || shareRoot) + "/lib/schedule.py"
   }
 
+  // When the hourly check will next run a backup: due one interval after the
+  // last successful one (a little early, like schedule.sh), at the first
+  // top-of-the-hour check after that.
+  property real lastSuccess: 0
+  property real nowSec: Date.now() / 1000
+  readonly property string nextBackupText: {
+    if (!scheduleOn) return ""
+    var interval = { hourly: 3600, daily: 86400, weekly: 604800 }[schedule.every] || 86400
+    var due = Math.max(lastSuccess + interval - interval / 12, nowSec)
+    // The timer fires on the hour in local time (not UTC: half-hour zones).
+    var next = new Date(due * 1000)
+    if (next.getMinutes() || next.getSeconds() || next.getMilliseconds()) {
+      next.setMinutes(0, 0, 0)
+      next.setHours(next.getHours() + 1)
+    }
+    var today = new Date(nowSec * 1000).toDateString() === next.toDateString()
+    return "Next automatic backup around " + Qt.formatDateTime(next, today ? "HH:mm" : "ddd HH:mm")
+  }
+
   function setSchedule(key, value) {
     scheduleProc.command = ["python3", root.scheduleTool, "set", key, String(value)]
     scheduleProc.running = true
@@ -136,6 +155,9 @@ Item {
     browseStartProc.command = ["systemctl", "start", "oma-backups-browse@" + ts + ".service"]
     browseStartProc.running = true
     browsePoll.start()
+    if (root.remoteActive)
+      Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Opening " + Model.prettyStamp(ts),
+        "From " + root.remoteHost + ". This can take a few seconds over the network."])
   }
 
   function closeBrowse() {
@@ -193,6 +215,8 @@ Item {
     scheduleFile.reload()
     timerFile.reload()
     linkedFile.reload()
+    lastSuccessFile.reload()
+    nowSec = Date.now() / 1000
     if (!skipLoaded) loadSkipFile()
   }
 
@@ -565,6 +589,17 @@ Item {
       browseReadProc.command = ["cat", "/run/omarchy-backups-browse/" + root.browseTs + ".json"]
       browseReadProc.running = true
     }
+  }
+
+  FileView {
+    id: lastSuccessFile
+    path: root.home + "/.local/state/omarchy-backups/last-success"
+    printErrors: false
+    onLoaded: {
+      var v = parseInt(String(text()).trim(), 10)
+      root.lastSuccess = isNaN(v) ? 0 : v
+    }
+    onLoadFailed: root.lastSuccess = 0
   }
 
   FileView {

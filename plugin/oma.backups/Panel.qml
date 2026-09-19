@@ -319,6 +319,15 @@ Panel {
               fontFamily: root.fontFamily
               onClicked: svc.startBackup()
             }
+            Text {
+              visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: svc.nextBackupText
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+            }
             Button {
               width: parent.width
               visible: svc.backupRunning || svc.launchedBackup
