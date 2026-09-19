@@ -34,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --yes) export OMARCHY_TM_YES=1; shift ;;
     --home-only) HOME_ONLY=1; export OMARCHY_TM_HOME_ONLY=1; shift ;;
     --list) MODE=list; shift ;;
+    --prune) MODE=prune; shift ;;
     --json) LIST_JSON=1; shift ;;
     --check) MODE=check; shift ;;
     --files) MODE=files; shift; break ;;
@@ -122,7 +123,7 @@ remote_open() {
     fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
   [[ $(jq -r .present <<<"$st") == true ]] ||
     fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
-  rgate unlock <"$OMA_REMOTE_LUKS_KEY" 2>>"$OMARCHY_TM_LOG" ||
+  rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" ||
     fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Re-pair it: oma-backups remote pair $REMOTE_HOST"
 }
 
@@ -275,6 +276,125 @@ fail_backup() {
   exit 130
 }
 
+refuse_if_running() {
+  local other
+  other="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
+    grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
+    fail_backup "Another backup is already running (pid $other)."
+  fi
+}
+
+open_destination() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    step "Unlocking the backup disk on $REMOTE_HOST"
+    progress phase "unlock"
+    remote_open
+    trap remote_close EXIT
+    return 0
+  fi
+  if ! findmnt -n "$MNT" >/dev/null 2>&1; then
+    step "Backup disk not mounted — unlocking"
+    progress phase "unlock"
+    "$OMARCHY_TM_ROOT/mount.sh" mount
+  fi
+  ensure_rw_mount "$MNT"
+  findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "capsule not mounted at $MNT"
+  { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
+    fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
+}
+
+d_list_json() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate list 2>>"$OMARCHY_TM_LOG"
+  else
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json
+  fi
+}
+
+# "TOTAL FREE" in bytes.
+d_df() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate df 2>>"$OMARCHY_TM_LOG"
+  else
+    df -B1 --output=size,avail "$MNT" | tail -1 | awk '{print $1, $2}'
+  fi
+}
+
+d_delete_point() {
+  local ts=$1
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 1
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate delete "$ts" 2>>"$OMARCHY_TM_LOG"
+  else
+    local kind newest
+    newest="$(find "$MNT/home" "$MNT/os" -maxdepth 1 -regex '.*/[0-9]\{8\}T[0-9]\{6\}Z' -printf '%f\n' 2>/dev/null | sort | tail -1)"
+    [[ $ts != "$newest" ]] || return 1
+    for kind in os home; do
+      if [[ -d $MNT/$kind/$ts ]]; then
+        btrfs subvolume delete "$MNT/$kind/$ts" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+      fi
+    done
+    rm -rf "${MNT:?}/esp/$ts"
+  fi
+}
+
+# Wait until btrfs has really freed the space of deleted restore points.
+d_settle() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate settle 2>>"$OMARCHY_TM_LOG"
+  else
+    btrfs subvolume sync "$MNT" >>"$OMARCHY_TM_LOG" 2>&1
+  fi
+}
+
+disk_low() {
+  local total free
+  read -r total free < <(d_df) || return 1
+  [[ ${total:-0} -gt 0 ]] && ((free * 10 < total))
+}
+
+# Thin old restore points (Time Machine-style) and, when the disk is under
+# 10% free, delete the oldest until it isn't. Never the newest. With the
+# "keep" setting nothing is deleted; the user is warned instead.
+prune_restore_points() {
+  local dry=${1:-0} mode plan ts n=0
+  mode="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get retention)"
+  if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 2 ]]; then
+    warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up. Update it by running this on the Pi:"
+    warn "  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+    return 0
+  fi
+  plan="$(d_list_json | jq -r '.[].timestamp' |
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
+  if [[ $dry == 1 ]]; then
+    echo "Setting: $mode"
+    jq -r '"Keep:    \(.keep | length)", "Thin:    \(.thin | join(" "))", "If the disk fills, oldest first: \(.space_order | join(" "))"' <<<"$plan"
+    disk_low && echo "The disk is under 10% free right now."
+    return 0
+  fi
+  for ts in $(jq -r '.thin[]' <<<"$plan"); do
+    d_delete_point "$ts" && n=$((n + 1)) && log_file "thinned restore point $ts"
+  done
+  ((n == 0)) || d_settle || true
+  if disk_low; then
+    if [[ $mode == keep ]]; then
+      warn "The backup disk is nearly full (under 10% free)."
+      notify_user "Backup disk nearly full" "Less than 10% free. Delete old restore points or use a bigger disk." nearly-full
+      return 0
+    fi
+    for ts in $(jq -r '.space_order[]' <<<"$plan"); do
+      d_delete_point "$ts" || break
+      n=$((n + 1))
+      log_file "deleted restore point $ts to free space"
+      d_settle || true
+      disk_low || break
+    done
+    disk_low && warn "The backup disk is still nearly full, even after removing old restore points."
+  fi
+  ((n == 0)) || step "Tidied up $n old restore point(s)"
+}
+
 cmd_backup() {
   require_excludes_visible
   dest_mounted() { findmnt -n "$MNT" >/dev/null 2>&1; }
@@ -289,11 +409,9 @@ cmd_backup() {
     exit 0
   fi
   require_root "${ORIG_ARGS[@]}"
-  local other
-  other="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
-  if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
-    grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
-    fail_backup "Another backup is already running (pid $other)."
+  refuse_if_running
+  if [[ -f $OMA_SCHEDULE_UNIT && ${OMARCHY_TM_UNATTENDED:-0} != 1 ]]; then
+    refresh_root_copy || warn "Couldn't update the copy automatic backups run from."
   fi
   refresh_excludes_from_user
   # A backup disk unplugged while mounted leaves a dead mount at $MNT that
@@ -301,22 +419,7 @@ cmd_backup() {
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
   announce_backup "$ts"
-  if [[ $DEST_REMOTE == 1 ]]; then
-    step "Unlocking the backup disk on $REMOTE_HOST"
-    progress phase "unlock"
-    remote_open
-    trap remote_close EXIT
-  else
-    if ! dest_mounted; then
-      step "Backup disk not mounted — unlocking"
-      progress phase "unlock"
-      "$OMARCHY_TM_ROOT/mount.sh" mount
-    fi
-    ensure_rw_mount "$MNT"
-    dest_mounted || fail_backup "capsule not mounted at $MNT"
-    { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
-      fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
-  fi
+  open_destination
   while d_exists "os/$ts" || d_exists "home/$ts"; do
     sleep 1
     ts="$(now_timestamp)"
@@ -453,6 +556,12 @@ cmd_backup() {
     fi
   fi
   trap - ERR
+  if [[ $valid == true ]]; then
+    date +%s >"$OMARCHY_TM_STATE/last-success"
+    chmod 644 "$OMARCHY_TM_STATE/last-success" 2>/dev/null || true
+    progress phase "tidy"
+    prune_restore_points || warn "Couldn't tidy up old restore points (this backup is still saved)."
+  fi
   progress done "valid=$valid ts=$ts"
   log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
   local listing
@@ -470,6 +579,23 @@ cmd_backup() {
   echo
   printf '%s\n' "$listing"
   echo
+}
+
+cmd_prune() {
+  # Even a dry run has to unlock the disk to read its restore points.
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  refuse_if_running
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  open_destination
+  write_pid
+  trap 'remote_close; clear_pid' EXIT
+  local dry=0
+  is_dry_run && dry=1
+  prune_restore_points "$dry"
+  if [[ $DEST_REMOTE == 1 && $dry == 0 ]]; then
+    rgate list 2>>"$OMARCHY_TM_LOG" | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" --stdin --json >/dev/null || true
+  fi
 }
 
 cmd_list() {
@@ -517,4 +643,5 @@ case "$MODE" in
   files) cmd_files "$@" ;;
   copy) cmd_copy "$@" ;;
   backup) cmd_backup ;;
+  prune) cmd_prune ;;
 esac

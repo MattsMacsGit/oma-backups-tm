@@ -478,6 +478,53 @@ Panel {
             }
 
             PanelSectionHeader {
+              text: "AUTOMATIC BACKUPS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Toggle {
+              width: parent.width
+              label: "Back up automatically"
+              description: svc.scheduleOn
+                ? "Skips quietly when the backup disk isn’t reachable or the battery is under 20%."
+                : (svc.hasCapsule
+                  ? "Asks for the backup disk password once, so backups can run while you’re away."
+                  : "Set up a backup disk first.")
+              checked: svc.scheduleOn
+              enabled: svc.hasCapsule || svc.scheduleOn
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: {
+                if (svc.scheduleOn) svc.setSchedule("enabled", "false")
+                else svc.enableSchedule()
+              }
+            }
+            ButtonGroup {
+              visible: svc.scheduleOn
+              options: [
+                { value: "hourly", label: "Hourly" },
+                { value: "daily", label: "Daily" },
+                { value: "weekly", label: "Weekly" }
+              ]
+              value: svc.schedule.every
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onChanged: function (v) { svc.setSchedule("every", v) }
+            }
+            Toggle {
+              width: parent.width
+              label: "Smart thinning"
+              description: svc.schedule.retention === "smart"
+                ? "Recommended. Keeps every backup from the last day, one a day for a month, then one a week. Deletes the oldest when the disk is nearly full."
+                : "Never deletes restore points. Warns you when the backup disk is nearly full."
+              checked: svc.schedule.retention === "smart"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: svc.setSchedule("retention", checked ? "keep" : "smart")
+            }
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader {
               text: "QUICK SKIPS"
               foreground: root.foreground
               fontFamily: root.fontFamily

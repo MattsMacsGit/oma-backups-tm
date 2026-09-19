@@ -77,6 +77,25 @@ Item {
   readonly property bool remoteActive: remote !== null && capsule === null
   readonly property string remoteHost: remote ? String(remote.host || "") : ""
   readonly property bool hasCapsule: capsule !== null || remote !== null
+
+  // Automatic backups: settings live in the user's schedule.json; the root
+  // timer only exists once `schedule enable` has run.
+  property var schedule: ({ enabled: false, every: "daily", retention: "smart" })
+  property bool scheduleInstalled: false
+  readonly property bool scheduleOn: schedule.enabled === true && scheduleInstalled
+  readonly property string scheduleTool: {
+    var r = detect && detect._root
+    return (r || shareRoot) + "/lib/schedule.py"
+  }
+
+  function setSchedule(key, value) {
+    scheduleProc.command = ["python3", root.scheduleTool, "set", key, String(value)]
+    scheduleProc.running = true
+  }
+
+  function enableSchedule() {
+    privileged(["schedule", "enable"])
+  }
   readonly property bool backupMounted: detect && detect.backup_mounted === true
   readonly property var capsuleDisk: (detect && detect.capsule_disk) || null
   readonly property string selectedDiskLabel: {
@@ -122,6 +141,8 @@ Item {
     refreshSnapshots()
     // Also catches pairing/unpairing: the file may not exist to be watched.
     remoteFile.reload()
+    scheduleFile.reload()
+    timerFile.reload()
     if (!skipLoaded) loadSkipFile()
   }
 
@@ -440,6 +461,35 @@ Item {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+
+  Process {
+    id: scheduleProc
+    onExited: scheduleFile.reload()
+  }
+
+  FileView {
+    id: scheduleFile
+    path: root.home + "/.config/omarchy-backups/schedule.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.schedule = {
+          enabled: j.enabled === true,
+          every: ["hourly", "daily", "weekly"].indexOf(j.every) >= 0 ? j.every : "daily",
+          retention: j.retention === "keep" ? "keep" : "smart"
+        }
+      } catch (e) {}
+    }
+  }
+
+  FileView {
+    id: timerFile
+    path: "/etc/systemd/system/oma-backups-scheduled.timer"
+    printErrors: false
+    onLoaded: root.scheduleInstalled = true
+    onLoadFailed: root.scheduleInstalled = false
   }
 
   FileView {

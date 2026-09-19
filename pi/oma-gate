@@ -14,16 +14,18 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import syslog
 from pathlib import Path
 
-VERSION = "1"
+VERSION = "2"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
 NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+STAMP = re.compile(r"^\d{8}T\d{6}Z$")
 UUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 LOW_PRIORITY = ["nice", "-n", "10", "ionice", "-c2", "-n7"]
 MAX_KEY = 8192
@@ -93,6 +95,8 @@ def target(rel: str, depth: int = 2) -> Path:
 
 
 def is_subvolume(p: Path) -> bool:
+    if TEST:
+        return p.is_dir()
     try:
         return p.stat().st_ino == 256
     except OSError:
@@ -221,6 +225,50 @@ def v_write_meta(args: list[str]) -> None:
     tmp.replace(meta / "machine.json")
 
 
+def v_df(args: list[str]) -> None:
+    require_mounted()
+    du = shutil.disk_usage(MOUNT)
+    print(f"{du.total} {du.free}")
+
+
+def restore_points() -> list[str]:
+    stamps: set[str] = set()
+    for kind in ("os", "home"):
+        try:
+            stamps.update(p.name for p in (MOUNT / kind).iterdir() if STAMP.match(p.name))
+        except OSError:
+            pass
+    return sorted(stamps)
+
+
+def v_delete(args: list[str]) -> None:
+    """Delete one restore point. Never the newest, whatever the caller asks."""
+    require_mounted()
+    ts = args[0]
+    if not STAMP.match(ts):
+        raise Refused(f"not a restore point: {ts!r}")
+    points = restore_points()
+    if ts not in points:
+        raise Refused(f"no restore point {ts}")
+    if ts == points[-1]:
+        raise Refused("refusing to delete the newest restore point")
+    for kind in ("os", "home"):
+        p = target(f"{kind}/{ts}")
+        if p.exists():
+            if not is_subvolume(p):
+                raise Refused(f"{kind}/{ts} is not a btrfs subvolume")
+            run("btrfs", "subvolume", "delete", str(p))
+    esp = target(f"esp/{ts}")
+    if esp.is_dir():
+        shutil.rmtree(esp)
+    log(f"deleted restore point {ts}")
+
+
+def v_settle(args: list[str]) -> None:
+    require_mounted()
+    run("btrfs", "subvolume", "sync", str(MOUNT))
+
+
 def v_rsync(argv: list[str], original: str) -> None:
     if argv[:2] != ["rsync", "--server"]:
         raise Refused("only rsync server mode is allowed")
@@ -243,6 +291,9 @@ VERBS = {
     "chmod755": (v_chmod755, None),
     "list": (v_list, 0),
     "write-meta": (v_write_meta, 0),
+    "df": (v_df, 0),
+    "delete": (v_delete, 1),
+    "settle": (v_settle, 0),
 }
 
 

@@ -496,6 +496,78 @@ capsule_luks_partition() {
   lsblk -n -p -o PATH,FSTYPE "/dev/$disk" 2>/dev/null | awk '$2=="crypto_LUKS"{print $1; exit}'
 }
 
+# Root-only unlock key held by this laptop, added as an extra key slot on
+# the backup disk. Lets backups unlock without a password: on a paired Pi,
+# and for scheduled backups to a USB plugged in here.
+OMA_CAPSULE_KEY=/etc/omarchy-backups/capsule.key
+
+capsule_key_present() {
+  # Pairing used to keep it in the Pi folder; move it where both uses find it.
+  local old=/etc/omarchy-backups/remote/capsule.key
+  if [[ ! -f $OMA_CAPSULE_KEY && -f $old && ${EUID:-$(id -u)} -eq 0 ]]; then
+    mv "$old" "$OMA_CAPSULE_KEY"
+  fi
+  [[ -f $OMA_CAPSULE_KEY ]]
+}
+
+capsule_key_opens() {
+  capsule_key_present && cryptsetup open --test-passphrase --key-file "$OMA_CAPSULE_KEY" "$1" 2>/dev/null
+}
+
+# Make sure the backup disk's LUKS partition accepts the laptop key, asking
+# for the disk password once if it doesn't yet.
+ensure_capsule_key() {
+  local part=$1
+  capsule_key_opens "$part" && return 0
+  if [[ ! -f $OMA_CAPSULE_KEY ]]; then
+    mkdir -p "$(dirname "$OMA_CAPSULE_KEY")"
+    (umask 077 && head -c 4096 /dev/urandom >"$OMA_CAPSULE_KEY")
+  fi
+  step "Adding this laptop's unlock key to the backup disk"
+  gum style --foreground 8 "  Enter the backup disk password (the one you chose when setting it up)."
+  # 4 KB of random data doesn't need argon2's slow, memory-hungry derivation,
+  # which would make every unlock on a small machine like a Pi slow.
+  cryptsetup luksAddKey --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
+    "$part" "$OMA_CAPSULE_KEY" </dev/tty
+}
+
+# Automatic backups run from a root-owned copy of this code: the root timer
+# must never run files the user account can edit (the normal install is a
+# user-owned clone). Refreshed whenever the user authenticates with sudo.
+OMA_ROOT_COPY=/usr/local/lib/oma-backups
+OMA_SCHEDULE_UNIT=/etc/systemd/system/oma-backups-scheduled.service
+
+refresh_root_copy() {
+  [[ ${EUID:-$(id -u)} -eq 0 && $OMARCHY_TM_ROOT != "$OMA_ROOT_COPY" ]] || return 0
+  mkdir -p "$OMA_ROOT_COPY"
+  rsync -a --delete --exclude .git/ --exclude __pycache__/ --exclude .claude-notes/ \
+    "$OMARCHY_TM_ROOT/" "$OMA_ROOT_COPY/"
+  chown -R root:root "$OMA_ROOT_COPY"
+  chmod -R go-w "$OMA_ROOT_COPY"
+}
+
+# Desktop notification for the logged-in user, even from the root timer.
+# KEY limits each kind of message to once a day.
+notify_user() {
+  local title=$1 body=$2 key=${3:-} user uid stamp
+  if [[ -n $key ]]; then
+    stamp="$OMARCHY_TM_STATE/notified-$key"
+    if [[ -f $stamp ]] && (($(date +%s) - $(stat -c %Y "$stamp") < 86400)); then
+      return 0
+    fi
+  fi
+  user=${SUDO_USER:-${USER:-}}
+  uid="$(id -u "$user" 2>/dev/null)" || return 0
+  [[ -S /run/user/$uid/bus ]] || return 0
+  if [[ ${EUID:-$(id -u)} -eq 0 ]]; then
+    runuser -u "$user" -- env DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$uid/bus" \
+      notify-send -a OmaBackups "$title" "$body" 2>/dev/null || return 0
+  else
+    notify-send -a OmaBackups "$title" "$body" 2>/dev/null || return 0
+  fi
+  [[ -z $key ]] || touch "$stamp" 2>/dev/null || true
+}
+
 pid_file() {
   printf '%s\n' "${OMARCHY_TM_PID_FILE:-/run/omarchy-backups.pid}"
 }

@@ -87,6 +87,7 @@ function phaseLabel(phase) {
   if (p === "rescue") return "Rescue"
   if (p === "snapshot") return "Snapshot"
   if (p === "finalize") return "Finish"
+  if (p === "tidy") return "Tidying up"
   if (p === "unlock") return "Unlock"
   if (p === "setup") return "Setting up USB"
   if (p === "waiting-input") return "Waiting for you — enter the new disk password"

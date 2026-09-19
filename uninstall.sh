@@ -42,6 +42,14 @@ if command -v omarchy-shell >/dev/null 2>&1; then
   omarchy-shell shell rescanPlugins >/dev/null 2>&1 || true
 fi
 
+if [[ -f /etc/systemd/system/oma-backups-scheduled.timer || -d /usr/local/lib/oma-backups ]]; then
+  echo "Removing automatic backups (needs sudo)..."
+  sudo systemctl disable --now oma-backups-scheduled.timer >/dev/null 2>&1 || true
+  sudo rm -f /etc/systemd/system/oma-backups-scheduled.service /etc/systemd/system/oma-backups-scheduled.timer &&
+    sudo systemctl daemon-reload || true
+  sudo rm -rf /usr/local/lib/oma-backups ||
+    echo "  could not remove it — remove yourself: sudo rm -rf /usr/local/lib/oma-backups"
+fi
 if [[ -d /etc/omarchy-backups ]]; then
   echo "Removing /etc/omarchy-backups (needs sudo)..."
   sudo rm -rf /etc/omarchy-backups ||

@@ -3,6 +3,7 @@
 # target. The laptop's pairing step prints the exact command, e.g.
 #
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --uuid UUID --key 'ssh-ed25519 ...'
+#   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --update     (newer gatekeeper, same pairing)
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --uninstall
 #
 # Only installs what's missing (never upgrades), never touches Docker or any
@@ -25,12 +26,13 @@ die() {
   exit 1
 }
 
-UUID="" KEY="" UNINSTALL=0
+UUID="" KEY="" UNINSTALL=0 UPDATE=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uuid) UUID=${2:-}; shift 2 ;;
     --key) KEY=${2:-}; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
+    --update) UPDATE=1; shift ;;
     *) die "unknown option: $1" ;;
   esac
 done
@@ -54,12 +56,17 @@ if [[ $UNINSTALL == 1 ]]; then
   exit 0
 fi
 
-[[ $UUID =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] ||
-  die "Missing or malformed --uuid (copy the full command from the laptop)."
-[[ $KEY =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]] ||
-  die "Missing or malformed --key (copy the full command from the laptop)."
-
-say "Setting up this Pi as an OmaBackups target"
+if [[ $UPDATE == 1 ]]; then
+  [[ -f $CONF_DIR/gate.conf && -x $GATE ]] ||
+    die "Nothing to update: this Pi isn't set up yet. Pair it from the laptop first."
+  say "Updating OmaBackups on this Pi"
+else
+  [[ $UUID =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] ||
+    die "Missing or malformed --uuid (copy the full command from the laptop)."
+  [[ $KEY =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]] ||
+    die "Missing or malformed --key (copy the full command from the laptop)."
+  say "Setting up this Pi as an OmaBackups target"
+fi
 
 need=()
 command -v btrfs >/dev/null || need+=(btrfs-progs)
@@ -95,6 +102,13 @@ python3 -m py_compile "$tmp/oma-gate" "$tmp/list_snapshots.py" || die "Downloade
 install -d -m 755 "$LIB"
 install -m 755 "$tmp/oma-gate" "$GATE"
 install -m 644 "$tmp/list_snapshots.py" "$LIB/list_snapshots.py"
+
+if [[ $UPDATE == 1 ]]; then
+  v=$(gate_as_account version) || die "Self-test failed: the gatekeeper didn't answer."
+  echo
+  say "Updated. Gatekeeper version $v."
+  exit 0
+fi
 
 install -d -m 700 "$CONF_DIR"
 printf 'uuid=%s\n' "$UUID" >"$CONF_DIR/gate.conf"

@@ -60,19 +60,7 @@ cmd_pair() {
     step "Creating this laptop's backup key"
     ssh-keygen -q -t ed25519 -N "" -C "oma-backups@$(hostname)" -f "$OMA_REMOTE_KEY"
   fi
-  if [[ ! -f $OMA_REMOTE_LUKS_KEY ]]; then
-    head -c 4096 /dev/urandom >"$OMA_REMOTE_LUKS_KEY"
-    chmod 600 "$OMA_REMOTE_LUKS_KEY"
-  fi
-  if ! cryptsetup open --test-passphrase --key-file "$OMA_REMOTE_LUKS_KEY" "$part" 2>/dev/null; then
-    step "Adding this laptop's unlock key to the backup disk"
-    gum style --foreground 8 "  Enter the backup disk password (the one you chose when setting it up)."
-    # The key is 4 KB of random data, so it doesn't need argon2's slow,
-    # memory-hungry derivation, which would make every unlock on a Pi slow.
-    cryptsetup luksAddKey --pbkdf pbkdf2 --pbkdf-force-iterations 1000 \
-      "$part" "$OMA_REMOTE_LUKS_KEY" </dev/tty ||
-      fail "Couldn't add the unlock key (wrong password?)."
-  fi
+  ensure_capsule_key "$part" || fail "Couldn't add the unlock key (wrong password?)."
 
   jq -n --arg host "$host" --argjson port "$port" --arg uuid "$uuid" --arg laptop "$(hostname)" --arg at "$(ts)" \
     '{host: $host, port: $port, luks_uuid: $uuid, laptop: $laptop, paired_at: $at}' >"$OMA_REMOTE_CONF.tmp"
@@ -135,16 +123,10 @@ cmd_status() {
 
 cmd_forget() {
   require_root forget
-  remote_configured || { echo "Not paired with a Pi."; return 0; }
+  [[ -f $OMA_REMOTE_CONF ]] || { echo "Not paired with a Pi."; return 0; }
   remote_load
-  local part
-  part="$(capsule_luks_partition 2>/dev/null || true)"
-  if [[ -n $part && -b $part ]]; then
-    cryptsetup luksRemoveKey "$part" "$OMA_REMOTE_LUKS_KEY" 2>/dev/null &&
-      step "Removed this laptop's unlock key from the backup disk"
-  else
-    warn "The backup disk isn't plugged in here, so its unlock-key slot for this laptop stays (harmless once this laptop's copy is deleted)."
-  fi
+  # Keeps the disk unlock key: scheduled backups to the USB use it too.
+  capsule_key_present || true
   rm -rf "$OMA_REMOTE_DIR" "$OMA_REMOTE_CONF"
   echo
   gum style --bold "Unpaired from $REMOTE_HOST."

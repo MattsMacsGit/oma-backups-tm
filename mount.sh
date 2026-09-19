@@ -121,13 +121,20 @@ cmd_mount() {
     mapper=$already
     log "using already-unlocked mapper $mapper"
   elif [[ ! -e /dev/mapper/$LUKS_MAPPER ]]; then
-    log "unlocking $part as $LUKS_MAPPER — enter the backup disk password"
-    if [[ -n ${OMARCHY_TM_PASSPHRASE_FD:-} ]]; then
-      cryptsetup open --key-file=- "$part" "$LUKS_MAPPER" <&"${OMARCHY_TM_PASSPHRASE_FD}"
-    elif [[ -r /dev/tty ]]; then
-      cryptsetup open "$part" "$LUKS_MAPPER" < /dev/tty > /dev/tty 2>&1
+    if capsule_key_opens "$part"; then
+      log "unlocking $part as $LUKS_MAPPER with this laptop's key"
+      cryptsetup open --key-file "$OMA_CAPSULE_KEY" "$part" "$LUKS_MAPPER"
+    elif [[ ${OMARCHY_TM_UNATTENDED:-0} == 1 ]]; then
+      die "the backup disk needs its password and nobody is here to type it. Turn automatic backups off and on again in Settings to add this laptop's key to it."
     else
-      cryptsetup open "$part" "$LUKS_MAPPER"
+      log "unlocking $part as $LUKS_MAPPER — enter the backup disk password"
+      if [[ -n ${OMARCHY_TM_PASSPHRASE_FD:-} ]]; then
+        cryptsetup open --key-file=- "$part" "$LUKS_MAPPER" <&"${OMARCHY_TM_PASSPHRASE_FD}"
+      elif [[ -r /dev/tty ]]; then
+        cryptsetup open "$part" "$LUKS_MAPPER" < /dev/tty > /dev/tty 2>&1
+      else
+        cryptsetup open "$part" "$LUKS_MAPPER"
+      fi
     fi
   fi
   if [[ -e /dev/mapper/omarchy-backups ]]; then

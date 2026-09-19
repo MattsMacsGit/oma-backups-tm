@@ -6,7 +6,6 @@
 OMA_REMOTE_CONF=/etc/omarchy-backups/remote.json
 OMA_REMOTE_DIR=/etc/omarchy-backups/remote
 OMA_REMOTE_KEY=$OMA_REMOTE_DIR/id_ed25519
-OMA_REMOTE_LUKS_KEY=$OMA_REMOTE_DIR/capsule.key
 OMA_REMOTE_KNOWN=$OMA_REMOTE_DIR/known_hosts
 OMA_REMOTE_ACCOUNT=omabackups
 OMA_REPO_RAW="${OMA_REPO_RAW:-https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main}"
@@ -15,7 +14,7 @@ REMOTE_HOST=""
 REMOTE_SSH=()
 
 remote_configured() {
-  [[ -f $OMA_REMOTE_CONF && -f $OMA_REMOTE_KEY && -f $OMA_REMOTE_LUKS_KEY ]]
+  [[ -f $OMA_REMOTE_CONF && -f $OMA_REMOTE_KEY ]] && capsule_key_present
 }
 
 remote_load() {

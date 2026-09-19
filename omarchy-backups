@@ -21,6 +21,8 @@ Destructive: format and restore wipe disks. Keep another backup until proven.
   oma-backups umount
   oma-backups backup [--dry-run] [--yes] [--home-only]
   oma-backups stop
+  oma-backups prune [--dry-run]
+  oma-backups schedule enable | disable | status | run
   oma-backups snapshots
   oma-backups files SNAPSHOT [PATH]
   oma-backups copy SNAPSHOT SRC DEST
@@ -129,6 +131,8 @@ case "$cmd" in
   restore-tui) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/restore_tui.py" "$@" ;;
   refresh-rescue) exec "$OMARCHY_TM_ROOT/refresh-rescue.sh" "$@" ;;
   remote) exec "$OMARCHY_TM_ROOT/remote.sh" "$@" ;;
+  prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
+  schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)
     exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "$@"
     ;;
