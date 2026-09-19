@@ -61,15 +61,22 @@ Item {
     }
     return out
   }
+  // The current backup disk if it's plugged in, else any backup disk (the
+  // same choice backup.sh makes via capsule_luks_partition).
   readonly property var capsule: {
     var d = detect && detect.disks ? detect.disks : []
+    var want = detect ? detect.current_capsule_uuid : null
+    var first = null
     for (var i = 0; i < d.length; i++) {
       var disk = d[i]
       if (disk.protected || disk.kind === "live-root" || disk.kind === "installer")
         continue
-      if (disk.kind === "capsule" || disk.capsule) return disk
+      if (disk.kind === "capsule" || disk.capsule) {
+        if (want && disk.capsule && disk.capsule.luks_uuid === want) return disk
+        if (!first) first = disk
+      }
     }
-    return null
+    return first
   }
   // A paired Pi holding the backup USB (see remote.sh). It counts as the
   // backup disk whenever the USB isn't plugged in here, like backup.sh.

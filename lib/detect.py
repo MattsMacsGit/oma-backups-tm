@@ -247,6 +247,7 @@ def capsule_layout(disk: dict) -> dict | None:
             "iso_partition": device_path(efi) if efi else None,
             "live_partition": device_path(live) if live else None,
             "tm_partition": device_path(tm),
+            "luks_uuid": tm.get("uuid"),
             "iso_label": (efi or {}).get("label"),
             "tm_fstype": tm.get("fstype"),
         }
@@ -346,6 +347,16 @@ def tools() -> dict:
         "mksquashfs",
     ]
     return {n: bool(_which(n)) for n in names}
+
+
+def current_capsule_uuid() -> str | None:
+    """The backup disk set up most recently (see set_current_capsule)."""
+    try:
+        data = json.loads(Path("/etc/omarchy-backups/capsule.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    uuid = data.get("luks_uuid") if isinstance(data, dict) else None
+    return uuid if isinstance(uuid, str) and uuid else None
 
 
 def cached_capsule_disk(path: Path) -> dict | None:
@@ -587,6 +598,7 @@ def detect() -> dict:
         "snapshots": snapshots,
         "backup_mounted": backup_mounted,
         "capsule_disk": capsule_disk,
+        "current_capsule_uuid": current_capsule_uuid(),
         "limine": limine_info(),
         "snapper": snapper_info(),
         "subvolume_list": try_subvolume_list(),

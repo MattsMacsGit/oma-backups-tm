@@ -479,21 +479,39 @@ is_rescue() {
   [[ -f /etc/oma-backups-rescue ]] || [[ -f /etc/omarchy-backups-rescue ]]
 }
 
-# LUKS partition that shares a disk with OMARCHY-EFI / OMARCHY-LIVE.
+# Which backup disk is the current one (written when a disk is set up), so a
+# second backup USB plugged in at the same time never gets picked by accident.
+OMA_CURRENT_CAPSULE=/etc/omarchy-backups/capsule.json
+
+current_capsule_uuid() {
+  jq -r '.luks_uuid // empty' "$OMA_CURRENT_CAPSULE" 2>/dev/null || true
+}
+
+# LUKS partition of a backup disk (one that also has OMARCHY-EFI /
+# OMARCHY-LIVE): the current one if it's plugged in, else the first found.
 # On rescue that disk IS the live root — still the backup we need to unlock.
 capsule_luks_partition() {
-  local efi_dev live_dev disk
-  efi_dev="$(lsblk -n -p -o PATH,LABEL 2>/dev/null | awk '$2=="OMARCHY-EFI"{print $1; exit}')"
-  live_dev="$(lsblk -n -p -o PATH,LABEL 2>/dev/null | awk '$2=="OMARCHY-LIVE"{print $1; exit}')"
-  disk=""
-  if [[ -n ${efi_dev:-} ]]; then
-    disk="$(lsblk -n -o PKNAME "$efi_dev" 2>/dev/null | head -1 || true)"
-  fi
-  if [[ -z $disk && -n ${live_dev:-} ]]; then
-    disk="$(lsblk -n -o PKNAME "$live_dev" 2>/dev/null | head -1 || true)"
-  fi
-  [[ -n $disk ]] || return 1
-  lsblk -n -p -o PATH,FSTYPE "/dev/$disk" 2>/dev/null | awk '$2=="crypto_LUKS"{print $1; exit}'
+  local want disk part first=""
+  want="$(current_capsule_uuid)"
+  while read -r disk; do
+    part="$(lsblk -n -p -o PATH,FSTYPE "/dev/$disk" 2>/dev/null | awk '$2=="crypto_LUKS"{print $1; exit}')"
+    [[ -n $part ]] || continue
+    if [[ -n $want && $(lsblk -n -o UUID "$part" 2>/dev/null | head -1) == "$want" ]]; then
+      printf '%s\n' "$part"
+      return 0
+    fi
+    [[ -n $first ]] || first=$part
+  done < <(lsblk -nr -o PKNAME,LABEL 2>/dev/null | awk '$2=="OMARCHY-EFI" || $2=="OMARCHY-LIVE" {print $1}' | awk 'NF && !seen[$0]++')
+  [[ -n $first ]] || return 1
+  printf '%s\n' "$first"
+}
+
+set_current_capsule() {
+  local uuid=$1
+  mkdir -p "$(dirname "$OMA_CURRENT_CAPSULE")"
+  jq -n --arg u "$uuid" --arg at "$(ts)" '{luks_uuid: $u, set_up_at: $at}' >"$OMA_CURRENT_CAPSULE.tmp"
+  chmod 644 "$OMA_CURRENT_CAPSULE.tmp"
+  mv "$OMA_CURRENT_CAPSULE.tmp" "$OMA_CURRENT_CAPSULE"
 }
 
 # Root-only unlock key held by this laptop, added as an extra key slot on

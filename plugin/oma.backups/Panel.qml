@@ -37,6 +37,17 @@ Panel {
     return false
   }
 
+  // "Use a different disk": every eligible disk except the current backup disk.
+  property string newDisk: ""
+  property bool newDiskConfirmed: false
+  readonly property var otherDisks: {
+    var out = []
+    var cur = svc.capsule ? svc.capsule.path : ""
+    for (var i = 0; i < svc.disks.length; i++)
+      if (svc.disks[i].path !== cur) out.push(svc.disks[i])
+    return out
+  }
+
   readonly property int customSkipCount: {
     var n = 0
     for (var i = 0; i < svc.skipCount; i++) if (!isQuickSkip(svc.skipModel.get(i).path)) n++
@@ -54,6 +65,8 @@ Panel {
     } else {
       page = "home"
       showAllSnaps = false
+      newDisk = ""
+      newDiskConfirmed = false
     }
   }
 
@@ -688,6 +701,78 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: svc.forgetRemote()
+            }
+
+            Column {
+              visible: svc.hasCapsule
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "USE A DIFFERENT DISK"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: "Set up another USB as the backup disk. The current one isn’t erased: its restore points stay on it, and you can unplug it once the new one is ready."
+                  + (svc.remote !== null ? " To keep the new disk on the Pi, pair it again." : "")
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                visible: root.otherDisks.length === 0
+                width: parent.width
+                text: "Plug in the USB you want to use."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Repeater {
+                model: root.otherDisks
+                delegate: Button {
+                  required property var modelData
+                  width: column.width
+                  text: Model.diskLabel(modelData)
+                  bordered: true
+                  selected: root.newDisk === modelData.path
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  leftAlign: true
+                  onClicked: {
+                    root.newDisk = modelData.path
+                    root.newDiskConfirmed = false
+                  }
+                }
+              }
+              Toggle {
+                visible: root.newDisk !== ""
+                width: parent.width
+                label: "I understand this will erase that disk"
+                checked: root.newDiskConfirmed
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.newDiskConfirmed = !root.newDiskConfirmed
+              }
+              Button {
+                visible: root.newDisk !== ""
+                width: parent.width
+                text: "Erase it and back up to it from now on"
+                foreground: Color.background
+                background: Color.accent
+                accent: Color.accent
+                enabled: root.newDiskConfirmed && !svc.backupRunning
+                fontFamily: root.fontFamily
+                onClicked: {
+                  svc.selectedDisk = root.newDisk
+                  svc.wipeConfirmed = true
+                  svc.startFirstRun(root.newDisk)
+                  root.newDisk = ""
+                  root.newDiskConfirmed = false
+                }
+              }
             }
 
             PanelSeparator { foreground: root.foreground }

@@ -216,6 +216,13 @@ close_stale_mapper "$LUKS_MAPPER"
 if ! printf '%s' "$LUKS_PASS" | cryptsetup open --key-file=- "$P3" "$LUKS_MAPPER"; then
   fail_setup "could not open the new LUKS volume with the password you just set"
 fi
+# If this laptop already unlocks backups by itself (automatic backups or a
+# paired Pi), give the new disk its key too, while the password is at hand.
+if capsule_key_present; then
+  printf '%s' "$LUKS_PASS" | cryptsetup luksAddKey --key-file=- \
+    --pbkdf pbkdf2 --pbkdf-force-iterations 1000 "$P3" "$OMA_CAPSULE_KEY" ||
+    warn "couldn't add this laptop's unlock key; automatic backups will ask you to switch them off and on"
+fi
 unset LUKS_PASS
 progress set setup 22
 
@@ -267,6 +274,7 @@ progress set setup 100
 sync
 run_quiet umount "$MNT"
 run_quiet cryptsetup close "$LUKS_MAPPER"
+set_current_capsule "$new_uuid"
 
 trap - ERR
 echo

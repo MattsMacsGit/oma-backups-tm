@@ -147,6 +147,9 @@ case "$cmd" in
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py"
     echo "Using excludes from skip-paths + defaults"
     export OMARCHY_TM_YES=1
+    # Switching disks: lock the old backup disk first, or the new one's first
+    # backup would go to whichever is still mounted.
+    "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" phase setup || true
     if ! "$OMARCHY_TM_ROOT/format-disk.sh" "$disk" --yes --force; then
       "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" fail "USB setup failed" || true

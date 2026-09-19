@@ -291,7 +291,20 @@ open_destination() {
     progress phase "unlock"
     remote_open
     trap remote_close EXIT
+    # Setups from before the current-disk record: adopt the disk in use.
+    local u
+    u="$(jq -r '.luks_uuid // empty' "$OMA_REMOTE_CONF")"
+    [[ -f $OMA_CURRENT_CAPSULE || -z $u ]] || set_current_capsule "$u"
     return 0
+  fi
+  local want mapper
+  want="$(capsule_luks_partition 2>/dev/null || true)"
+  if [[ -n $want ]] && findmnt -n "$MNT" >/dev/null 2>&1; then
+    mapper="$(backup_mapper "$MNT")"
+    if ! lsblk -nr -o NAME,TYPE "$want" 2>/dev/null | awk '$2=="crypt"{print $1}' | grep -qx "$mapper"; then
+      step "Switching to the current backup disk"
+      "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
+    fi
   fi
   if ! findmnt -n "$MNT" >/dev/null 2>&1; then
     step "Backup disk not mounted — unlocking"
@@ -302,6 +315,9 @@ open_destination() {
   findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "capsule not mounted at $MNT"
   { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
     fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
+  if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want ]]; then
+    set_current_capsule "$(luks_uuid_of "$want")"
+  fi
 }
 
 d_list_json() {
