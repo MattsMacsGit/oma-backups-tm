@@ -139,7 +139,7 @@ Panel {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: svc.backupRunning
-      ? ("OmaBackups — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
+      ? ("OmaBackups — " + svc.progressText)
       : (svc.hasCapsule ? "OmaBackups" : "OmaBackups — set up a disk")
     onPressed: root.toggle()
   }
@@ -203,7 +203,7 @@ Panel {
                 anchors.rightMargin: Style.space(8)
                 title: "OmaBackups"
                 meta: svc.backupRunning
-                  ? (Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%")
+                  ? svc.progressText
                   : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.0.1 RC") : "1.0.1 RC  ·  no backup disk yet")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
@@ -282,30 +282,52 @@ Panel {
               spacing: Style.space(6)
               Text {
                 width: parent.width
-                text: Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%"
+                text: svc.progressText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
               }
               Rectangle {
+                id: progressTrack
                 width: parent.width
                 height: 8
                 radius: 4
+                clip: true
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                // A step with a real percentage.
                 Rectangle {
+                  visible: !svc.progressBusy
                   width: Math.max(8, parent.width * Math.min(100, Math.max(0, svc.progressPercent)) / 100)
                   height: parent.height
                   radius: 4
                   color: Color.accent
                 }
+                // A step with nothing to measure: a moving "working" segment
+                // instead of a made-up number.
+                Rectangle {
+                  id: busySegment
+                  visible: svc.progressBusy
+                  width: parent.width * 0.3
+                  height: parent.height
+                  radius: 4
+                  color: Color.accent
+                  SequentialAnimation on x {
+                    running: busySegment.visible
+                    loops: Animation.Infinite
+                    NumberAnimation { from: -busySegment.width; to: progressTrack.width; duration: 1400; easing.type: Easing.InOutQuad }
+                  }
+                }
               }
               Text {
-                visible: svc.progressSpeed !== "" || svc.progressEta !== ""
+                visible: text !== ""
                 width: parent.width
-                text: [svc.progressSpeed, svc.progressEta ? ("ETA " + svc.progressEta) : ""].filter(function (s) { return s && s.length }).join("   ")
+                text: svc.progressDetail !== "" ? svc.progressDetail
+                  : [svc.progressSpeed, svc.progressEta ? ("ETA " + svc.progressEta) : ""].filter(function (s) { return s && s.length }).join("   ")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
               }
             }
 

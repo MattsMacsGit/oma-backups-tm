@@ -20,7 +20,7 @@ import sys
 import syslog
 from pathlib import Path
 
-VERSION = "3"
+VERSION = "4"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -258,8 +258,12 @@ def v_delete(args: list[str]) -> None:
             if not is_subvolume(p):
                 raise Refused(f"{kind}/{ts} is not a btrfs subvolume")
             run("btrfs", "subvolume", "delete", str(p))
+    # Boot files are a snapshot of esp/current since v4; older restore
+    # points have a plain folder.
     esp = target(f"esp/{ts}")
-    if esp.is_dir():
+    if is_subvolume(esp):
+        run("btrfs", "subvolume", "delete", str(esp))
+    elif esp.is_dir():
         shutil.rmtree(esp)
     log(f"deleted restore point {ts}")
 

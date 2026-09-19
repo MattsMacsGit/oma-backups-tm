@@ -84,7 +84,7 @@ refresh_excludes_from_user() {
   step "Skip list: $n_home home, $n_os os entries excluded"
 }
 
-ensure_src_top() {
+mount_src_top() {
   mkdir -p "$SRC_TOP"
   if ! findmnt -n "$SRC_TOP" >/dev/null 2>&1; then
     run_quiet mount -o subvolid=5,compress=zstd:3 "$ROOT_DEV" "$SRC_TOP"
@@ -92,15 +92,72 @@ ensure_src_top() {
   if [[ ! -e $SRC_TOP/$SNAP_SUB ]]; then
     run_quiet btrfs subvolume create "$SRC_TOP/$SNAP_SUB"
   fi
-  # Source snapshots only live for one backup; a crashed run leaves its pair
-  # behind, pinning old data on the system disk. Only one backup runs at a
-  # time (pid file), so anything here now is a leftover.
-  local s
+}
+
+# Source snapshots only live for one backup (or until it's resumed). Anything
+# else here was left by a run that won't be resumed, and pins old data on the
+# system disk. Only one backup runs at a time (pid file).
+clean_src_snapshots() {
+  local keep=${1:-} s
   for s in "$SRC_TOP/$SNAP_SUB"/os-* "$SRC_TOP/$SNAP_SUB"/home-*; do
     [[ -e $s ]] || continue
+    [[ -n $keep && ${s##*-} == "$keep" ]] && continue
     btrfs subvolume delete "$s" >/dev/null 2>>"$OMARCHY_TM_LOG" &&
       log_file "removed leftover source snapshot $s"
   done
+}
+
+# ---- Resume -----------------------------------------------------------------
+# A stopped or interrupted backup carries on where it left off: same restore
+# point, same source snapshots, finished steps skipped, half-copied files
+# continued (rsync --partial). Only for the same backup disk, the same kind of
+# backup, within a day; anything else starts fresh.
+RESUME_FILE="$OMARCHY_TM_STATE/in-progress.json"
+RESUME_MAX_AGE=86400
+RESUMED=0
+
+dest_id() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    printf 'remote:%s:%s\n' "$REMOTE_HOST" "$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF")"
+  else
+    printf 'local:%s\n' "$(luks_uuid_of "$(capsule_luks_partition 2>/dev/null || true)")"
+  fi
+}
+
+# Prints the restore point to carry on with, or nothing.
+resumable_ts() {
+  [[ -f $RESUME_FILE ]] || return 0
+  local ts dest home_only started
+  ts="$(jq -r '.ts // ""' "$RESUME_FILE" 2>/dev/null)" || return 0
+  dest="$(jq -r '.dest // ""' "$RESUME_FILE")"
+  home_only="$(jq -r '.home_only // 0' "$RESUME_FILE")"
+  started="$(jq -r '.started // 0' "$RESUME_FILE")"
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ && $dest == "$(dest_id)" && $home_only == "$HOME_ONLY" ]] || return 0
+  (($(date +%s) - started < RESUME_MAX_AGE)) || return 0
+  [[ -d $SRC_TOP/$SNAP_SUB/home-$ts ]] || return 0
+  [[ $HOME_ONLY == 1 || -d $SRC_TOP/$SNAP_SUB/os-$ts ]] || return 0
+  printf '%s\n' "$ts"
+}
+
+resume_start() {
+  jq -n --arg ts "$1" --arg dest "$(dest_id)" --argjson ho "$HOME_ONLY" --argjson at "$(date +%s)" \
+    '{ts: $ts, dest: $dest, home_only: $ho, started: $at, done: [], sizes: {}}' >"$RESUME_FILE"
+  chmod 644 "$RESUME_FILE" 2>/dev/null || true
+}
+
+step_done() {
+  local name=$1 size=${2:-0}
+  [[ $size =~ ^[0-9]+$ ]] || size=0
+  jq --arg n "$name" --argjson s "$size" '.done += [$n] | .sizes[$n] = $s' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
+    mv "$RESUME_FILE.tmp" "$RESUME_FILE"
+}
+
+is_done() {
+  jq -e --arg n "$1" '.done | index($n)' "$RESUME_FILE" >/dev/null 2>&1
+}
+
+step_size() {
+  jq -r --arg n "$1" '.sizes[$n] // 0' "$RESUME_FILE" 2>/dev/null || echo 0
 }
 
 # Where this backup goes: the backup USB plugged into this laptop, or (once
@@ -205,9 +262,10 @@ rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_OS \\
   $SRC_TOP/$SNAP_SUB/os-$ts/   $MNT/os/current/
 rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_HOME \\
   $SRC_TOP/$SNAP_SUB/home-$ts/ $MNT/home/current/
-rsync -a --info=progress2 /boot/ $MNT/esp/$ts/
+rsync -a --delete --partial --info=progress2 /boot/ $MNT/esp/current/
 btrfs subvolume snapshot -r $MNT/os/current   $MNT/os/$ts
 btrfs subvolume snapshot -r $MNT/home/current $MNT/home/$ts
+btrfs subvolume snapshot -r $MNT/esp/current  $MNT/esp/$ts
 # also refresh rescue EFI from this /boot (so updates stay restorable)
 EOF
 }
@@ -228,23 +286,32 @@ announce_backup() {
 }
 
 # Parse rsync progress2 on stderr without a PTY and without du.
+# Copy one tree. Sets TREE_SIZE to rsync's "Total file size" (the restore
+# point's size for this part), so nothing ever has to walk the tree again.
+TREE_SIZE=0
 rsync_tree() {
   local src=$1 dest=$2 ex=$3 label=$4
   progress phase "$label"
   if is_dry_run; then
-    echo "[dry-run] rsync -aHAX --numeric-ids --delete --info=progress2 --no-inc-recursive --exclude-from=$ex $src/ $dest/"
+    echo "[dry-run] rsync -aHAX --numeric-ids --delete --partial --info=progress2 --no-inc-recursive --exclude-from=$ex $src/ $dest/"
     return 0
   fi
   step "Backing up $label — live progress in the plugin panel"
   [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
+  local stats
+  stats="$(mktemp)"
   set +e
   set +o pipefail
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
-  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded \
-    --info=progress2,name0,flist0 --no-inc-recursive \
+  # --partial: a file cut off mid-copy continues next time instead of
+  # starting over (safe: `current` only becomes a restore point on success).
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
+    --info=progress2,name0,flist0 --no-inc-recursive --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
-    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label"
+    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
   local rc=${PIPESTATUS[0]}
+  TREE_SIZE="$(cat "$stats" 2>/dev/null || echo 0)"
+  rm -f "$stats"
   set -o pipefail
   set -e
   # 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
@@ -368,7 +435,13 @@ d_delete_point() {
         btrfs subvolume delete "$MNT/$kind/$ts" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
       fi
     done
-    rm -rf "${MNT:?}/esp/$ts"
+    # Boot files are a snapshot of esp/current now; older restore points
+    # have a plain folder.
+    if btrfs subvolume show "$MNT/esp/$ts" >/dev/null 2>&1; then
+      btrfs subvolume delete "$MNT/esp/$ts" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+    else
+      rm -rf "${MNT:?}/esp/$ts"
+    fi
   fi
 }
 
@@ -469,10 +542,6 @@ cmd_backup() {
   pick_destination
   announce_backup "$ts"
   open_destination
-  while d_exists "os/$ts" || d_exists "home/$ts"; do
-    sleep 1
-    ts="$(now_timestamp)"
-  done
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
 
   write_pid
@@ -481,29 +550,64 @@ cmd_backup() {
   trap 'fail_backup "unexpected failure"' ERR
   progress phase "snapshot"
 
-  ensure_src_top
+  mount_src_top
+  local resume_ts
+  resume_ts="$(resumable_ts)"
+  if [[ -n $resume_ts ]]; then
+    ts=$resume_ts
+    RESUMED=1
+    step "Carrying on the backup from $ts where it stopped"
+  else
+    rm -f "$RESUME_FILE"
+    while d_exists "os/$ts" || d_exists "home/$ts"; do
+      sleep 1
+      ts="$(now_timestamp)"
+    done
+  fi
+  clean_src_snapshots "$([[ $RESUMED == 1 ]] && echo "$ts")"
+
+  # Boot files: rsync into esp/current and snapshot it, like os/home, so only
+  # changed files are sent. A Pi whose gatekeeper can't delete such snapshots
+  # yet (before v4) gets a full copy per restore point, as before.
+  local esp_subvol=1
+  if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 4 ]]; then
+    esp_subvol=0
+  fi
+
   ensure_dest_current os
   ensure_dest_current home
   d_mkdir esp
+  [[ $esp_subvol == 1 ]] && ensure_dest_current esp
   d_mkdir meta
 
-  step "Snapshotting the current system"
-  if [[ $HOME_ONLY != 1 ]]; then
-    run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
+  if [[ $RESUMED != 1 ]]; then
+    step "Snapshotting the current system"
+    if [[ $HOME_ONLY != 1 ]]; then
+      run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
+    fi
+    run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
+    resume_start "$ts"
   fi
-  run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
 
-  if [[ $HOME_ONLY != 1 ]]; then
+  if [[ $HOME_ONLY != 1 ]] && ! is_done os; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$(d_target os/current)" "$EX_OS" os
+    step_done os "$TREE_SIZE"
   fi
-  rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
-  d_mkdir "esp/$ts"
-  step "Backing up the boot partition"
-  progress phase "esp"
-  set +o pipefail
-  rsync "${RSYNC_RSH[@]}" -a --info=progress2 /boot/ "$(d_target "esp/$ts")/" \
-    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
-  set -o pipefail
+  if ! is_done home; then
+    rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
+    step_done home "$TREE_SIZE"
+  fi
+  if ! is_done esp; then
+    step "Backing up the boot partition"
+    progress phase "esp"
+    local esp_dest=esp/current
+    [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
+    set +o pipefail
+    rsync "${RSYNC_RSH[@]}" -a --delete --partial --info=progress2 /boot/ "$(d_target "$esp_dest")/" \
+      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
+    set -o pipefail
+    step_done esp
+  fi
 
   # The rescue partitions can only be refreshed with the USB plugged in here.
   if [[ $DEST_REMOTE != 1 && $(cfg '.backup.refresh_rescue_boot') == true ]]; then
@@ -516,16 +620,24 @@ cmd_backup() {
 
   step "Saving this as a restore point"
   progress phase "finalize"
-  if d_exists "os/$ts"; then fail_backup "dest os/$ts already exists"; fi
-  if [[ $HOME_ONLY != 1 ]]; then
+  # Each part is skipped if it's already there: a run interrupted while
+  # saving just finishes the job when resumed.
+  if [[ $HOME_ONLY != 1 ]] && ! d_exists "os/$ts"; then
     d_snapshot os/current "os/$ts"
   fi
-  d_snapshot home/current "home/$ts"
+  d_exists "home/$ts" || d_snapshot home/current "home/$ts"
+  if [[ $esp_subvol == 1 ]] && ! d_exists "esp/$ts"; then
+    d_snapshot esp/current "esp/$ts"
+  fi
 
   if [[ $HOME_ONLY != 1 ]]; then
     run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/os-$ts" || true
   fi
   run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
+  local size_os size_home
+  size_os="$(step_size os)" size_home="$(step_size home)"
+  # Saved as a restore point: nothing left to resume.
+  rm -f "$RESUME_FILE"
 
   local valid=true
   if [[ $HOME_ONLY == 1 ]]; then
@@ -534,33 +646,11 @@ cmd_backup() {
     { d_exists "os/$ts" && d_exists "home/$ts" && d_exists "esp/$ts"; } || valid=false
   fi
 
-  # One btrfs filesystem du per side, right now while the snapshot is
-  # fresh — the only place this is ever computed. Stored in machine.json
-  # and carried forward by list_snapshots.py on every later (frequent,
-  # plugin-polled) scan, never recomputed. "Total" is the snapshot's
-  # apparent size; "exclusive" is what deleting *only* this snapshot
-  # would actually free (btrfs COW shares data with other snapshots, so
-  # total overstates that) — exclusive is what a future "delete to make
-  # space" feature should sort/act on.
-  step "Measuring this restore point's size"
-  snapshot_du() {
-    local rel=$1 line
-    if [[ $DEST_REMOTE == 1 ]]; then
-      line="$(rgate du "$rel" 2>>"$OMARCHY_TM_LOG" || true)"
-    else
-      line="$(btrfs filesystem du -s --raw "$MNT/$rel" 2>/dev/null | awk 'NR==2{print $1, $2}')"
-    fi
-    [[ -n $line ]] && printf '%s\n' "$line" || printf '0 0\n'
-  }
-  local os_total=0 os_excl=0 home_total=0 home_excl=0
-  if [[ $HOME_ONLY != 1 ]] && d_exists "os/$ts"; then
-    read -r os_total os_excl < <(snapshot_du "os/$ts")
-  fi
-  if d_exists "home/$ts"; then
-    read -r home_total home_excl < <(snapshot_du "home/$ts")
-  fi
-  local size_total=$((os_total + home_total))
-  local size_excl=$((os_excl + home_excl))
+  # The restore point's size: what rsync reported for each part (kept in the
+  # resume record, so a resumed backup still knows the parts done earlier).
+  # Stored in machine.json and carried forward on every later scan; nothing
+  # walks the tree to measure it.
+  local size_total=$((size_os + size_home))
 
   local meta="$MNT/meta/machine.json"
   local user_name="${SUDO_USER:-${USER:-}}"
@@ -571,8 +661,8 @@ cmd_backup() {
   else
     snaps_json="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json)"
   fi
-  snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" --argjson excl "$size_excl" \
-    'map(if .timestamp == $ts then . + {size_total: $total, size_exclusive: $excl} else . end)')"
+  snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" \
+    'map(if .timestamp == $ts then . + {size_total: $total} else . end)')"
   jq -n \
     --arg host "$HOSTNAME" --arg mid "$MACHINE_ID" --arg ker "$KERNEL" \
     --arg ver "$OS_VER" --arg user "$user_name" --argjson snaps "$snaps_json" \

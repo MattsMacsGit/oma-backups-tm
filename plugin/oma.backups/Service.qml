@@ -23,6 +23,14 @@ Item {
   property string progressEta: ""
   property string progressSpeed: ""
   property string progressPhase: ""
+  // One step at a time (see lib/progress.py): its name, whether it has a real
+  // percentage or is just "working", and a details line (copied / speed / ETA).
+  property string progressLabel: ""
+  property bool progressBusy: false
+  property string progressDetail: ""
+  readonly property string progressText: progressBusy || progressLabel === ""
+    ? (progressLabel || Model.phaseLabel(progressPhase))
+    : progressLabel + "  " + progressPercent + "%"
   property string selectedDisk: ""
   property bool showAllDisks: false
   property bool wipeConfirmed: false
@@ -483,6 +491,9 @@ Item {
     root.progressEta = j.eta || ""
     root.progressSpeed = j.speed || ""
     if (j.phase) root.progressPhase = j.phase
+    root.progressLabel = j.label ? String(j.label) : ""
+    root.progressBusy = j.busy === true
+    root.progressDetail = j.detail ? String(j.detail) : ""
     var rp = parseInt(j.rsync_percent, 10)
     if (!isNaN(rp)) root.statusLine = Model.phaseLabel(j.phase) + "  " + rp + "%"
     else if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
