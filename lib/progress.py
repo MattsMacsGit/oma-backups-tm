@@ -29,6 +29,9 @@ RSYNC_RE = re.compile(
     r"^\s*(?P<bytes>\d+)\s+(?P<pct>\d+)%(?:\s+(?P<speed>\S+/s))?(?:\s+(?P<eta>\d+:\d+(?::\d+)?))?"
 )
 TOCHK_RE = re.compile(r"to-chk=(?P<left>\d+)/(?P<total>\d+)")
+# Folder-by-folder mode: "ir-chk" while rsync is still finding files (the
+# total keeps growing, so no honest percentage yet); "to-chk" once it knows.
+IRCHK_RE = re.compile(r"ir-chk=(?P<left>\d+)/(?P<total>\d+)")
 TOTAL_RE = re.compile(r"^Total file size:\s*(?P<n>\d+)")
 # rsync --info=flist2 while it lists everything before copying anything
 # (minutes for a big home on a resume or a slow Pi): "12300 files...".
@@ -140,6 +143,15 @@ class RsyncProgress:
             return status(self.step, None, f"Checking for changes: {int(f.group('n')):,} files so far")
         m = RSYNC_RE.search(compact)
         c = TOCHK_RE.search(compact)
+        ir = IRCHK_RE.search(compact)
+        if ir and not c:
+            checked = int(ir.group("total")) - int(ir.group("left"))
+            parts = [f"Checking for changes: {checked:,} files checked"]
+            if m:
+                parts.append(f"{human(int(m.group('bytes')))} copied")
+                if m.group("speed"):
+                    parts.append(m.group("speed"))
+            return status(self.step, None, "  ·  ".join(parts), (m.group("speed") or "") if m else "")
         if not m and not c:
             return None
         byte_pct = int(m.group("pct")) if m else 0
