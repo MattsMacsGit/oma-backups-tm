@@ -317,12 +317,33 @@ rsync_tree() {
   # 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
   # None of those should abort the restore point.
   if [[ $rc -ne 0 && $rc -ne 23 && $rc -ne 24 ]]; then
-    fail_backup "rsync $label failed (exit $rc)"
+    fail_backup "$(rsync_failure_text "$rc")"
   fi
   if [[ $rc -ne 0 ]]; then
     warn "rsync $label finished with warnings (exit $rc) — restore point will still be saved"
   fi
   progress set "$label" 100
+}
+
+# rsync's exit codes mean nothing to most people; say what probably
+# happened and what to do. The code stays at the end for the log.
+rsync_failure_text() {
+  local rc=$1 where="The backup disk"
+  [[ $DEST_REMOTE == 1 ]] && where="The backup disk on $REMOTE_HOST"
+  case $rc in
+    11)
+      echo "$where stopped responding partway through. Check its power and cable, then press Resume. (rsync code $rc)" ;;
+    10 | 12 | 30 | 35 | 255)
+      if [[ $DEST_REMOTE == 1 ]]; then
+        echo "Lost the connection to $REMOTE_HOST partway through. Check it's switched on and connected, then press Resume. (rsync code $rc)"
+      else
+        echo "$where stopped responding partway through. Check it's still plugged in, then press Resume. (rsync code $rc)"
+      fi ;;
+    20)
+      echo "The copy was interrupted. Press Resume to carry on. (rsync code $rc)" ;;
+    *)
+      echo "Copying stopped with an error. Press Resume to try again; details are in $OMARCHY_TM_LOG. (rsync code $rc)" ;;
+  esac
 }
 
 on_backup_exit() {

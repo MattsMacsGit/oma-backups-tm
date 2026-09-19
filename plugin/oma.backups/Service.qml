@@ -15,6 +15,9 @@ Item {
   readonly property var snapModel: snapList
   property string statusLine: "idle"
   property string lastError: ""
+  // The last failed backup's message from the status file. Kept separately
+  // so the disk-list refresh doesn't blank it and make the panel jump.
+  property string backupError: ""
   property bool refreshing: false
   property bool backupRunning: false
   property bool launchedBackup: false
@@ -432,7 +435,7 @@ Item {
           root.snapshots = []
           snapList.clear()
         }
-        if (!root.backupRunning) root.lastError = ""
+        if (!root.backupRunning) root.lastError = root.backupError
       } catch (e) {
         root.lastError = "Could not list disks"
       }
@@ -491,7 +494,7 @@ Item {
         root.backupRunning = false
         root.launchedBackup = false
         root.sawBackupStatus = false
-        if (j.line) root.lastError = String(j.line)
+        if (j.line) root.backupError = root.lastError = String(j.line)
       }
     } else if (j.stale === true) {
       if (root.launchedBackup && j.phase !== "error") root.backupRunning = true
@@ -499,6 +502,7 @@ Item {
     } else if (j.running === true) {
       root.backupRunning = true
       root.sawBackupStatus = true
+      root.backupError = ""
     } else if (root.launchedBackup) {
       if (j.phase === "done" || j.phase === "idle") {
         root.backupRunning = false
@@ -570,14 +574,14 @@ Item {
       if (root.pendingFirstRunDisk !== "") {
         var disk = root.pendingFirstRunDisk
         root.pendingFirstRunDisk = ""
-        root.lastError = ""
+        root.lastError = root.backupError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
         root.privileged(["first-run", disk])
       } else if (root.pendingBackup) {
         root.pendingBackup = false
-        root.lastError = ""
+        root.lastError = root.backupError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
