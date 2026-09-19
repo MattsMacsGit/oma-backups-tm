@@ -365,6 +365,10 @@ on_backup_exit() {
 # backup can be resumed) instead of carrying on and reporting rsync's
 # "killed by signal" as a failure.
 STOPPED=0
+# 1 once cmd_backup's EXIT handler is on. Other commands that unlock the disk
+# install a smaller "lock it again" trap; during a backup that must not
+# replace on_backup_exit, which locks up AND clears the pid and status.
+BACKUP_TRAPS=0
 on_stop_signal() {
   STOPPED=1
   exit 143
@@ -420,7 +424,7 @@ open_destination() {
     step "Unlocking the backup disk on $REMOTE_HOST"
     progress phase "unlock"
     remote_open
-    trap remote_close EXIT
+    ((BACKUP_TRAPS)) || trap remote_close EXIT
     # Setups from before the current-disk record: adopt the disk in use.
     local u
     u="$(jq -r '.luks_uuid // empty' "$OMA_REMOTE_CONF")"
@@ -586,6 +590,7 @@ cmd_backup() {
   # during unlocking killed us outright and left the disk open.
   trap on_backup_exit EXIT
   trap on_stop_signal INT TERM
+  BACKUP_TRAPS=1
   if [[ -f $OMA_SCHEDULE_UNIT && ${OMARCHY_TM_UNATTENDED:-0} != 1 ]]; then
     refresh_root_copy || warn "Couldn't update the copy automatic backups run from."
   fi

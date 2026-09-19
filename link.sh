@@ -60,6 +60,8 @@ Type=oneshot
 Environment=SUDO_USER=$user
 Environment=OMARCHY_TM_UNATTENDED=1
 ExecStart=$base backup --yes
+# Stop exits 143 on purpose, after tidying up. Not a failure.
+SuccessExitStatus=143
 EOF
   cat >"$UNIT_DIR/oma-backups-browse@.service" <<EOF
 [Unit]
