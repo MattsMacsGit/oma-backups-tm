@@ -284,7 +284,7 @@ install_rescue_limine() {
   # that always-on nomodeset doesn't already cover — nomodeset is harmless
   # for a plain text console and removes a choice that was really just an
   # internal compatibility fallback, not a real decision for the user to
-  # make. Matt: "just one option... should say Rescue Disk."
+  # make. One entry, named "Rescue Disk".
   {
     cat <<'LIM'
 timeout: 8
