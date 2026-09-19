@@ -30,7 +30,10 @@ INSTALLER_LABELS = {"VENTOY", "VTOYEFI", "CLONEZILLA", "CLONEZILLA-LIVE"}
 
 # A network rescue stick restores from the paired Pi (rescue-stick.sh made it).
 NET = (ROOT / "network-rescue.json").is_file()
-NET_KEYS_DEV = Path("/dev/disk/by-label/OMANET-KEYS")
+# The stick's keys partition carries the name twice: as a LUKS2 label and as
+# the GPT partition name. Boot with only one of them visible and the whole
+# stick is useless, so look for both.
+NET_KEYS_LABEL = "OMANET-KEYS"
 NET_KEYS_MAPPER = "oma-netkeys"
 REMOTE_DIR = Path("/etc/omarchy-backups/remote")
 REMOTE_CONF = Path("/etc/omarchy-backups/remote.json")
@@ -352,12 +355,25 @@ def pi(*args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
     return subprocess.run(pi_ssh(PI_HOST, *args), input=stdin, capture_output=True, check=False)
 
 
+def net_keys_dev() -> Path | None:
+    """The stick's keys partition, by LUKS label or by GPT partition name."""
+    for _ in range(2):
+        for base in ("by-label", "by-partlabel"):
+            dev = Path("/dev/disk", base, NET_KEYS_LABEL)
+            if dev.exists():
+                return dev
+        settle_block_devices()
+    return None
+
+
 def open_stick_keys(password: bytes) -> bool:
     """Unlock the stick's keys partition and copy what's in it to /etc (RAM)."""
-    if not NET_KEYS_DEV.exists():
-        settle_block_devices()
+    dev = net_keys_dev()
+    if dev is None:
+        gum_style("--foreground", "1", "Can't find this stick's keys. Is it the rescue stick you made?")
+        return False
     proc = subprocess.run(
-        ["cryptsetup", "open", "--key-file=-", str(NET_KEYS_DEV), NET_KEYS_MAPPER],
+        ["cryptsetup", "open", "--key-file=-", str(dev), NET_KEYS_MAPPER],
         input=password, capture_output=True, check=False,
     )
     if proc.returncode != 0 and not Path("/dev/mapper", NET_KEYS_MAPPER).exists():
@@ -506,6 +522,10 @@ def tailscale_up() -> bool:
 def connect_pi() -> bool:
     """Open the stick, get online, find the Pi, and unlock its backup disk."""
     global PI_HOST
+    if net_keys_dev() is None:
+        gum_style("--foreground", "1", "Can't find this stick's keys.")
+        gum_style("--foreground", "8", "Is this the rescue stick you made? Try a different USB socket.")
+        return False
     gum_style("--foreground", "8", "Type the backup disk's password. It opens this stick and the backup disk on your Pi.")
     for _ in range(3):
         typed = gum_input(header="Backup disk password", password=True)
@@ -752,6 +772,9 @@ def main() -> int:
         drop_to_shell()
         return 0
     if not (connect_pi() if NET else unlock_backup()):
+        # The unlock may have landed on the Pi even though we gave up on it
+        # (a dropped connection answers no). Locking twice is harmless.
+        lock_pi()
         drop_to_shell()
         return 1
     try:
