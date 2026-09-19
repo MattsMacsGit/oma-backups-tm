@@ -40,6 +40,15 @@ Panel {
   // "Use a different disk": every eligible disk except the current backup disk.
   property string newDisk: ""
   property bool newDiskConfirmed: false
+  property string stickDisk: ""
+  property bool stickConfirmed: false
+  // USBs that could become a network rescue stick: never a backup disk.
+  readonly property var stickDisks: {
+    var out = []
+    for (var i = 0; i < svc.disks.length; i++)
+      if (!svc.disks[i].capsule && svc.disks[i].kind !== "capsule") out.push(svc.disks[i])
+    return out
+  }
   readonly property var otherDisks: {
     var out = []
     var cur = svc.capsule ? svc.capsule.path : ""
@@ -67,6 +76,8 @@ Panel {
       showAllSnaps = false
       newDisk = ""
       newDiskConfirmed = false
+      stickDisk = ""
+      stickConfirmed = false
     }
   }
 
@@ -825,6 +836,77 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: svc.forgetRemote()
+            }
+
+            // Needs the Pi, something on it to restore, and a linked laptop.
+            Column {
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "NETWORK RESCUE STICK"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: "A USB (8 GB or bigger) that can restore this laptop from " + svc.remoteHost
+                  + " without the backup disk: at home, or anywhere over Tailscale. It opens with the backup disk’s password and can only read backups. Making a new one switches the old one off."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                visible: root.stickDisks.length === 0
+                width: parent.width
+                text: "Plug in the USB you want to use."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Repeater {
+                model: root.stickDisks
+                delegate: Button {
+                  required property var modelData
+                  width: column.width
+                  text: Model.diskLabel(modelData)
+                  bordered: true
+                  selected: root.stickDisk === modelData.path
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  leftAlign: true
+                  onClicked: {
+                    root.stickDisk = modelData.path
+                    root.stickConfirmed = false
+                  }
+                }
+              }
+              Toggle {
+                visible: root.stickDisk !== ""
+                width: parent.width
+                label: "I understand this will erase that USB"
+                checked: root.stickConfirmed
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.stickConfirmed = !root.stickConfirmed
+              }
+              Button {
+                visible: root.stickDisk !== ""
+                width: parent.width
+                text: "Make the rescue stick"
+                foreground: Color.background
+                background: Color.accent
+                accent: Color.accent
+                enabled: root.stickConfirmed && !svc.backupRunning
+                fontFamily: root.fontFamily
+                onClicked: {
+                  svc.makeRescueStick(root.stickDisk)
+                  root.stickDisk = ""
+                  root.stickConfirmed = false
+                }
+              }
             }
 
             Column {

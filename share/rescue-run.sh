@@ -17,13 +17,14 @@ find_root() {
   done
   # Extracted ISO: LIVE is labeled OMARCHY-LIVE
   local mp
-  mp="$(lsblk -n -o LABEL,MOUNTPOINT 2>/dev/null | awk '$1=="OMARCHY-LIVE" && $2!=""{print $2; exit}')"
+  mp="$(lsblk -n -o LABEL,MOUNTPOINT 2>/dev/null | awk '($1=="OMARCHY-LIVE" || $1=="OMANET-LIVE") && $2!=""{print $2; exit}')"
   if [[ -n $mp && -x $mp/oma-backups/omarchy-backups ]]; then
     printf '%s\n' "$mp/oma-backups"
     return 0
   fi
   mkdir -p /run/oma-live
-  if mountpoint -q /run/oma-live || mount -L OMARCHY-LIVE /run/oma-live 2>/dev/null; then
+  if mountpoint -q /run/oma-live || mount -L OMARCHY-LIVE /run/oma-live 2>/dev/null ||
+    mount -L OMANET-LIVE /run/oma-live 2>/dev/null; then
     if [[ -x /run/oma-live/oma-backups/omarchy-backups ]]; then
       printf '%s\n' /run/oma-live/oma-backups
       return 0

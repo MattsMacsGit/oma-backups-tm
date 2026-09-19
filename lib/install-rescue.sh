@@ -177,6 +177,7 @@ install_rescue_files() {
   mkdir -p "$live/oma-backups" "$efi"
   rsync -a --delete \
     --exclude '.git/' \
+    --exclude '.claude-notes/' \
     --exclude '.cache/' \
     --exclude 'plugin/omarchy.omabackups/' \
     --exclude '__pycache__/' \
@@ -266,8 +267,9 @@ install_rescue_kernel() {
   step "Kernel copied to the boot partition"
 }
 
+# LABEL/TITLE default to the backup disk's; a network rescue stick passes its own.
 install_rescue_limine() {
-  local disk=$1 efi=$2
+  local disk=$1 efi=$2 live_label=${3:-OMARCHY-LIVE} title=${4:-Rescue Disk}
   rescue_umask
   # Lines, not a single string with an embedded leading newline — the old
   # "\n    module_path: ..." form always left a stray blank line in the
@@ -286,17 +288,17 @@ install_rescue_limine() {
   # internal compatibility fallback, not a real decision for the user to
   # make. One entry, named "Rescue Disk".
   {
-    cat <<'LIM'
+    cat <<LIM
 timeout: 8
 interface_branding: OmaBackups
-/Rescue Disk
+/$title
     protocol: linux
     path: boot():/vmlinuz-linux
 LIM
     ((${#ucode_lines[@]})) && printf '%s\n' "${ucode_lines[@]}"
-    cat <<'LIM'
+    cat <<LIM
     module_path: boot():/initramfs-linux.img
-    cmdline: archisobasedir=arch archisolabel=OMARCHY-LIVE nomodeset cms_verify=n
+    cmdline: archisobasedir=arch archisolabel=$live_label nomodeset cms_verify=n
 LIM
   } >"$efi/limine.conf"
 

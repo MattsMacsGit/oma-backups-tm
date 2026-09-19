@@ -31,6 +31,7 @@ Destructive: format and restore wipe disks. Keep another backup until proven.
   oma-backups restore-to-disk /dev/TARGET --snapshot TS [--dry-run] [--allow-internal]
   oma-backups restore-tui
   oma-backups refresh-rescue [--boot-only]
+  oma-backups rescue-stick /dev/sdX [--iso PATH]
   oma-backups doctor
   oma-backups first-run /dev/sdX
   oma-backups remote pair HOST | status | forget
@@ -134,6 +135,7 @@ case "$cmd" in
   restore-to-disk) exec "$OMARCHY_TM_ROOT/restore-to-disk.sh" "$@" ;;
   restore-tui) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/restore_tui.py" "$@" ;;
   refresh-rescue) exec "$OMARCHY_TM_ROOT/refresh-rescue.sh" "$@" ;;
+  rescue-stick) exec "$OMARCHY_TM_ROOT/rescue-stick.sh" "$@" ;;
   remote) exec "$OMARCHY_TM_ROOT/remote.sh" "$@" ;;
   link) exec "$OMARCHY_TM_ROOT/link.sh" "$@" ;;
   browse) exec "$OMARCHY_TM_ROOT/backup.sh" --browse "$@" ;;

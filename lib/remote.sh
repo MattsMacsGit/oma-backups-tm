@@ -22,10 +22,15 @@ remote_load() {
   local port
   port="$(jq -r '.port // 22' "$OMA_REMOTE_CONF")"
   [[ -n $REMOTE_HOST ]] || die "$OMA_REMOTE_CONF has no host"
+  # A rescue stick reaches the Pi by whichever address works, so it checks
+  # the Pi's key under a fixed name and never accepts a different one.
+  local alias hostkey=(-o StrictHostKeyChecking=accept-new)
+  alias="$(jq -r '.host_key_alias // empty' "$OMA_REMOTE_CONF")"
+  [[ -n $alias ]] && hostkey=(-o StrictHostKeyChecking=yes -o HostKeyAlias="$alias")
   REMOTE_SSH=(ssh -i "$OMA_REMOTE_KEY" -p "$port" -l "$OMA_REMOTE_ACCOUNT"
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OMA_REMOTE_KNOWN"
+    "${hostkey[@]}" -o UserKnownHostsFile="$OMA_REMOTE_KNOWN"
     # One connection for the whole backup instead of a new handshake for
     # each of the dozen small gatekeeper calls (slow over a network). Every
     # command still goes through the gatekeeper on the Pi. Root-only socket.

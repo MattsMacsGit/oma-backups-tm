@@ -170,6 +170,40 @@ share can knock those drives offline for a moment while it spins up. Stop
 services that use them (e.g. Docker) before plugging it in, or give the
 backup drive its own power.
 
+### Network rescue stick (beta)
+
+A USB that restores this laptop from the Pi, without the backup disk: at
+home, or from anywhere over Tailscale. Keep it somewhere other than the laptop
+bag, so a lost or stolen laptop doesn't take it along.
+
+You need:
+
+- a paired Pi with the backup disk plugged in, at least one restore point on
+  it, and a linked laptop (the Settings section only shows up once all of
+  these are true)
+- the Pi's gatekeeper at version 5 or newer (run the `--update` command above)
+- a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
+  rescue uses)
+- for away-from-home restores: Tailscale already working on the laptop and the
+  Pi. The stick carries its own copy of Tailscale; at boot you log in by
+  scanning a code with your phone. No Tailscale login is stored on the stick.
+
+Settings → **Network rescue stick**, pick the USB, confirm the erase, and type
+the backup disk's password (or `oma-backups rescue-stick /dev/sdX`).
+
+To restore: boot any computer from the stick and type the backup disk's
+password. It opens the stick, connects (it offers Wi-Fi if there's no cable),
+finds the Pi on your home network or over Tailscale, and sends the password
+there to unlock the backup disk. Then it's the usual restore wizard.
+
+What's on the stick: the Omarchy ISO and the restore wizard (not secret), and a
+small partition locked with the backup disk's password that holds the Pi's
+address and fingerprint and the stick's own SSH key. That key can only unlock,
+list, read and lock; it can't write, delete or open anything else on the Pi.
+Making a new stick switches off the previous one's key, so if a stick goes
+missing, make a new one. If you change the backup disk's password, make a new
+stick too: the old one would still open, but couldn't unlock the backup disk.
+
 ## Safety
 
 - USB disks only, unless **Show all disks** (Settings)
@@ -186,7 +220,8 @@ The intended path is **booting the USB**.
 - **Home:** last copy, disk free space, Backup now / Stop, next automatic
   backup, last 5 restore points (click to open), **More**, gear
 - **Settings:** automatic backups, Smart thinning, quick skips, skip list, show
-  all disks, back up to a Pi, use a different disk, erase / start over
+  all disks, back up to a Pi, network rescue stick, use a different disk,
+  erase / start over
 
 Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Compiled into rsync
 excludes at the start of **every** backup.
@@ -206,6 +241,7 @@ oma-backups schedule enable | disable | status
 oma-backups snapshots
 oma-backups browse SNAPSHOT
 oma-backups remote pair HOST | status | forget
+oma-backups rescue-stick /dev/sdX
 oma-backups link [--refresh]
 oma-backups doctor
 oma-backups version

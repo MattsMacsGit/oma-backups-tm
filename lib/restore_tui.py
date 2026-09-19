@@ -9,8 +9,10 @@ before relying on it here. Step-through prompts, not a full desktop.
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -21,9 +23,18 @@ ROOT = Path(os.environ.get("OMARCHY_TM_ROOT") or Path(__file__).resolve().parent
 CLI = ROOT / "omarchy-backups"
 MNT = Path("/run/omarchy-backups")
 
-LIVE_LABELS = {"OMARCHY-EFI", "OMARCHY-LIVE"}
+# OMANET-*: a network rescue stick (see rescue-stick.sh).
+LIVE_LABELS = {"OMARCHY-EFI", "OMARCHY-LIVE", "OMANET-EFI", "OMANET-LIVE"}
 CAPSULE_LABELS = {"OMARCHY-TM", "OMARCHY-BACKUPS", "OMARCHY-EFI", "OMARCHY-LIVE"}
 INSTALLER_LABELS = {"VENTOY", "VTOYEFI", "CLONEZILLA", "CLONEZILLA-LIVE"}
+
+# A network rescue stick restores from the paired Pi (rescue-stick.sh made it).
+NET = (ROOT / "network-rescue.json").is_file()
+NET_KEYS_DEV = Path("/dev/disk/by-label/OMANET-KEYS")
+NET_KEYS_MAPPER = "oma-netkeys"
+REMOTE_DIR = Path("/etc/omarchy-backups/remote")
+REMOTE_CONF = Path("/etc/omarchy-backups/remote.json")
+TS_DIR = Path("/run/oma-tailscale")
 
 
 def out(msg: str = "") -> None:
@@ -88,13 +99,15 @@ def quiet_console() -> None:
 def banner() -> None:
     os.system("clear") if sys.stdout.isatty() else None
     out()
-    gum_style("--bold", "OmaBackups — restore")
+    gum_style("--bold", "OmaBackups — network restore" if NET else "OmaBackups — restore")
     gum_style(
         "--foreground",
         "8",
         "This USB can put your Omarchy machine back onto a blank disk:",
     )
     gum_style("--foreground", "8", "same user, same packages, same home as a backup date.")
+    if NET:
+        gum_style("--foreground", "8", "It restores from the backup disk on your Pi, over the network.")
     out()
 
 
@@ -317,7 +330,249 @@ def unlock_backup() -> bool:
     return True
 
 
+# —— Network rescue: the stick's keys, getting online, finding the Pi ——
+
+NET_CONF: dict = {}
+PI_HOST = ""
+
+
+def pi_ssh(host: str, *args: str, timeout: int = 10) -> list[str]:
+    """Same connection as lib/remote.sh, with the Pi's key pinned by the stick."""
+    return [
+        "ssh", "-i", str(REMOTE_DIR / "id_ed25519"), "-p", str(NET_CONF.get("port", 22)),
+        "-l", "omabackups", "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout={timeout}", "-o", "LogLevel=ERROR",
+        "-o", "StrictHostKeyChecking=yes", "-o", f"HostKeyAlias={NET_CONF.get('host_key_alias', 'oma-pi')}",
+        "-o", f"UserKnownHostsFile={REMOTE_DIR / 'known_hosts'}",
+        host, *args,
+    ]
+
+
+def pi(*args: str, stdin: bytes | None = None) -> subprocess.CompletedProcess:
+    return subprocess.run(pi_ssh(PI_HOST, *args), input=stdin, capture_output=True, check=False)
+
+
+def open_stick_keys(password: bytes) -> bool:
+    """Unlock the stick's keys partition and copy what's in it to /etc (RAM)."""
+    if not NET_KEYS_DEV.exists():
+        settle_block_devices()
+    proc = subprocess.run(
+        ["cryptsetup", "open", "--key-file=-", str(NET_KEYS_DEV), NET_KEYS_MAPPER],
+        input=password, capture_output=True, check=False,
+    )
+    if proc.returncode != 0 and not Path("/dev/mapper", NET_KEYS_MAPPER).exists():
+        return False
+    mnt = Path("/run/oma-netkeys")
+    mnt.mkdir(parents=True, exist_ok=True)
+    try:
+        if run(["mount", "-o", "ro", f"/dev/mapper/{NET_KEYS_MAPPER}", str(mnt)]).returncode != 0:
+            return False
+        old = os.umask(0o077)
+        try:
+            REMOTE_DIR.mkdir(parents=True, exist_ok=True)
+            for name in ("id_ed25519", "known_hosts", "rescue.json"):
+                shutil.copyfile(mnt / name, REMOTE_DIR / name)
+        finally:
+            os.umask(old)
+        NET_CONF.update(json.loads((REMOTE_DIR / "rescue.json").read_text(encoding="utf-8")))
+        return True
+    except (OSError, json.JSONDecodeError):
+        return False
+    finally:
+        run(["umount", str(mnt)])
+        run(["cryptsetup", "close", NET_KEYS_MAPPER])
+
+
+def is_tailscale(addr: str) -> bool:
+    try:
+        return ipaddress.ip_address(addr) in ipaddress.ip_network("100.64.0.0/10")
+    except ValueError:
+        return False
+
+
+def candidates(tailscale_up: bool) -> list[str]:
+    addrs = [a for a in NET_CONF.get("addresses") or [] if isinstance(a, str)]
+    host = str(NET_CONF.get("host") or "")
+    lan = [a for a in addrs if not is_tailscale(a)]
+    ts = [a for a in addrs if is_tailscale(a)]
+    order = lan + [host] + (ts if tailscale_up else [])
+    return [a for i, a in enumerate(order) if a and a not in order[:i]]
+
+
+def find_pi(tailscale_up: bool) -> str | None:
+    for host in candidates(tailscale_up):
+        gum_style("--foreground", "8", f"  Trying {host}...")
+        proc = subprocess.run(pi_ssh(host, "version", timeout=5), capture_output=True, text=True, check=False)
+        if proc.returncode == 0 and proc.stdout.strip().isdigit():
+            return host
+    return None
+
+
+def online() -> bool:
+    return bool(run(["ip", "route", "show", "default"]).stdout.strip())
+
+
+ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def wifi_devices() -> list[str]:
+    try:
+        return sorted(p.parent.name for p in Path("/sys/class/net").glob("*/wireless"))
+    except OSError:
+        return []
+
+
+def wifi_networks(dev: str) -> list[tuple[str, str]]:
+    run(["iwctl", "station", dev, "scan"])
+    time.sleep(4)
+    text = ANSI.sub("", run(["iwctl", "station", dev, "get-networks"]).stdout)
+    nets: list[tuple[str, str]] = []
+    rows = text.splitlines()
+    dashes = [i for i, line in enumerate(rows) if set(line.strip()) == {"-"}]
+    for line in rows[dashes[-1] + 1:] if dashes else []:
+        cols = re.split(r"\s{2,}", line.strip().lstrip(">").strip())
+        if len(cols) >= 2 and cols[0]:
+            nets.append((cols[0], cols[1]))
+    return nets
+
+
+def wait_online(seconds: int = 30) -> bool:
+    for _ in range(seconds):
+        if online():
+            return True
+        time.sleep(1)
+    return False
+
+
+def wifi_setup() -> bool:
+    devs = wifi_devices()
+    if not devs:
+        gum_style("--foreground", "3", "No network. Plug in a network cable, then press Enter.")
+        pause("Press Enter to try again, or q for a shell.")
+        return wait_online(15)
+    dev = devs[0]
+    while True:
+        gum_style("--foreground", "8", "Looking for Wi-Fi networks...")
+        nets = wifi_networks(dev)
+        options = [name for name, _sec in nets] + ["Scan again", "I'll plug in a cable", "Cancel"]
+        choice = gum_choose(options, header="Connect to Wi-Fi")
+        if choice is None or choice == "Cancel":
+            return False
+        if choice == "Scan again":
+            continue
+        if choice == "I'll plug in a cable":
+            pause("Plug in the cable, then press Enter.")
+            return wait_online(15)
+        security = dict(nets).get(choice, "psk")
+        argv = ["iwctl"]
+        if security != "open":
+            pw = gum_input(header=f"Wi-Fi password for {choice}", password=True)
+            if pw is None:
+                continue
+            argv += ["--passphrase", pw]
+        run(argv + ["station", dev, "connect", choice])
+        gum_style("--foreground", "8", f"Connecting to {choice}...")
+        if wait_online(30):
+            return True
+        gum_style("--foreground", "3", "Couldn't connect. Check the password and try again.")
+
+
+def tailscale_up() -> bool:
+    if not (shutil.which("tailscale") and shutil.which("tailscaled")):
+        return False
+    sock = TS_DIR / "tailscaled.sock"
+    if not sock.exists():
+        TS_DIR.mkdir(parents=True, exist_ok=True)
+        log = open(TS_DIR / "tailscaled.log", "ab")
+        # State in memory only: this computer drops off your Tailscale
+        # network by itself once it's switched off.
+        subprocess.Popen(
+            ["tailscaled", "--state=mem:", f"--statedir={TS_DIR}", f"--socket={sock}"],
+            stdout=log, stderr=log, start_new_session=True,
+        )
+        for _ in range(20):
+            if sock.exists():
+                break
+            time.sleep(0.5)
+    out()
+    gum_style("--bold", "Log in to Tailscale")
+    gum_style("--foreground", "8", "Scan the code with your phone, or open the link on any device, and log in")
+    gum_style("--foreground", "8", "with the same account as your Pi. This computer joins until it's switched off.")
+    out()
+    rc = subprocess.call(["tailscale", f"--socket={sock}", "up", "--qr", "--hostname=oma-rescue", "--timeout=10m"])
+    return rc == 0
+
+
+def connect_pi() -> bool:
+    """Open the stick, get online, find the Pi, and unlock its backup disk."""
+    global PI_HOST
+    gum_style("--foreground", "8", "Type the backup disk's password. It opens this stick and the backup disk on your Pi.")
+    for _ in range(3):
+        typed = gum_input(header="Backup disk password", password=True)
+        if typed is None:
+            return False
+        if typed and open_stick_keys(typed.encode()):
+            password = typed.encode()
+            break
+        gum_style("--foreground", "1", "That password doesn't open this stick.")
+    else:
+        return False
+
+    gum_style("--foreground", "8", "Looking for your Pi...")
+    # A network cable usually connects by itself within a few seconds.
+    if not wait_online(8):
+        gum_style("--foreground", "8", "This computer isn't online yet.")
+        wifi_setup()
+    host = find_pi(tailscale_up=False)
+    if host is None and online() and tailscale_up():
+        host = find_pi(tailscale_up=True)
+    if host is None:
+        gum_style("--foreground", "1", "Couldn't reach your Pi.")
+        gum_style("--foreground", "8", "Check it's switched on, that this computer is online, and (away from")
+        gum_style("--foreground", "8", "home) that you logged in to Tailscale with the same account as the Pi.")
+        return False
+    PI_HOST = host
+    gum_style("--foreground", "2", f"  Found your Pi at {host}.")
+
+    # restore-to-disk --from-pi reads this, through lib/remote.sh.
+    REMOTE_CONF.write_text(json.dumps({
+        "host": host,
+        "port": NET_CONF.get("port", 22),
+        "host_key_alias": NET_CONF.get("host_key_alias", "oma-pi"),
+    }) + "\n", encoding="utf-8")
+
+    gum_style("--foreground", "8", "Unlocking the backup disk on the Pi...")
+    st = pi("status")
+    try:
+        if not json.loads(st.stdout or b"{}").get("present"):
+            gum_style("--foreground", "1", "The backup disk isn't plugged into the Pi (or its USB hub has no power).")
+            return False
+    except json.JSONDecodeError:
+        pass
+    proc = pi("unlock", stdin=password)
+    password = b""
+    if proc.returncode != 0:
+        gum_style("--foreground", "1", "The Pi couldn't unlock the backup disk.")
+        msg = proc.stderr.decode(errors="replace").strip()
+        if msg:
+            gum_style("--foreground", "8", msg)
+        return False
+    return True
+
+
+def lock_pi() -> None:
+    if NET and PI_HOST:
+        pi("lock")
+
+
 def load_snapshots() -> list[dict]:
+    if NET:
+        proc = pi("list")
+        try:
+            snaps = json.loads(proc.stdout or b"[]") if proc.returncode == 0 else []
+        except json.JSONDecodeError:
+            snaps = []
+        return [s for s in snaps if s.get("valid") and not s.get("home_only")]
     proc = run([str(CLI), "snapshots", "--json"])
     if proc.returncode != 0:
         return []
@@ -461,7 +716,7 @@ def run_restore(target: dict, snap: dict, level: str) -> int:
         level,
         "--yes",
         "--allow-internal",
-    ]
+    ] + (["--from-pi"] if NET else [])
     env = os.environ.copy()
     env["OMARCHY_TM_ROOT"] = str(ROOT)
     env["OMARCHY_TM_YES"] = "1"
@@ -475,6 +730,11 @@ def run_restore(target: dict, snap: dict, level: str) -> int:
 def drop_to_shell() -> None:
     out()
     gum_style("--foreground", "8", "Shell. Useful commands:")
+    if NET:
+        out("  oma-backups restore-tui      (start the network restore again)")
+        out("  iwctl                        (Wi-Fi)")
+        out()
+        return
     out("  oma-backups mount")
     out("  oma-backups snapshots")
     out("  oma-backups restore-to-disk /dev/TARGET --snapshot TS --dry-run")
@@ -491,9 +751,16 @@ def main() -> int:
     if not pause():
         drop_to_shell()
         return 0
-    if not unlock_backup():
+    if not (connect_pi() if NET else unlock_backup()):
         drop_to_shell()
         return 1
+    try:
+        return restore_flow()
+    finally:
+        lock_pi()
+
+
+def restore_flow() -> int:
     snaps = load_snapshots()
     snap = pick_snapshot(snaps)
     if not snap:
@@ -523,7 +790,7 @@ def main() -> int:
             "--level",
             level,
             "--allow-internal",
-        ],
+        ] + (["--from-pi"] if NET else []),
         env=env,
     )
     if not confirm_wipe(target, snap):

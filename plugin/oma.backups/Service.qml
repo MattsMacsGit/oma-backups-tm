@@ -399,6 +399,11 @@ Item {
     privileged(["remote", "forget"])
   }
 
+  function makeRescueStick(disk) {
+    if (!disk) return
+    privileged(["rescue-stick", disk])
+  }
+
   function pickFolder() { pickProc.command = ["python3", root.picker]; pickProc.running = true }
   function pickFile() { pickProc.command = ["python3", root.picker, "--file"]; pickProc.running = true }
 

@@ -9,7 +9,10 @@ source "$OMARCHY_TM_ROOT/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--level full|settings] [--dry-run] [--yes] [--allow-internal]
+Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--level full|settings] [--from-pi] [--dry-run] [--yes] [--allow-internal]
+
+--from-pi: read the restore point from the paired Pi (remote.json) instead of
+the mounted backup disk. The network rescue stick uses this.
 
 --level settings: the system plus each home's hidden settings (.config,
 .local, ...); visible folders come back empty and files over 100 MB are
@@ -29,6 +32,7 @@ EOF
 TARGET=""
 SNAPSHOT=""
 LEVEL=full
+FROM_PI=0
 ORIG_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +43,7 @@ while [[ $# -gt 0 ]]; do
     --allow-internal) export OMARCHY_TM_ALLOW_INTERNAL=1; shift ;;
     --snapshot) SNAPSHOT=${2:-}; shift 2 ;;
     --level) LEVEL=${2:-}; shift 2 ;;
+    --from-pi) FROM_PI=1; shift ;;
     --*) die "unknown flag: $1" ;;
     *)
       if [[ -z $TARGET ]]; then
@@ -76,6 +81,21 @@ if findmnt -n "$MNT" >/dev/null 2>&1; then
   fi
 fi
 
+# Where the restore point is read from: the mounted backup disk, or the Pi.
+RSYNC_RSH=()
+if [[ $FROM_PI == 1 ]]; then
+  # shellcheck source=lib/remote.sh
+  source "$OMARCHY_TM_ROOT/lib/remote.sh"
+  remote_load
+  RSYNC_RSH=(-e "$(remote_rsh)")
+fi
+src() {
+  if [[ $FROM_PI == 1 ]]; then printf '%s:%s\n' "$REMOTE_HOST" "$1"; else printf '%s\n' "$MNT/$1"; fi
+}
+src_exists() {
+  if [[ $FROM_PI == 1 ]]; then rgate exists "$1" 2>/dev/null; else [[ -d $MNT/$1 ]]; fi
+}
+
 P1="$(partition_path "$TARGET" 1)"
 P2="$(partition_path "$TARGET" 2)"
 NEW_ROOT=/run/oma-backups-restore
@@ -85,7 +105,7 @@ print_plan() {
   cat <<EOF
 == restore-to-disk --snapshot $SNAPSHOT ==
 Target:     $TARGET   $(lsblk -n -d -o SIZE,MODEL,TRAN "$TARGET" 2>/dev/null || true)
-Capsule:    $MNT
+Capsule:    $(src "")
 Snapshot:   $SNAPSHOT  (restore level: $LEVEL)
 Live root:  $(printf '%s' "$DETECT_JSON" | jq -r '.live_root_disk')  [always refused]
 Rescue:     $(is_rescue && echo yes || echo no)
@@ -106,9 +126,9 @@ mkfs.btrfs -L omarchy /dev/mapper/$MAPPER
 # 2. Subvolumes + rsync (not btrfs send — excludes already applied at backup)
 mount /dev/mapper/$MAPPER $NEW_ROOT
 btrfs subvolume create $NEW_ROOT/@ $NEW_ROOT/@home $NEW_ROOT/@log $NEW_ROOT/@pkg
-rsync -aHAX --numeric-ids --info=progress2 $MNT/os/$SNAPSHOT/   $NEW_ROOT/@/
-rsync -aHAX --numeric-ids --info=progress2 $MNT/home/$SNAPSHOT/ $NEW_ROOT/@home/
-rsync -a --info=progress2 $MNT/esp/$SNAPSHOT/ $NEW_ESP/
+rsync -aHAX --numeric-ids --info=progress2 $(src os/$SNAPSHOT)/   $NEW_ROOT/@/
+rsync -aHAX --numeric-ids --info=progress2 $(src home/$SNAPSHOT)/ $NEW_ROOT/@home/
+rsync -a --info=progress2 $(src esp/$SNAPSHOT)/ $NEW_ESP/
 
 # 3. Rewrite fstab UUID + /etc/default/limine cryptdevice=PARTUUID
 #    drop resume_offset (swapfile is not restored as-is)
@@ -121,9 +141,9 @@ print_plan
 if is_dry_run; then
   echo
   echo "Dry-run only. No partitions were touched."
-  if ! findmnt -n "$MNT" >/dev/null 2>&1; then
+  if [[ $FROM_PI == 0 ]] && ! findmnt -n "$MNT" >/dev/null 2>&1; then
     echo "Note: backup disk is not mounted; VALID-check of $SNAPSHOT cannot be performed yet."
-  elif [[ ! -e $MNT/os/$SNAPSHOT || ! -e $MNT/home/$SNAPSHOT || ! -e $MNT/esp/$SNAPSHOT ]]; then
+  elif ! src_exists "os/$SNAPSHOT" || ! src_exists "home/$SNAPSHOT" || ! src_exists "esp/$SNAPSHOT"; then
     echo "WARNING: $SNAPSHOT is not a VALID restore point on the mounted disk."
   else
     echo "Backup disk has os+home+esp for $SNAPSHOT — would be VALID."
@@ -139,9 +159,9 @@ need_cmd rsync
 need_cmd sgdisk
 need_cmd arch-chroot
 
-[[ -d $MNT/os/$SNAPSHOT ]] || die "missing os snapshot $SNAPSHOT"
-[[ -d $MNT/home/$SNAPSHOT ]] || die "missing home snapshot $SNAPSHOT"
-[[ -d $MNT/esp/$SNAPSHOT ]] || die "missing esp snapshot $SNAPSHOT"
+src_exists "os/$SNAPSHOT" || die "missing os snapshot $SNAPSHOT"
+src_exists "home/$SNAPSHOT" || die "missing home snapshot $SNAPSHOT"
+src_exists "esp/$SNAPSHOT" || die "missing esp snapshot $SNAPSHOT"
 
 confirm "ERASE $TARGET and restore snapshot $SNAPSHOT onto it?"
 
@@ -207,9 +227,9 @@ run btrfs subvolume create "$NEW_ROOT/@pkg"
 chmod 755 "$NEW_ROOT/@log" "$NEW_ROOT/@pkg"
 
 log "rsync OS snapshot"
-rsync -aHAX --numeric-ids --info=progress2 --delete \
+rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
   --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp \
-  "$MNT/os/$SNAPSHOT"/ "$NEW_ROOT/@/"
+  "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
 log "rsync home snapshot ($LEVEL)"
 home_filter=()
 if [[ $LEVEL == settings ]]; then
@@ -219,8 +239,8 @@ if [[ $LEVEL == settings ]]; then
   home_filter=(--max-size=100M --include='/*/' --include='/*/.*' --include='/*/.*/**'
     --include='/*/*/' --exclude='/*/**')
 fi
-rsync -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
-  "$MNT/home/$SNAPSHOT"/ "$NEW_ROOT/@home/"
+rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
+  "$(src "home/$SNAPSHOT")"/ "$NEW_ROOT/@home/"
 if [[ $LEVEL == settings ]]; then
   # While this marker exists, the restored system's plugin offers "Restore my
   # files" and backups never thin away $SNAPSHOT: until the files are back,
@@ -239,7 +259,7 @@ fi
 mkdir -p "$NEW_ESP"
 run mount "$P1" "$NEW_ESP"
 log "rsync ESP snapshot"
-rsync -a --info=progress2 --delete-delay "$MNT/esp/$SNAPSHOT"/ "$NEW_ESP/" || true
+rsync "${RSYNC_RSH[@]}" -a --info=progress2 --delete-delay "$(src "esp/$SNAPSHOT")"/ "$NEW_ESP/" || true
 
 NEW_BTRFS_UUID="$(blkid -s UUID -o value "/dev/mapper/$MAPPER")"
 NEW_ESP_UUID="$(blkid -s UUID -o value "$P1")"
