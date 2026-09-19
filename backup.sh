@@ -186,7 +186,18 @@ remote_open() {
 }
 
 remote_close() {
-  [[ $DEST_REMOTE == 1 ]] && rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  # Gatekeepers before v6 don't queue a lock behind an unlock, so a Stop
+  # pressed while unlocking could lock nothing and leave the disk open once
+  # the unlock landed. Check, and lock again if it's still open.
+  local i
+  for i in 1 2 3; do
+    rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+    [[ $(rgate status 2>/dev/null | jq -r '.unlocked // false' 2>/dev/null) == true ]] || return 0
+    sleep 5
+  done
+  warn "Couldn't lock the backup disk on $REMOTE_HOST — it may still be unlocked there."
+  return 0
 }
 
 d_target() {

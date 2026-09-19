@@ -13,6 +13,7 @@ it can unlock with the disk password, list, read, and lock. Nothing else.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import pwd
@@ -22,9 +23,10 @@ import shutil
 import subprocess
 import sys
 import syslog
+from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "5"
+VERSION = "6"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -44,6 +46,11 @@ RESCUE = sys.argv[1:] == ["--rescue"]
 TEST = os.geteuid() != 0
 CONF = Path(os.environ.get("OMA_GATE_CONF", "")) if TEST else Path("/etc/oma-backups/gate.conf")
 MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarchy-backups")
+# Unlocking a disk here takes many seconds (no AES instructions on a Pi), and
+# each request is its own process. Without this, a lock arriving mid-unlock
+# saw nothing open yet, locked nothing, and the unlock landed behind it and
+# left the disk open -- which is what a Stop pressed while unlocking did.
+CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK", "")) if TEST else Path("/run/oma-gate.capsule.lock")
 
 
 def keys_file() -> Path:
@@ -79,6 +86,17 @@ def run(*cmd: str, stdin: bytes | None = None) -> None:
 
 def device() -> Path:
     return Path("/dev/disk/by-uuid") / load_uuid()
+
+
+@contextmanager
+def capsule_turn():
+    """Hold the capsule lock: unlock and lock run one at a time, in order."""
+    fd = os.open(str(CAPSULE_LOCK), os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
 
 
 def mapper_open() -> bool:
@@ -132,29 +150,36 @@ def v_status(args: list[str]) -> None:
 
 
 def v_unlock(args: list[str]) -> None:
-    if mounted():
-        return
-    dev = device()
-    if not dev.exists():
-        raise Refused("capsule not plugged in (or not powered)")
-    if not mapper_open():
+    # Read the key before taking the turn: the client is waiting on this pipe,
+    # and a slow reader shouldn't hold the lock while a lock request queues.
+    key = b""
+    if not mounted() and not mapper_open():
         key = sys.stdin.buffer.read(MAX_KEY + 1)
-        if not key or len(key) > MAX_KEY:
-            raise Refused("unlock key missing or too large")
-        run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
-    MOUNT.mkdir(parents=True, exist_ok=True)
-    run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
-    os.chmod(MOUNT, 0o755)
-    log("capsule unlocked")
+    with capsule_turn():
+        if mounted():
+            return
+        dev = device()
+        if not dev.exists():
+            raise Refused("capsule not plugged in (or not powered)")
+        if not mapper_open():
+            if not key or len(key) > MAX_KEY:
+                raise Refused("unlock key missing or too large")
+            run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
+        MOUNT.mkdir(parents=True, exist_ok=True)
+        run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
+        os.chmod(MOUNT, 0o755)
+        log("capsule unlocked")
 
 
 def v_lock(args: list[str]) -> None:
-    if mounted():
-        run("sync")
-        run("umount", str(MOUNT))
-    if mapper_open():
-        run("cryptsetup", "close", MAPPER)
-    log("capsule locked")
+    # Waits for an unlock in flight, so a lock always wins in the end.
+    with capsule_turn():
+        if mounted():
+            run("sync")
+            run("umount", str(MOUNT))
+        if mapper_open():
+            run("cryptsetup", "close", MAPPER)
+        log("capsule locked")
 
 
 def v_subvol_create(args: list[str]) -> None:
