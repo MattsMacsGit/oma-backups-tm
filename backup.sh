@@ -394,13 +394,25 @@ backup_running() {
   [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
+# Checks for another backup and claims the pid file in one step, under a
+# short lock. The pid file used to be written only after the disk was
+# unlocked (several seconds on a Pi), so an automatic backup and a Resume
+# press close together could both get through.
 refuse_if_running() {
   local other
-  other="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  exec 9>"$(pid_file).lock"
+  flock -w 10 9 || true
+  other="$(tr -d '[:space:]' 2>/dev/null <"$(pid_file)" || true)"
   if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
     grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
-    fail_backup "Another backup is already running (pid $other)."
+    exec 9>&-
+    # Not a failure: leave the status file alone so the plugin keeps
+    # following the backup that's already running.
+    gum style --bold "A backup is already running (pid $other). Leaving it to finish."
+    exit 0
   fi
+  write_pid
+  exec 9>&-
 }
 
 open_destination() {
