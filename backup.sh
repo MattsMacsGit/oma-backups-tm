@@ -7,6 +7,8 @@ OMARCHY_TM_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 export OMARCHY_TM_ROOT
 # shellcheck source=lib/common.sh
 source "$OMARCHY_TM_ROOT/lib/common.sh"
+# shellcheck source=lib/remote.sh
+source "$OMARCHY_TM_ROOT/lib/remote.sh"
 
 usage() {
   cat <<'EOF'
@@ -89,8 +91,72 @@ ensure_src_top() {
   fi
 }
 
+# Where this backup goes: the backup USB plugged into this laptop, or (once
+# paired, and only while the USB isn't plugged in here) the Pi it lives on.
+# Every d_* helper takes paths relative to the backup disk's top level.
+DEST_REMOTE=0
+RSYNC_RSH=()
+
+pick_destination() {
+  if remote_configured && [[ -z $(capsule_luks_partition 2>/dev/null || true) ]] &&
+    ! findmnt -n "$MNT" >/dev/null 2>&1; then
+    DEST_REMOTE=1
+    remote_load
+    RSYNC_RSH=(-e "$(remote_rsh)")
+  fi
+}
+
+remote_open() {
+  local st
+  st="$(rgate status 2>>"$OMARCHY_TM_LOG")" ||
+    fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
+  [[ $(jq -r .present <<<"$st") == true ]] ||
+    fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
+  rgate unlock <"$OMA_REMOTE_LUKS_KEY" 2>>"$OMARCHY_TM_LOG" ||
+    fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Re-pair it: oma-backups remote pair $REMOTE_HOST"
+}
+
+remote_close() {
+  [[ $DEST_REMOTE == 1 ]] && rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+}
+
+d_target() {
+  if [[ $DEST_REMOTE == 1 ]]; then printf '%s:%s\n' "$REMOTE_HOST" "$1"; else printf '%s\n' "$MNT/$1"; fi
+}
+
+d_exists() {
+  if [[ $DEST_REMOTE == 1 ]]; then rgate exists "$1" 2>>"$OMARCHY_TM_LOG"; else [[ -e $MNT/$1 ]]; fi
+}
+
+d_mkdir() {
+  if [[ $DEST_REMOTE == 1 ]]; then rgate mkdir "$1" 2>>"$OMARCHY_TM_LOG"; else mkdir -p "$MNT/$1"; fi
+}
+
+d_snapshot() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate snapshot "$1" "$2" 2>>"$OMARCHY_TM_LOG"
+  else
+    run_quiet btrfs subvolume snapshot -r "$MNT/$1" "$MNT/$2"
+  fi
+}
+
+d_chmod755() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate chmod755 "$@" 2>>"$OMARCHY_TM_LOG" || true
+  else
+    local p
+    for p in "$@"; do chmod 755 "$MNT/$p" 2>/dev/null || true; done
+  fi
+}
+
 ensure_dest_current() {
   local kind=$1
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate subvol-create "$kind/current" 2>>"$OMARCHY_TM_LOG" ||
+      fail_backup "couldn't prepare $kind/current on $REMOTE_HOST"
+    rgate set-writable "$kind/current" 2>>"$OMARCHY_TM_LOG" || true
+    return 0
+  fi
   mkdir -p "$MNT/$kind"
   if ! btrfs subvolume show "$MNT/$kind/current" >/dev/null 2>&1; then
     if [[ -e $MNT/$kind/current ]]; then
@@ -137,6 +203,9 @@ announce_backup() {
   gum style --bold "Backing up $HOSTNAME"
   echo
   gum style --foreground 8 "  source:  $ROOT_DEV  Omarchy $OS_VER  kernel $KERNEL"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    gum style --foreground 8 "  to:      backup disk on $REMOTE_HOST"
+  fi
   gum style --foreground 8 "  restore point: $ts"
   echo
 }
@@ -150,11 +219,11 @@ rsync_tree() {
     return 0
   fi
   step "Backing up $label — live progress in the plugin panel"
-  mkdir -p "$dest"
+  [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
   set +e
   set +o pipefail
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
-  stdbuf -e0 -o0 rsync -aHAX --numeric-ids --delete --delete-excluded \
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded \
     --info=progress2,name0,flist0 --no-inc-recursive \
     --exclude-from="$ex" "$src"/ "$dest"/ \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label"
@@ -174,6 +243,7 @@ rsync_tree() {
 
 on_backup_exit() {
   local rc=$?
+  remote_close
   clear_pid
   if [[ $rc -ne 0 ]]; then
     progress idle
@@ -205,15 +275,23 @@ cmd_backup() {
   fi
   require_root "${ORIG_ARGS[@]}"
   refresh_excludes_from_user
+  pick_destination
   announce_backup "$ts"
-  if ! dest_mounted; then
-    step "Backup disk not mounted — unlocking"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    step "Unlocking the backup disk on $REMOTE_HOST"
     progress phase "unlock"
-    "$OMARCHY_TM_ROOT/mount.sh" mount
+    remote_open
+    trap remote_close EXIT
+  else
+    if ! dest_mounted; then
+      step "Backup disk not mounted — unlocking"
+      progress phase "unlock"
+      "$OMARCHY_TM_ROOT/mount.sh" mount
+    fi
+    ensure_rw_mount "$MNT"
+    dest_mounted || fail_backup "capsule not mounted at $MNT"
   fi
-  ensure_rw_mount "$MNT"
-  dest_mounted || fail_backup "capsule not mounted at $MNT"
-  while [[ -e $MNT/os/$ts || -e $MNT/home/$ts ]]; do
+  while d_exists "os/$ts" || d_exists "home/$ts"; do
     sleep 1
     ts="$(now_timestamp)"
   done
@@ -228,7 +306,8 @@ cmd_backup() {
   ensure_src_top
   ensure_dest_current os
   ensure_dest_current home
-  mkdir -p "$MNT/esp" "$MNT/meta"
+  d_mkdir esp
+  d_mkdir meta
 
   step "Snapshotting the current system"
   if [[ $HOME_ONLY != 1 ]]; then
@@ -237,18 +316,19 @@ cmd_backup() {
   run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
 
   if [[ $HOME_ONLY != 1 ]]; then
-    rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$MNT/os/current" "$EX_OS" os
+    rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$(d_target os/current)" "$EX_OS" os
   fi
-  rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$MNT/home/current" "$EX_HOME" home
-  mkdir -p "$MNT/esp/$ts"
+  rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
+  d_mkdir "esp/$ts"
   step "Backing up the boot partition"
   progress phase "esp"
   set +o pipefail
-  rsync -a --info=progress2 /boot/ "$MNT/esp/$ts/" \
+  rsync "${RSYNC_RSH[@]}" -a --info=progress2 /boot/ "$(d_target "esp/$ts")/" \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
   set -o pipefail
 
-  if [[ $(cfg '.backup.refresh_rescue_boot') == true ]]; then
+  # The rescue partitions can only be refreshed with the USB plugged in here.
+  if [[ $DEST_REMOTE != 1 && $(cfg '.backup.refresh_rescue_boot') == true ]]; then
     progress phase "rescue"
     if [[ -x $OMARCHY_TM_ROOT/refresh-rescue.sh ]]; then
       step "Refreshing the rescue USB's boot files"
@@ -258,11 +338,11 @@ cmd_backup() {
 
   step "Saving this as a restore point"
   progress phase "finalize"
-  if [[ -e $MNT/os/$ts ]]; then fail_backup "dest os/$ts already exists"; fi
+  if d_exists "os/$ts"; then fail_backup "dest os/$ts already exists"; fi
   if [[ $HOME_ONLY != 1 ]]; then
-    run_quiet btrfs subvolume snapshot -r "$MNT/os/current" "$MNT/os/$ts"
+    d_snapshot os/current "os/$ts"
   fi
-  run_quiet btrfs subvolume snapshot -r "$MNT/home/current" "$MNT/home/$ts"
+  d_snapshot home/current "home/$ts"
 
   if [[ $HOME_ONLY != 1 ]]; then
     run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/os-$ts" || true
@@ -271,9 +351,9 @@ cmd_backup() {
 
   local valid=true
   if [[ $HOME_ONLY == 1 ]]; then
-    [[ -e $MNT/home/$ts ]] || valid=false
+    d_exists "home/$ts" || valid=false
   else
-    [[ -e $MNT/os/$ts && -e $MNT/home/$ts && -e $MNT/esp/$ts ]] || valid=false
+    { d_exists "os/$ts" && d_exists "home/$ts" && d_exists "esp/$ts"; } || valid=false
   fi
 
   # One btrfs filesystem du per side, right now while the snapshot is
@@ -286,16 +366,20 @@ cmd_backup() {
   # space" feature should sort/act on.
   step "Measuring this restore point's size"
   snapshot_du() {
-    local path=$1 line
-    line="$(btrfs filesystem du -s --raw "$path" 2>/dev/null | awk 'NR==2{print $1, $2}')"
+    local rel=$1 line
+    if [[ $DEST_REMOTE == 1 ]]; then
+      line="$(rgate du "$rel" 2>>"$OMARCHY_TM_LOG" || true)"
+    else
+      line="$(btrfs filesystem du -s --raw "$MNT/$rel" 2>/dev/null | awk 'NR==2{print $1, $2}')"
+    fi
     [[ -n $line ]] && printf '%s\n' "$line" || printf '0 0\n'
   }
   local os_total=0 os_excl=0 home_total=0 home_excl=0
-  if [[ $HOME_ONLY != 1 && -d $MNT/os/$ts ]]; then
-    read -r os_total os_excl < <(snapshot_du "$MNT/os/$ts")
+  if [[ $HOME_ONLY != 1 ]] && d_exists "os/$ts"; then
+    read -r os_total os_excl < <(snapshot_du "os/$ts")
   fi
-  if [[ -d $MNT/home/$ts ]]; then
-    read -r home_total home_excl < <(snapshot_du "$MNT/home/$ts")
+  if d_exists "home/$ts"; then
+    read -r home_total home_excl < <(snapshot_du "home/$ts")
   fi
   local size_total=$((os_total + home_total))
   local size_excl=$((os_excl + home_excl))
@@ -303,7 +387,12 @@ cmd_backup() {
   local meta="$MNT/meta/machine.json"
   local user_name="${SUDO_USER:-${USER:-}}"
   local snaps_json
-  snaps_json="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json)"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    meta="$(mktemp)"
+    snaps_json="$(rgate list 2>>"$OMARCHY_TM_LOG")"
+  else
+    snaps_json="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json)"
+  fi
   snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" --argjson excl "$size_excl" \
     'map(if .timestamp == $ts then . + {size_total: $total, size_exclusive: $excl} else . end)')"
   jq -n \
@@ -320,23 +409,40 @@ cmd_backup() {
       login_user: $user,
       snapshots: $snaps
     }' >"$meta.tmp"
-  mv "$meta.tmp" "$meta"
-  chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || true
-  chmod 755 "$MNT/os/current" "$MNT/home/current" "$MNT/os/$ts" "$MNT/home/$ts" 2>/dev/null || true
-  chmod 644 "$meta" 2>/dev/null || true
-  # File manager on a restore point should show $USER, not an empty parent.
-  if [[ -n $user_name && -d $MNT/home/$ts/$user_name ]]; then
-    chmod 755 "$MNT/home/$ts/$user_name" 2>/dev/null || true
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate write-meta <"$meta.tmp" 2>>"$OMARCHY_TM_LOG"
+    rm -f "$meta" "$meta.tmp"
+    local perms=(os home esp meta os/current home/current "os/$ts" "home/$ts")
+    # File manager on a restore point should show $USER, not an empty parent.
+    [[ -n $user_name ]] && perms+=("home/$ts/$user_name")
+    d_chmod755 "${perms[@]}"
+  else
+    mv "$meta.tmp" "$meta"
+    chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || true
+    chmod 755 "$MNT/os/current" "$MNT/home/current" "$MNT/os/$ts" "$MNT/home/$ts" 2>/dev/null || true
+    chmod 644 "$meta" 2>/dev/null || true
+    # File manager on a restore point should show $USER, not an empty parent.
+    if [[ -n $user_name && -d $MNT/home/$ts/$user_name ]]; then
+      chmod 755 "$MNT/home/$ts/$user_name" 2>/dev/null || true
+    fi
   fi
   trap - ERR
   progress done "valid=$valid ts=$ts"
   log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json >/dev/null || true
+  local listing
+  if [[ $DEST_REMOTE == 1 ]]; then
+    # Keeps the plugin's restore-point list current without it touching the network.
+    listing="$(rgate list 2>>"$OMARCHY_TM_LOG" |
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" --stdin || true)"
+  else
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json >/dev/null || true
+    listing="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" || true)"
+  fi
   echo
   gum style --bold --foreground 2 "● Backup finished."
   gum style --foreground 8 "  Restore points on this disk:"
   echo
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" || true
+  printf '%s\n' "$listing"
   echo
 }
 

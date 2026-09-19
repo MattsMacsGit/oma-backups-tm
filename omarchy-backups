@@ -29,6 +29,7 @@ Destructive: format and restore wipe disks. Keep another backup until proven.
   oma-backups refresh-rescue [--boot-only]
   oma-backups doctor
   oma-backups first-run /dev/sdX
+  oma-backups remote pair HOST | status | forget
   oma-backups status
   oma-backups root
   oma-backups version
@@ -127,6 +128,7 @@ case "$cmd" in
   restore-to-disk) exec "$OMARCHY_TM_ROOT/restore-to-disk.sh" "$@" ;;
   restore-tui) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/restore_tui.py" "$@" ;;
   refresh-rescue) exec "$OMARCHY_TM_ROOT/refresh-rescue.sh" "$@" ;;
+  remote) exec "$OMARCHY_TM_ROOT/remote.sh" "$@" ;;
   compile-excludes)
     exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "$@"
     ;;

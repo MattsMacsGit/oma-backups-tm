@@ -215,9 +215,19 @@ def main() -> int:
     p.add_argument("mount", nargs="?", default="")
     p.add_argument("--json", action="store_true")
     p.add_argument("--open", metavar="TIMESTAMP")
+    p.add_argument("--stdin", action="store_true", help="rows as JSON on stdin (remote capsule)")
     args = p.parse_args()
     if args.open:
         return open_snapshot(args.open)
+    if args.stdin:
+        rows = json.load(sys.stdin)
+        write_cache(rows)
+        if args.json:
+            json.dump(rows, sys.stdout)
+            sys.stdout.write("\n")
+        else:
+            print_human(rows)
+        return 0
     if args.mount:
         mnt = Path(args.mount)
         if not looks_like_capsule(mnt):
