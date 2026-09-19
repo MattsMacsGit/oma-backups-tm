@@ -348,6 +348,18 @@ def tools() -> dict:
     return {n: bool(_which(n)) for n in names}
 
 
+def cached_capsule_disk(path: Path) -> dict | None:
+    """Total/free bytes of a remote backup disk, as of its last backup."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        total, free = int(data["total"]), int(data["free"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    if not 0 <= free <= total:
+        return None
+    return {"total": total, "used": total - free, "free": free}
+
+
 def detect() -> dict:
     osrel = parse_os_release()
     mounts = parse_mountinfo()
@@ -505,7 +517,7 @@ def detect() -> dict:
     capsule_disk = None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from list_snapshots import find_mount, scan, write_cache
+        from list_snapshots import cache_path, find_mount, scan, write_cache
 
         mnt = find_mount()
         backup_mounted = mnt is not None
@@ -520,9 +532,12 @@ def detect() -> dict:
                 capsule_disk = {"total": du.total, "used": du.used, "free": du.free}
             except OSError:
                 capsule_disk = None
-        elif not Path("/etc/omarchy-backups/remote.json").is_file():
+        elif Path("/etc/omarchy-backups/remote.json").is_file():
             # With a paired Pi the disk is never mounted here; its restore
-            # points come from the cache each remote backup writes.
+            # points and free space come from what the last remote backup
+            # cached.
+            capsule_disk = cached_capsule_disk(cache_path().parent / "capsule-disk.json")
+        else:
             write_cache([])
     except Exception:
         snapshots = []

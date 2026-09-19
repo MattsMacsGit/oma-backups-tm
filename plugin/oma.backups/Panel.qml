@@ -217,7 +217,8 @@ Panel {
                 text: {
                   var d = svc.capsuleDisk
                   if (!d) return ""
-                  return "Backup disk  \u00b7  " + Model.formatSize(d.free) + " free of " + Model.formatSize(d.total)
+                  var where = svc.remoteActive ? (" on " + svc.remoteHost) : ""
+                  return "Backup disk" + where + "  \u00b7  " + Model.formatSize(d.free) + " free of " + Model.formatSize(d.total)
                 }
                 color: root.dim
                 font.family: root.fontFamily
@@ -243,7 +244,7 @@ Panel {
             }
 
             Text {
-              visible: svc.remoteActive
+              visible: svc.remoteActive && svc.capsuleDisk === null
               width: parent.width
               text: "Backup disk on " + svc.remoteHost + "  ·  locked between backups"
               color: root.dim

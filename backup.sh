@@ -348,6 +348,15 @@ d_settle() {
   fi
 }
 
+# The plugin shows a remote disk's free space from this; it can't ask the Pi.
+cache_remote_df() {
+  local total free f="$OMARCHY_TM_STATE/capsule-disk.json"
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  read -r total free < <(d_df) || return 0
+  [[ $total =~ ^[0-9]+$ && $free =~ ^[0-9]+$ ]] || return 0
+  printf '{"total": %s, "free": %s}\n' "$total" "$free" >"$f.tmp" && chmod 644 "$f.tmp" && mv "$f.tmp" "$f"
+}
+
 disk_low() {
   local total free
   read -r total free < <(d_df) || return 1
@@ -562,6 +571,7 @@ cmd_backup() {
     progress phase "tidy"
     prune_restore_points || warn "Couldn't tidy up old restore points (this backup is still saved)."
   fi
+  cache_remote_df
   progress done "valid=$valid ts=$ts"
   log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
   local listing
@@ -593,6 +603,7 @@ cmd_prune() {
   local dry=0
   is_dry_run && dry=1
   prune_restore_points "$dry"
+  cache_remote_df
   if [[ $DEST_REMOTE == 1 && $dry == 0 ]]; then
     rgate list 2>>"$OMARCHY_TM_LOG" | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" --stdin --json >/dev/null || true
   fi
