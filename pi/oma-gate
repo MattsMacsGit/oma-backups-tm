@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""OmaBackups gatekeeper: the only thing the laptop's SSH key can run here.
+
+sshd forces every login by that key through `sudo oma-gate`, so this runs as
+root. The request arrives in SSH_ORIGINAL_COMMAND and must be one of the verbs
+in VERBS; anything else is refused. It only ever touches the one LUKS disk
+pinned in gate.conf, mounted at /run/omarchy-backups, and only the top-level
+backup layout inside it (os/, home/, esp/, meta/).
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+import syslog
+from pathlib import Path
+
+VERSION = "1"
+LIB = Path(__file__).resolve().parent
+MAPPER = "oma-capsule"
+TOP_DIRS = {"os", "home", "esp", "meta"}
+NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+UUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
+LOW_PRIORITY = ["nice", "-n", "10", "ionice", "-c2", "-n7"]
+MAX_KEY = 8192
+MAX_META = 1 << 20
+
+# Non-root runs are tests only: they may point the gate at a scratch folder.
+# In production sudo strips the environment, and root never reads these.
+TEST = os.geteuid() != 0
+CONF = Path(os.environ.get("OMA_GATE_CONF", "")) if TEST else Path("/etc/oma-backups/gate.conf")
+MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarchy-backups")
+
+
+class Refused(Exception):
+    pass
+
+
+def log(msg: str) -> None:
+    syslog.syslog(syslog.LOG_INFO, msg)
+
+
+def load_uuid() -> str:
+    try:
+        for line in CONF.read_text(encoding="utf-8").splitlines():
+            key, _, val = line.partition("=")
+            if key.strip() == "uuid" and UUID.match(val.strip()):
+                return val.strip()
+    except OSError:
+        pass
+    raise Refused(f"no capsule configured in {CONF}")
+
+
+def run(*cmd: str, stdin: bytes | None = None) -> None:
+    r = subprocess.run(list(cmd), input=stdin, stdout=sys.stderr)
+    if r.returncode != 0:
+        raise Refused(f"{cmd[0]} failed (exit {r.returncode})")
+
+
+def device() -> Path:
+    return Path("/dev/disk/by-uuid") / load_uuid()
+
+
+def mapper_open() -> bool:
+    return Path("/dev/mapper", MAPPER).exists()
+
+
+def mounted() -> bool:
+    if TEST:
+        return MOUNT.is_dir()
+    r = subprocess.run(["findmnt", "-n", "-o", "SOURCE", str(MOUNT)], capture_output=True, text=True)
+    return r.stdout.strip().split("[")[0] == f"/dev/mapper/{MAPPER}"
+
+
+def require_mounted() -> None:
+    if not mounted():
+        raise Refused("capsule is locked (run unlock first)")
+
+
+def target(rel: str, depth: int = 2) -> Path:
+    """A path inside the capsule's top-level layout, e.g. home/20260919T010308Z."""
+    parts = rel.split("/")
+    if not (1 <= len(parts) <= depth) or parts[0] not in TOP_DIRS or not all(NAME.match(p) for p in parts):
+        raise Refused(f"path not allowed: {rel!r}")
+    for i in range(1, len(parts) + 1):
+        if MOUNT.joinpath(*parts[:i]).is_symlink():
+            raise Refused(f"path not allowed (symlink): {rel!r}")
+    return MOUNT.joinpath(*parts)
+
+
+def is_subvolume(p: Path) -> bool:
+    try:
+        return p.stat().st_ino == 256
+    except OSError:
+        return False
+
+
+def v_version(args: list[str]) -> None:
+    print(VERSION)
+
+
+def v_status(args: list[str]) -> None:
+    print(json.dumps({
+        "version": VERSION,
+        "uuid": load_uuid(),
+        "present": device().exists(),
+        "unlocked": mapper_open(),
+        "mounted": mounted(),
+    }))
+
+
+def v_unlock(args: list[str]) -> None:
+    if mounted():
+        return
+    dev = device()
+    if not dev.exists():
+        raise Refused("capsule not plugged in (or not powered)")
+    if not mapper_open():
+        key = sys.stdin.buffer.read(MAX_KEY + 1)
+        if not key or len(key) > MAX_KEY:
+            raise Refused("unlock key missing or too large")
+        run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
+    MOUNT.mkdir(parents=True, exist_ok=True)
+    run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
+    os.chmod(MOUNT, 0o755)
+    log("capsule unlocked")
+
+
+def v_lock(args: list[str]) -> None:
+    if mounted():
+        run("sync")
+        run("umount", str(MOUNT))
+    if mapper_open():
+        run("cryptsetup", "close", MAPPER)
+    log("capsule locked")
+
+
+def v_subvol_create(args: list[str]) -> None:
+    require_mounted()
+    (p,) = map(target, args)
+    if is_subvolume(p):
+        return
+    if p.exists():
+        raise Refused(f"{args[0]} exists but is not a btrfs subvolume")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    run("btrfs", "subvolume", "create", str(p))
+
+
+def v_snapshot(args: list[str]) -> None:
+    require_mounted()
+    src, dst = map(target, args)
+    if dst.exists():
+        raise Refused(f"{args[1]} already exists")
+    run("btrfs", "subvolume", "snapshot", "-r", str(src), str(dst))
+
+
+def v_set_writable(args: list[str]) -> None:
+    require_mounted()
+    (p,) = map(target, args)
+    run("btrfs", "property", "set", "-ts", str(p), "ro", "false")
+
+
+def v_du(args: list[str]) -> None:
+    require_mounted()
+    (p,) = map(target, args)
+    r = subprocess.run(["btrfs", "filesystem", "du", "-s", "--raw", str(p)], capture_output=True, text=True)
+    line = r.stdout.splitlines()[1].split() if r.returncode == 0 and len(r.stdout.splitlines()) > 1 else []
+    print(f"{line[0]} {line[1]}" if len(line) >= 2 else "0 0")
+
+
+def v_mkdir(args: list[str]) -> None:
+    require_mounted()
+    (p,) = map(target, args)
+    p.mkdir(parents=True, exist_ok=True)
+
+
+def v_exists(args: list[str]) -> None:
+    require_mounted()
+    (p,) = map(target, args)
+    if not p.exists():
+        sys.exit(1)
+
+
+def v_chmod755(args: list[str]) -> None:
+    require_mounted()
+    # Depth 3 so a restore point's user folder (home/<ts>/<user>) can be opened.
+    for p in (target(a, depth=3) for a in args):
+        if p.exists():
+            os.chmod(p, 0o755)
+
+
+def v_list(args: list[str]) -> None:
+    require_mounted()
+    # Installed side by side on the Pi; in the repo it lives in ../lib.
+    sys.path[:0] = [str(LIB), str(LIB.parent / "lib")]
+    from list_snapshots import scan
+
+    print(json.dumps(scan(MOUNT)))
+
+
+def v_write_meta(args: list[str]) -> None:
+    require_mounted()
+    raw = sys.stdin.buffer.read(MAX_META + 1)
+    if len(raw) > MAX_META:
+        raise Refused("machine.json too large")
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        raise Refused("machine.json is not valid JSON")
+    meta = target("meta")
+    meta.mkdir(exist_ok=True)
+    tmp = meta / "machine.json.tmp"
+    tmp.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.replace(meta / "machine.json")
+
+
+def v_rsync(argv: list[str], original: str) -> None:
+    if argv[:2] != ["rsync", "--server"]:
+        raise Refused("only rsync server mode is allowed")
+    require_mounted()
+    env = dict(os.environ, SSH_ORIGINAL_COMMAND=original)
+    os.execvpe(LOW_PRIORITY[0], LOW_PRIORITY + ["rrsync", str(MOUNT)], env)
+
+
+VERBS = {
+    "version": (v_version, 0),
+    "status": (v_status, 0),
+    "unlock": (v_unlock, 0),
+    "lock": (v_lock, 0),
+    "subvol-create": (v_subvol_create, 1),
+    "snapshot": (v_snapshot, 2),
+    "set-writable": (v_set_writable, 1),
+    "du": (v_du, 1),
+    "mkdir": (v_mkdir, 1),
+    "exists": (v_exists, 1),
+    "chmod755": (v_chmod755, None),
+    "list": (v_list, 0),
+    "write-meta": (v_write_meta, 0),
+}
+
+
+def main() -> int:
+    syslog.openlog("oma-gate")
+    original = os.environ.get("SSH_ORIGINAL_COMMAND", "")
+    try:
+        try:
+            argv = shlex.split(original)
+        except ValueError:
+            raise Refused("unparseable command")
+        if not argv:
+            raise Refused("no command (interactive logins are not allowed)")
+        if argv[0] == "rsync":
+            v_rsync(argv, original)
+            return 0
+        verb = VERBS.get(argv[0])
+        if verb is None:
+            raise Refused(f"unknown command {argv[0]!r}")
+        fn, nargs = verb
+        args = argv[1:]
+        if (nargs is not None and len(args) != nargs) or (nargs is None and not args):
+            raise Refused(f"{argv[0]}: wrong number of arguments")
+        fn(args)
+        return 0
+    except Refused as e:
+        log(f"refused: {e} [{original[:200]}]")
+        print(f"oma-gate: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        log(f"error: {e} [{original[:200]}]")
+        print(f"oma-gate: {e}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
