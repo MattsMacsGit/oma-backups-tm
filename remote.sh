@@ -100,13 +100,16 @@ cmd_pair() {
   remote_load
   local st
   st="$(rgate status 2>&1)" || fail "Couldn't reach the Pi as $OMA_REMOTE_ACCOUNT@$host: $st"
+  # It's about to be unplugged; pulling it while mounted leaves a dead mount.
+  "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
   echo
   gum style --bold --foreground 2 "● Paired with $host."
   if [[ $(jq -r .present <<<"$st") == true ]]; then
     gum style --foreground 8 "  The backup disk is already plugged into the Pi. Backups go there from now on."
   else
-    gum style --foreground 8 "  Unplug the backup disk and plug it into the Pi. Backups go there from then on."
-    gum style --foreground 8 "  While it's plugged into this laptop, backups keep going straight to it."
+    gum style --foreground 8 "  The backup disk is locked and safe to unplug. Plug it into the Pi;"
+    gum style --foreground 8 "  backups go there from then on. While it's plugged into this laptop,"
+    gum style --foreground 8 "  backups keep going straight to it."
   fi
   press_enter
 }

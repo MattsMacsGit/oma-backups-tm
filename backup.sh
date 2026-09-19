@@ -47,6 +47,7 @@ load_config_json
 require_supported
 
 MNT="$(cfg '.paths.mountpoint')"
+LUKS_MAPPER="$(cfg '.layout.luks_mapper')"
 SRC_TOP="$(cfg '.paths.source_toplevel')"
 SNAP_SUB="$(cfg '.paths.source_snap_subvol')"
 EX_HOME="$(cfg '._excludes_home')"
@@ -89,6 +90,15 @@ ensure_src_top() {
   if [[ ! -e $SRC_TOP/$SNAP_SUB ]]; then
     run_quiet btrfs subvolume create "$SRC_TOP/$SNAP_SUB"
   fi
+  # Source snapshots only live for one backup; a crashed run leaves its pair
+  # behind, pinning old data on the system disk. Only one backup runs at a
+  # time (pid file), so anything here now is a leftover.
+  local s
+  for s in "$SRC_TOP/$SNAP_SUB"/os-* "$SRC_TOP/$SNAP_SUB"/home-*; do
+    [[ -e $s ]] || continue
+    btrfs subvolume delete "$s" >/dev/null 2>>"$OMARCHY_TM_LOG" &&
+      log_file "removed leftover source snapshot $s"
+  done
 }
 
 # Where this backup goes: the backup USB plugged into this laptop, or (once
@@ -128,8 +138,13 @@ d_exists() {
   if [[ $DEST_REMOTE == 1 ]]; then rgate exists "$1" 2>>"$OMARCHY_TM_LOG"; else [[ -e $MNT/$1 ]]; fi
 }
 
+# Functions don't inherit the ERR trap, so these fail loudly themselves.
 d_mkdir() {
-  if [[ $DEST_REMOTE == 1 ]]; then rgate mkdir "$1" 2>>"$OMARCHY_TM_LOG"; else mkdir -p "$MNT/$1"; fi
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rgate mkdir "$1" 2>>"$OMARCHY_TM_LOG"
+  else
+    mkdir -p "$MNT/$1" 2>>"$OMARCHY_TM_LOG"
+  fi || fail_backup "couldn't create $1 on the backup disk"
 }
 
 d_snapshot() {
@@ -137,7 +152,7 @@ d_snapshot() {
     rgate snapshot "$1" "$2" 2>>"$OMARCHY_TM_LOG"
   else
     run_quiet btrfs subvolume snapshot -r "$MNT/$1" "$MNT/$2"
-  fi
+  fi || fail_backup "couldn't save restore point $2"
 }
 
 d_chmod755() {
@@ -274,7 +289,16 @@ cmd_backup() {
     exit 0
   fi
   require_root "${ORIG_ARGS[@]}"
+  local other
+  other="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
+    grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
+    fail_backup "Another backup is already running (pid $other)."
+  fi
   refresh_excludes_from_user
+  # A backup disk unplugged while mounted leaves a dead mount at $MNT that
+  # still looks mounted; writing to it fails with I/O errors mid-backup.
+  close_stale_mapper "$LUKS_MAPPER"
   pick_destination
   announce_backup "$ts"
   if [[ $DEST_REMOTE == 1 ]]; then
@@ -290,6 +314,8 @@ cmd_backup() {
     fi
     ensure_rw_mount "$MNT"
     dest_mounted || fail_backup "capsule not mounted at $MNT"
+    { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
+      fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
   fi
   while d_exists "os/$ts" || d_exists "home/$ts"; do
     sleep 1
@@ -410,7 +436,8 @@ cmd_backup() {
       snapshots: $snaps
     }' >"$meta.tmp"
   if [[ $DEST_REMOTE == 1 ]]; then
-    rgate write-meta <"$meta.tmp" 2>>"$OMARCHY_TM_LOG"
+    rgate write-meta <"$meta.tmp" 2>>"$OMARCHY_TM_LOG" ||
+      fail_backup "couldn't save the restore-point list on $REMOTE_HOST"
     rm -f "$meta" "$meta.tmp"
     local perms=(os home esp meta os/current home/current "os/$ts" "home/$ts")
     # File manager on a restore point should show $USER, not an empty parent.
