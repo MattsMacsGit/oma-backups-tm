@@ -306,7 +306,7 @@ rsync_tree() {
   # --partial: a file cut off mid-copy continues next time instead of
   # starting over (safe: `current` only becomes a restore point on success).
   stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
-    --info=progress2,name0,flist0 --no-inc-recursive --stats \
+    --info=progress2,name0,flist2 --no-inc-recursive --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
   local rc=${PIPESTATUS[0]}

@@ -30,6 +30,9 @@ RSYNC_RE = re.compile(
 )
 TOCHK_RE = re.compile(r"to-chk=(?P<left>\d+)/(?P<total>\d+)")
 TOTAL_RE = re.compile(r"^Total file size:\s*(?P<n>\d+)")
+# rsync --info=flist2 while it lists everything before copying anything
+# (minutes for a big home on a resume or a slow Pi): "12300 files...".
+FILES_RE = re.compile(r"^\s*(?P<n>\d+) files\.\.\.")
 
 LABEL = {
     "unlock": "Unlocking the backup disk",
@@ -132,6 +135,9 @@ class RsyncProgress:
         if t:
             self.total_size = int(t.group("n"))
             return None
+        f = FILES_RE.search(compact)
+        if f:
+            return status(self.step, None, f"Checking for changes: {int(f.group('n')):,} files so far")
         m = RSYNC_RE.search(compact)
         c = TOCHK_RE.search(compact)
         if not m and not c:
@@ -170,18 +176,22 @@ class RsyncProgress:
 
 def stream(step: str, stats_file: str | None) -> int:
     prog = RsyncProgress(step)
-    write(status(step, 0))
+    write(status(step, None, "Checking for changes"))
+    # Only a person at a terminal wants rsync's raw output; a service's would
+    # just fill the system log.
+    echo = sys.stderr.isatty()
     leftover = ""
     last = None
     while True:
         chunk = sys.stdin.buffer.read1(256)
         if not chunk:
             break
-        try:
-            sys.stderr.buffer.write(chunk)
-            sys.stderr.buffer.flush()
-        except OSError:
-            pass
+        if echo:
+            try:
+                sys.stderr.buffer.write(chunk)
+                sys.stderr.buffer.flush()
+            except OSError:
+                pass
         leftover += chunk.decode("utf-8", "replace").replace("\r", "\n")
         while "\n" in leftover:
             line, leftover = leftover.split("\n", 1)
