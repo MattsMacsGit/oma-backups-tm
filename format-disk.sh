@@ -208,6 +208,11 @@ if [[ -n $OLD_LUKS_UUID && $new_uuid == "$OLD_LUKS_UUID" ]]; then
   fail_setup "LUKS UUID did not change (still $new_uuid)"
 fi
 log_file "new LUKS UUID $new_uuid (was ${OLD_LUKS_UUID:-none})"
+# A backup disk pulled out while unlocked leaves its mapper behind under the
+# same name, which would make the open below fail.
+close_stale_mapper "$LUKS_MAPPER"
+[[ ! -e /dev/mapper/$LUKS_MAPPER ]] ||
+  fail_setup "another backup disk is still unlocked as $LUKS_MAPPER. Eject it in Files (or run: sudo oma-backups umount) and try again."
 if ! printf '%s' "$LUKS_PASS" | cryptsetup open --key-file=- "$P3" "$LUKS_MAPPER"; then
   fail_setup "could not open the new LUKS volume with the password you just set"
 fi
