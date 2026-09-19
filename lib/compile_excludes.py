@@ -121,6 +121,11 @@ def split_paths(
     os_ex: list[str] = []
     home_root = home_root.resolve()
     for raw in paths:
+        # Not a path at all but an rsync pattern (the recommended quick-skips
+        # like ".cache") — pass through; resolving it would anchor it to cwd.
+        if not raw.startswith(("/", "~")):
+            home_ex.append(raw)
+            continue
         p = Path(raw).expanduser()
         try:
             resolved = p.resolve()
@@ -177,7 +182,9 @@ def write_exclude_file(path: Path, lines: list[str], header: str) -> None:
 def compile_from(skip_file: Path | None = None) -> tuple[list[str], list[str], Path]:
     home = user_home()
     if skip_file is None:
-        skip_file = home / ".config" / "omarchy-backups" / "skip-paths.txt"
+        from skip_defaults import seed
+
+        skip_file = seed(home)
     root = repo_root()
     defaults_home = load_paths(root / "share" / "excludes-home.txt")
     defaults_os = load_paths(root / "share" / "excludes-os.txt")

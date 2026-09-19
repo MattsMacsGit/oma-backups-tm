@@ -20,10 +20,28 @@ Panel {
   property string page: "home"
   property bool showAllSnaps: false
   readonly property var quickSkips: [
-    { label: "Downloads", path: svc.home + "/Downloads" },
-    { label: "Trash", path: svc.home + "/.local/share/Trash" },
-    { label: "Caches", path: svc.home + "/.cache" }
+    { label: "Downloads", paths: [svc.home + "/Downloads"], note: "" },
+    { label: "Trash", paths: ["**/.local/share/Trash", ".Trash"], note: "Recommended" },
+    { label: "Caches", paths: [".cache"], note: "Recommended" },
+    { label: "Thumbnails & system clutter", paths: [".thumbnails", "lost+found"], note: "Recommended" }
   ]
+
+  function quickSkipOn(paths) {
+    for (var i = 0; i < paths.length; i++) if (!svc.hasSkip(paths[i])) return false
+    return true
+  }
+
+  function isQuickSkip(path) {
+    for (var i = 0; i < quickSkips.length; i++)
+      if (quickSkips[i].paths.indexOf(path) !== -1) return true
+    return false
+  }
+
+  readonly property int customSkipCount: {
+    var n = 0
+    for (var i = 0; i < svc.skipCount; i++) if (!isQuickSkip(svc.skipModel.get(i).path)) n++
+    return n
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
@@ -451,26 +469,22 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
-            Text {
-              width: parent.width
-              text: "One-click common skips. Caches and Trash are always left off backups anyway — these just make that visible and toggleable."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
             Repeater {
               model: root.quickSkips
               delegate: Toggle {
                 required property var modelData
                 width: parent.width
                 label: modelData.label
-                checked: svc.hasSkip(modelData.path)
+                description: modelData.note
+                checked: root.quickSkipOn(modelData.paths)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: {
-                  if (svc.hasSkip(modelData.path)) svc.removeSkip(modelData.path)
-                  else svc.addSkip(modelData.path)
+                  var on = root.quickSkipOn(modelData.paths)
+                  for (var i = 0; i < modelData.paths.length; i++) {
+                    if (on) svc.removeSkip(modelData.paths[i])
+                    else svc.addSkip(modelData.paths[i])
+                  }
                 }
               }
             }
@@ -481,7 +495,7 @@ Panel {
               fontFamily: root.fontFamily
             }
             Text {
-              visible: svc.skipCount === 0
+              visible: root.customSkipCount === 0
               width: parent.width
               text: "Nothing skipped yet."
               color: root.dim
@@ -500,8 +514,9 @@ Panel {
               model: svc.skipModel
               delegate: Rectangle {
                 required property string path
+                visible: !root.isQuickSkip(path)
                 width: column.width
-                height: skipTxt.implicitHeight + Style.space(8)
+                height: visible ? skipTxt.implicitHeight + Style.space(8) : 0
                 radius: Style.cornerRadius
                 color: "transparent"
                 border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)

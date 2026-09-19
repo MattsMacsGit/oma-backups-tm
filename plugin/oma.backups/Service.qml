@@ -44,6 +44,11 @@ Item {
     if (r) return r + "/lib/write_skip_paths.py"
     return home + "/.local/share/oma-backups/lib/write_skip_paths.py"
   }
+  readonly property string seedSkip: {
+    var r = detect && detect._root
+    if (r) return r + "/lib/skip_defaults.py"
+    return home + "/.local/share/oma-backups/lib/skip_defaults.py"
+  }
 
   readonly property var disks: {
     var d = detect && detect.disks ? detect.disks : []
@@ -143,7 +148,7 @@ Item {
   onBackupRunningChanged: if (!backupRunning) Qt.callLater(refreshSnapshots)
 
   function loadSkipFile() {
-    loadSkipProc.command = ["bash", "-lc", "mkdir -p \"$HOME/.config/omarchy-backups\"; cat \"$HOME/.config/omarchy-backups/skip-paths.txt\" 2>/dev/null || true"]
+    loadSkipProc.command = ["python3", root.seedSkip]
     loadSkipProc.running = true
   }
 

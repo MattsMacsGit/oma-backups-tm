@@ -1,11 +1,4 @@
 # Paths relative to @home (/home). rsync --exclude-from.
 # User skip-paths.txt is merged on top of these on every backup.
-.cache
-.thumbnails
-.local/share/Trash
-.Trash
-**/.cache
-**/.thumbnails
-**/.local/share/Trash
-**/.Trash
-**/lost+found
+# Trash / caches / thumbnails are recommended defaults seeded into
+# skip-paths.txt (lib/skip_defaults.py) so the plugin's switches control them.
