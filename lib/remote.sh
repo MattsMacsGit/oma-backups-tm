@@ -25,7 +25,11 @@ remote_load() {
   REMOTE_SSH=(ssh -i "$OMA_REMOTE_KEY" -p "$port" -l "$OMA_REMOTE_ACCOUNT"
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4
-    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OMA_REMOTE_KNOWN")
+    -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile="$OMA_REMOTE_KNOWN"
+    # One connection for the whole backup instead of a new handshake for
+    # each of the dozen small gatekeeper calls (slow over a network). Every
+    # command still goes through the gatekeeper on the Pi. Root-only socket.
+    -o ControlMaster=auto -o ControlPath=/run/omarchy-backups-ssh-%C -o ControlPersist=60)
 }
 
 # Run one gatekeeper verb on the Pi, e.g. `rgate snapshot home/current home/TS`.

@@ -33,6 +33,9 @@ TOTAL_RE = re.compile(r"^Total file size:\s*(?P<n>\d+)")
 
 LABEL = {
     "unlock": "Unlocking the backup disk",
+    "prepare": "Getting ready",
+    "resume": "Carrying on where it stopped",
+    "stopping": "Stopping and locking the backup disk",
     "snapshot": "Taking a snapshot of this computer",
     "os": "Copying system files",
     "home": "Copying your files",

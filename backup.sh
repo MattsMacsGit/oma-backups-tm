@@ -327,6 +327,9 @@ rsync_tree() {
 
 on_backup_exit() {
   local rc=$?
+  # Locking a disk on a Pi takes a few seconds; say so rather than leaving
+  # the plugin to guess whether the backup is still running.
+  [[ $STOPPED == 1 && $DEST_REMOTE == 1 ]] && progress phase stopping
   remote_close
   clear_pid
   if [[ $rc -ne 0 ]]; then
@@ -337,6 +340,15 @@ on_backup_exit() {
   fi
 }
 
+# Stop button / systemctl stop: exit cleanly (the EXIT trap tidies up and the
+# backup can be resumed) instead of carrying on and reporting rsync's
+# "killed by signal" as a failure.
+STOPPED=0
+on_stop_signal() {
+  STOPPED=1
+  exit 143
+}
+
 BACKUP_FAILED=0
 fail_backup() {
   echo
@@ -345,6 +357,7 @@ fail_backup() {
   gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
   # The plugin shows this; backups started without a terminal have no other
   # way to say why they stopped.
+  [[ $STOPPED == 1 ]] && exit 143
   BACKUP_FAILED=1
   if [[ -n ${BROWSE_STATE:-} ]]; then
     browse_state error "$*"
@@ -546,9 +559,10 @@ cmd_backup() {
 
   write_pid
   mark_incomplete
-  trap on_backup_exit EXIT INT TERM
+  trap on_backup_exit EXIT
+  trap on_stop_signal INT TERM
   trap 'fail_backup "unexpected failure"' ERR
-  progress phase "snapshot"
+  progress phase "prepare"
 
   mount_src_top
   local resume_ts
@@ -556,6 +570,7 @@ cmd_backup() {
   if [[ -n $resume_ts ]]; then
     ts=$resume_ts
     RESUMED=1
+    progress phase "resume"
     step "Carrying on the backup from $ts where it stopped"
   else
     rm -f "$RESUME_FILE"
@@ -581,6 +596,7 @@ cmd_backup() {
   d_mkdir meta
 
   if [[ $RESUMED != 1 ]]; then
+    progress phase "snapshot"
     step "Snapshotting the current system"
     if [[ $HOME_ONLY != 1 ]]; then
       run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"

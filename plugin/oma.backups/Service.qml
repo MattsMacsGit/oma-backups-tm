@@ -355,13 +355,24 @@ Item {
     compileThen("backup")
   }
 
+  // Stopping takes a moment (a Pi has to lock its disk over the network).
+  // Until the backup has really exited, say so instead of flipping between
+  // "running" and "Resume" as the status catches up.
+  property bool stopping: false
+  property real stoppingSince: 0
+
   function stopBackup() {
     pendingStop = true
     pendingBackup = false
     pendingFirstRunDisk = ""
     launchedBackup = false
     sawBackupStatus = false
-    backupRunning = false
+    stopping = true
+    stoppingSince = Date.now() / 1000
+    backupRunning = true
+    progressLabel = "Stopping and locking the backup disk"
+    progressBusy = true
+    progressDetail = ""
     if (root.linked)
       Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service", "oma-backups-scheduled.service"])
     else
@@ -452,6 +463,20 @@ Item {
     var j
     try { j = JSON.parse(raw) } catch (e) { return }
     if (!j || typeof j !== "object") return
+    if (root.stopping) {
+      var stillGoing = j.running === true && j.stale !== true && j.phase !== "idle"
+      if (stillGoing && Date.now() / 1000 - root.stoppingSince < 60) {
+        root.backupRunning = true
+        root.progressLabel = "Stopping and locking the backup disk"
+        root.progressBusy = true
+        root.progressDetail = ""
+        return
+      }
+      root.stopping = false
+      root.backupRunning = false
+      root.launchedBackup = false
+      root.sawBackupStatus = false
+    }
     if (j.phase === "error") {
       // If we just launched this attempt and haven't seen it report
       // running yet, an "error" here is leftover from a *previous*,

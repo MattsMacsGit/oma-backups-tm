@@ -352,7 +352,7 @@ Panel {
             }
             Button {
               width: parent.width
-              visible: svc.backupRunning || svc.launchedBackup
+              visible: (svc.backupRunning || svc.launchedBackup) && !svc.stopping
               text: "Stop backup"
               foreground: root.urgent
               bordered: true
