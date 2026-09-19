@@ -149,7 +149,7 @@ step_done() {
   local name=$1 size=${2:-0}
   [[ $size =~ ^[0-9]+$ ]] || size=0
   jq --arg n "$name" --argjson s "$size" '.done += [$n] | .sizes[$n] = $s' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
-    mv "$RESUME_FILE.tmp" "$RESUME_FILE"
+    chmod 644 "$RESUME_FILE.tmp" && mv "$RESUME_FILE.tmp" "$RESUME_FILE"
 }
 
 is_done() {
