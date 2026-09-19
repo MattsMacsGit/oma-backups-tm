@@ -581,6 +581,11 @@ cmd_backup() {
   fi
   require_root "${ORIG_ARGS[@]}"
   refuse_if_running
+  # From here on this run owns the pid file, and the next steps can unlock
+  # the disk, so Stop must already be handled: without these traps a Stop
+  # during unlocking killed us outright and left the disk open.
+  trap on_backup_exit EXIT
+  trap on_stop_signal INT TERM
   if [[ -f $OMA_SCHEDULE_UNIT && ${OMARCHY_TM_UNATTENDED:-0} != 1 ]]; then
     refresh_root_copy || warn "Couldn't update the copy automatic backups run from."
   fi
@@ -593,10 +598,7 @@ cmd_backup() {
   open_destination
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
 
-  write_pid
   mark_incomplete
-  trap on_backup_exit EXIT
-  trap on_stop_signal INT TERM
   trap 'fail_backup "unexpected failure"' ERR
   progress phase "prepare"
 
