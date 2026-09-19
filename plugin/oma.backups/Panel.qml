@@ -339,7 +339,7 @@ Panel {
             }
 
             Rectangle {
-              visible: svc.browseTs !== ""
+              visible: svc.browseTs !== "" && svc.browseMode === "open"
               width: parent.width
               height: doneBtn.implicitHeight + Style.space(10)
               radius: Style.cornerRadius
@@ -383,6 +383,52 @@ Panel {
               fontFamily: root.fontFamily
               tooltipText: "One-time setup: backing up and opening restore points won't ask again"
               onClicked: svc.linkLaptop()
+            }
+
+            Column {
+              visible: svc.partialSnapshot !== ""
+              width: parent.width
+              spacing: Style.space(8)
+              PanelSectionHeader {
+                text: "YOUR FILES"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: svc.restoringFiles
+                  ? (svc.browsePhase === "opening"
+                    ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
+                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                  : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
+                    + ". Your documents, photos and other files are still on the backup."
+                    + (svc.linked ? "" : " Link this laptop (button above) to bring them back.")
+                color: svc.restoringFiles ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Button {
+                visible: !svc.restoringFiles
+                width: parent.width
+                text: "Restore my files"
+                foreground: Color.background
+                background: Color.accent
+                accent: Color.accent
+                enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
+                fontFamily: root.fontFamily
+                tooltipText: "Copies back everything that's missing. Never overwrites a file you've changed since."
+                onClicked: svc.restoreMyFiles()
+              }
+              Button {
+                visible: svc.restoringFiles
+                width: parent.width
+                text: "Stop (carry on later)"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.stopRestoringFiles()
+              }
             }
 
             Column {

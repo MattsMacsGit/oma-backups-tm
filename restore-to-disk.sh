@@ -9,7 +9,11 @@ source "$OMARCHY_TM_ROOT/lib/common.sh"
 
 usage() {
   cat <<'EOF'
-Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--dry-run] [--yes] [--allow-internal]
+Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--level full|settings] [--dry-run] [--yes] [--allow-internal]
+
+--level settings: the system plus each home's hidden settings (.config,
+.local, ...); visible folders come back empty and files over 100 MB are
+skipped. Bring the rest back later with "Restore my files".
 
 Restores a VALID (os+home+esp) point onto a blank disk so it boots Omarchy:
   GPT → 2G ESP + LUKS2 → btrfs (@, @home, empty @log/@pkg)
@@ -24,6 +28,7 @@ EOF
 
 TARGET=""
 SNAPSHOT=""
+LEVEL=full
 ORIG_ARGS=("$@")
 
 while [[ $# -gt 0 ]]; do
@@ -33,6 +38,7 @@ while [[ $# -gt 0 ]]; do
     --yes) export OMARCHY_TM_YES=1; shift ;;
     --allow-internal) export OMARCHY_TM_ALLOW_INTERNAL=1; shift ;;
     --snapshot) SNAPSHOT=${2:-}; shift 2 ;;
+    --level) LEVEL=${2:-}; shift 2 ;;
     --*) die "unknown flag: $1" ;;
     *)
       if [[ -z $TARGET ]]; then
@@ -46,6 +52,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n $TARGET && -n $SNAPSHOT ]] || { usage >&2; exit 1; }
+[[ $LEVEL == full || $LEVEL == settings ]] || die "--level must be full or settings"
 
 load_config_json
 require_supported
@@ -79,7 +86,7 @@ print_plan() {
 == restore-to-disk --snapshot $SNAPSHOT ==
 Target:     $TARGET   $(lsblk -n -d -o SIZE,MODEL,TRAN "$TARGET" 2>/dev/null || true)
 Capsule:    $MNT
-Snapshot:   $SNAPSHOT
+Snapshot:   $SNAPSHOT  (restore level: $LEVEL)
 Live root:  $(printf '%s' "$DETECT_JSON" | jq -r '.live_root_disk')  [always refused]
 Rescue:     $(is_rescue && echo yes || echo no)
 Allow internal: ${OMARCHY_TM_ALLOW_INTERNAL:-0}
@@ -203,9 +210,31 @@ log "rsync OS snapshot"
 rsync -aHAX --numeric-ids --info=progress2 --delete \
   --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp \
   "$MNT/os/$SNAPSHOT"/ "$NEW_ROOT/@/"
-log "rsync home snapshot"
-rsync -aHAX --numeric-ids --info=progress2 --delete \
+log "rsync home snapshot ($LEVEL)"
+home_filter=()
+if [[ $LEVEL == settings ]]; then
+  # Hidden files and folders at the top of each home (.config, .local, ...)
+  # come back; visible folders (Documents, Pictures, ...) come back empty;
+  # anything over 100 MB is left for "Restore my files" (games, AI models).
+  home_filter=(--max-size=100M --include='/*/' --include='/*/.*' --include='/*/.*/**'
+    --include='/*/*/' --exclude='/*/**')
+fi
+rsync -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
   "$MNT/home/$SNAPSHOT"/ "$NEW_ROOT/@home/"
+if [[ $LEVEL == settings ]]; then
+  # While this marker exists, the restored system's plugin offers "Restore my
+  # files" and backups never thin away $SNAPSHOT: until the files are back,
+  # it's the only restore point that still has them. It lives in each user's
+  # own state folder so the plugin (running as that user) can clear it.
+  for h in "$NEW_ROOT/@home"/*/; do
+    [[ -d $h ]] || continue
+    d="$h.local/state/omarchy-backups"
+    mkdir -p "$d"
+    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" \
+      '{snapshot: $s, level: "settings", restored_at: $at}' >"$d/partial-restore.json"
+    chown --reference="$h" "$h.local" "$h.local/state" "$d" "$d/partial-restore.json" 2>/dev/null || true
+  done
+fi
 
 mkdir -p "$NEW_ESP"
 run mount "$P1" "$NEW_ESP"

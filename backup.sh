@@ -409,6 +409,13 @@ prune_restore_points() {
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
+  # After a "system + settings" restore, the restore point it came from is the
+  # only one that still has the user's files until they're brought back.
+  local protected
+  protected="$(jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
+  if [[ -n $protected ]]; then
+    plan="$(jq --arg p "$protected" '.thin -= [$p] | .space_order -= [$p] | .keep = (.keep + [$p] | unique)' <<<"$plan")"
+  fi
   if [[ $dry == 1 ]]; then
     echo "Setting: $mode"
     jq -r '"Keep:    \(.keep | length)", "Thin:    \(.thin | join(" "))", "If the disk fills, oldest first: \(.space_order | join(" "))"' <<<"$plan"

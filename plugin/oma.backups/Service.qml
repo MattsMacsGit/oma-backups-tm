@@ -145,9 +145,30 @@ Item {
   property string browseTs: ""
   property string browsePhase: ""   // "", "opening", "open"
   property int browseWaited: 0
+  property string browseMode: "open"  // "open" in Files, or "restore" (Restore my files)
 
-  function browse(ts) {
+  // After a "system + settings" restore: which restore point still has the
+  // user's files (written by restore-to-disk.sh into their state folder).
+  property string partialSnapshot: ""
+  property bool restoringFiles: false
+  property int restorePercent: 0
+
+  function restoreMyFiles() {
+    if (root.partialSnapshot === "" || !root.linked) return
+    root.restoringFiles = true
+    root.restorePercent = 0
+    browse(root.partialSnapshot, "restore")
+  }
+
+  function stopRestoringFiles() {
+    restoreProc.running = false
+    root.restoringFiles = false
+    closeBrowse()
+  }
+
+  function browse(ts, mode) {
     if (root.browseTs !== "" && root.browseTs !== ts) closeBrowse()
+    root.browseMode = mode || "open"
     root.browseTs = ts
     root.browsePhase = "opening"
     root.browseWaited = 0
@@ -216,6 +237,7 @@ Item {
     timerFile.reload()
     linkedFile.reload()
     lastSuccessFile.reload()
+    if (!root.restoringFiles) partialFile.reload()
     nowSec = Date.now() / 1000
     if (!skipLoaded) loadSkipFile()
   }
@@ -565,12 +587,61 @@ Item {
       if (j.state === "ready" && j.path) {
         browsePoll.stop()
         root.browsePhase = "open"
-        Quickshell.execDetached(["xdg-open", String(j.path)])
+        if (root.browseMode === "restore") {
+          // Only what's missing: never overwrite anything changed since.
+          restoreProc.command = ["rsync", "-a", "--ignore-existing", "--info=progress2",
+            String(j.path) + "/", root.home + "/"]
+          restoreProc.running = true
+        } else {
+          Quickshell.execDetached(["xdg-open", String(j.path)])
+        }
       } else if (j.state === "error") {
         root.lastError = String(j.message || "Couldn't open that restore point.")
+        root.restoringFiles = false
         root.closeBrowse()
       }
     }
+  }
+
+  Process {
+    id: restoreProc
+    stdout: SplitParser {
+      splitMarker: "\r"
+      onRead: function (line) {
+        var m = /\s(\d{1,3})%\s/.exec(line)
+        if (m) root.restorePercent = parseInt(m[1], 10)
+      }
+    }
+    onExited: function (code) {
+      var wasRestoring = root.restoringFiles
+      root.restoringFiles = false
+      root.closeBrowse()
+      if (!wasRestoring) return
+      if (code === 0) {
+        // Everything's back: the protected restore point can be thinned again.
+        Quickshell.execDetached(["rm", "-f", root.home + "/.local/state/omarchy-backups/partial-restore.json"])
+        root.partialSnapshot = ""
+        Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
+          "Everything from the backup has been restored to your home folder."])
+      } else {
+        root.lastError = "Restoring your files stopped before finishing. Press Restore my files to carry on."
+      }
+    }
+  }
+
+  FileView {
+    id: partialFile
+    path: root.home + "/.local/state/omarchy-backups/partial-restore.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.partialSnapshot = /^\d{8}T\d{6}Z$/.test(j.snapshot || "") ? j.snapshot : ""
+      } catch (e) {
+        root.partialSnapshot = ""
+      }
+    }
+    onLoadFailed: root.partialSnapshot = ""
   }
 
   Timer {

@@ -438,7 +438,18 @@ def confirm_wipe(target: dict, snap: dict) -> bool:
     return yes == "YES"
 
 
-def run_restore(target: dict, snap: dict) -> int:
+LEVELS = {
+    "Everything: the system and all your files": "full",
+    "System + settings: faster; your files come back later from Settings → Restore my files": "settings",
+}
+
+
+def pick_level() -> str | None:
+    choice = gum_choose(list(LEVELS), header="How much do you want to restore?")
+    return LEVELS.get(choice) if choice else None
+
+
+def run_restore(target: dict, snap: dict, level: str) -> int:
     ts = snap.get("timestamp")
     argv = [
         str(CLI),
@@ -446,6 +457,8 @@ def run_restore(target: dict, snap: dict) -> int:
         target["path"],
         "--snapshot",
         str(ts),
+        "--level",
+        level,
         "--yes",
         "--allow-internal",
     ]
@@ -486,6 +499,10 @@ def main() -> int:
     if not snap:
         drop_to_shell()
         return 1
+    level = pick_level()
+    if not level:
+        drop_to_shell()
+        return 1
     target = pick_target()
     if not target:
         drop_to_shell()
@@ -503,6 +520,8 @@ def main() -> int:
             target["path"],
             "--snapshot",
             str(snap.get("timestamp")),
+            "--level",
+            level,
             "--allow-internal",
         ],
         env=env,
@@ -510,11 +529,14 @@ def main() -> int:
     if not confirm_wipe(target, snap):
         drop_to_shell()
         return 1
-    rc = run_restore(target, snap)
+    rc = run_restore(target, snap, level)
     if rc == 0:
         out()
         gum_style("--bold", "--foreground", "2", "● Restore finished.")
         gum_style("--foreground", "8", "  Remove this USB and boot the restored disk.")
+        if level == "settings":
+            gum_style("--foreground", "8", "  Your documents, photos and other files are still on the backup: once")
+            gum_style("--foreground", "8", "  you're in, open OmaBackups → Settings → Restore my files.")
         pause("Press Enter for a shell.")
     else:
         gum_style("--bold", "--foreground", "1", f"Restore failed (exit {rc}).")
