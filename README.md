@@ -1,6 +1,6 @@
 # OmaBackups
 
-**v0.9.1 beta** — not a 1.0 release.
+**v1.0.1 RC** — release candidate: nearly stable, still being tested.
 
 Time Machine-style **encrypted USB backups** for [Omarchy](https://omarchy.org/).
 A USB disk holds system + home copies. The same USB can boot a restore wizard.

@@ -139,8 +139,8 @@ Panel {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: svc.backupRunning
-      ? ("OmaBackups (beta) — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
-      : (svc.hasCapsule ? "OmaBackups (beta)" : "OmaBackups (beta) — set up a disk")
+      ? ("OmaBackups — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
+      : (svc.hasCapsule ? "OmaBackups" : "OmaBackups — set up a disk")
     onPressed: root.toggle()
   }
 
@@ -204,7 +204,7 @@ Panel {
                 title: "OmaBackups"
                 meta: svc.backupRunning
                   ? (Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%")
-                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  beta 0.9.1") : "beta 0.9.1  ·  no backup disk yet")
+                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.0.1 RC") : "1.0.1 RC  ·  no backup disk yet")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -542,7 +542,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "beta 0.9.1  ·  skip folders, disks, Pi, erase disk"
+              meta: "1.0.1 RC  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

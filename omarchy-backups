@@ -7,9 +7,11 @@ export OMARCHY_TM_ROOT OMARCHY_BACKUPS_ROOT="$OMARCHY_TM_ROOT"
 # shellcheck source=lib/common.sh
 source "$OMARCHY_TM_ROOT/lib/common.sh"
 
+OMA_VERSION="$(cat "$OMARCHY_TM_ROOT/VERSION" 2>/dev/null || echo unknown)"
+
 usage() {
+  echo "oma-backups $OMA_VERSION — encrypted Omarchy system+home backups"
   cat <<'EOF'
-oma-backups 0.9.1-beta — encrypted Omarchy system+home backups
 Destructive: format and restore wipe disks. Keep another backup until proven.
 
   oma-backups detect [--json]
@@ -179,7 +181,7 @@ case "$cmd" in
     ;;
   status) status_json ;;
   root) printf '%s\n' "$OMARCHY_TM_ROOT" ;;
-  version) echo "oma-backups 0.9.1-beta" ;;
+  version) echo "oma-backups $OMA_VERSION" ;;
   *)
     log_err "unknown command: $cmd"
     usage >&2
