@@ -329,6 +329,53 @@ Panel {
               onClicked: svc.stopBackup()
             }
 
+            Rectangle {
+              visible: svc.browseTs !== ""
+              width: parent.width
+              height: doneBtn.implicitHeight + Style.space(10)
+              radius: Style.cornerRadius
+              color: "transparent"
+              border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.35)
+              border.width: 1
+              Text {
+                anchors.left: parent.left
+                anchors.right: doneBtn.left
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(8)
+                anchors.rightMargin: Style.space(8)
+                text: svc.browsePhase === "opening"
+                  ? "Opening " + Model.prettyStamp(svc.browseTs) + "…"
+                  : "Browsing " + Model.prettyStamp(svc.browseTs) + "  ·  read-only"
+                elide: Text.ElideRight
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Button {
+                id: doneBtn
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(5)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Done"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "Close it and lock the backup disk"
+                onClicked: svc.closeBrowse()
+              }
+            }
+
+            Button {
+              width: parent.width
+              visible: svc.hasCapsule && !svc.linked && !svc.backupRunning && !svc.launchedBackup
+              text: "Stop asking for my password"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              tooltipText: "One-time setup: backing up and opening restore points won't ask again"
+              onClicked: svc.linkLaptop()
+            }
+
             Column {
               visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
               width: parent.width
@@ -343,8 +390,8 @@ Panel {
                 width: parent.width
                 text: svc.snapshotCount === 0
                   ? "No dated copies yet. After a backup they appear here."
-                  : (svc.remoteActive
-                    ? "Stored on " + svc.remoteHost + ". Plug the backup USB in here to browse a copy."
+                  : (svc.remoteActive && !svc.linked
+                    ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
                     : "Open a date to browse that copy.")
                 color: root.dim
                 font.family: root.fontFamily
@@ -391,7 +438,7 @@ Panel {
                   }
                   MouseArea {
                     anchors.fill: parent
-                    enabled: !svc.remoteActive
+                    enabled: svc.linked || !svc.remoteActive
                     cursorShape: Qt.PointingHandCursor
                     onClicked: svc.openSnapshot(snapId)
                   }

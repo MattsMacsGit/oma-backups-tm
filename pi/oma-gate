@@ -20,7 +20,7 @@ import sys
 import syslog
 from pathlib import Path
 
-VERSION = "2"
+VERSION = "3"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -269,6 +269,46 @@ def v_settle(args: list[str]) -> None:
     run("btrfs", "subvolume", "sync", str(MOUNT))
 
 
+SFTP_SERVERS = ("/usr/lib/openssh/sftp-server", "/usr/libexec/openssh/sftp-server", "/usr/lib/ssh/sftp-server")
+
+
+def v_browse(args: list[str]) -> None:
+    """Serve one user's home folder from one restore point, read-only, over
+    SFTP (the laptop mounts it with sshfs). sftp-server runs in a bubblewrap
+    sandbox where only /usr and that folder exist, so the connection can't
+    reach anything else on this machine."""
+    require_mounted()
+    ts, user = args
+    if not STAMP.match(ts):
+        raise Refused(f"not a restore point: {ts!r}")
+    folder = target(f"home/{ts}/{user}", depth=3)
+    if not folder.is_dir():
+        raise Refused(f"no home folder for {user} in {ts}")
+    bwrap = shutil.which("bwrap")
+    sftp = next((s for s in SFTP_SERVERS if os.access(s, os.X_OK)), None)
+    if not bwrap or not sftp:
+        raise Refused("browsing needs bubblewrap and sftp-server here: update this Pi (pi-setup.sh --update)")
+    sandbox = [bwrap, "--ro-bind", "/usr", "/usr"]
+    for link in ("lib", "lib64", "bin", "sbin"):
+        if Path("/usr", link).exists():
+            sandbox += ["--symlink", f"usr/{link}", f"/{link}"]
+    # No user namespace (--unshare-user): files must keep their real owners,
+    # or the laptop would see them all as "nobody" and refuse to open them.
+    # sftp-server looks up its own account; passwd/group are world-readable
+    # account names only (hashes live in shadow, which stays out).
+    sandbox += [
+        "--ro-bind", "/etc/passwd", "/etc/passwd",
+        "--ro-bind", "/etc/group", "/etc/group",
+        "--ro-bind", str(folder), "/data",
+        "--dev", "/dev", "--proc", "/proc",
+        "--unshare-ipc", "--unshare-pid", "--unshare-net", "--unshare-uts",
+        "--die-with-parent", "--chdir", "/data",
+        sftp, "-R", "-d", "/data",
+    ]
+    log(f"browsing {ts} for {user}")
+    os.execv(bwrap, sandbox)
+
+
 def v_rsync(argv: list[str], original: str) -> None:
     if argv[:2] != ["rsync", "--server"]:
         raise Refused("only rsync server mode is allowed")
@@ -294,6 +334,9 @@ VERBS = {
     "df": (v_df, 0),
     "delete": (v_delete, 1),
     "settle": (v_settle, 0),
+    "browse": (v_browse, 2),
+    # sshfs runs a custom SFTP server only if its name contains a "/".
+    "/browse": (v_browse, 2),
 }
 
 

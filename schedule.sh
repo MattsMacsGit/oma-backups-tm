@@ -37,53 +37,14 @@ fail() {
 
 cmd_enable() {
   require_root enable
-  local user=${SUDO_USER:-}
-  [[ -n $user && $user != root ]] || die "run this as your normal user; it asks for sudo itself"
 
   echo
   gum style --bold "Turn on automatic backups"
   echo
-  local part
-  part="$(capsule_luks_partition 2>/dev/null || true)"
-  if [[ -n $part && -b $part ]]; then
-    ensure_capsule_key "$part" || fail "Couldn't add the unlock key (wrong password?)."
-  elif ! remote_configured; then
-    fail "Plug in the backup USB (or pair a Pi) first. This laptop's unlock key has to be added to it so backups can run while you're away."
-  fi
-
-  step "Installing the hourly check"
-  refresh_root_copy
-  cat >"$OMA_SCHEDULE_UNIT" <<EOF
-[Unit]
-Description=OmaBackups automatic backup
-Wants=network-online.target
-After=network-online.target
-
-[Service]
-Type=oneshot
-Environment=SUDO_USER=$user
-Environment=OMARCHY_TM_UNATTENDED=1
-ExecStart=$OMA_ROOT_COPY/omarchy-backups schedule run
-Nice=10
-IOSchedulingClass=best-effort
-IOSchedulingPriority=7
-EOF
-  cat >"$TIMER" <<'EOF'
-[Unit]
-Description=OmaBackups automatic backup check
-
-[Timer]
-OnCalendar=hourly
-Persistent=true
-RandomizedDelaySec=5min
-
-[Install]
-WantedBy=timers.target
-EOF
-  chmod 644 "$OMA_SCHEDULE_UNIT" "$TIMER"
-  systemctl daemon-reload
-  systemctl enable --now oma-backups-scheduled.timer >/dev/null 2>&1 ||
-    fail "systemd wouldn't start the timer (see: systemctl status oma-backups-scheduled.timer)."
+  # Linking installs the hourly check and the unlock key; after that the
+  # plugin's switch just flips the setting.
+  "$OMARCHY_TM_ROOT/link.sh" --quiet ||
+    fail "Plug in the backup USB (or pair a Pi) first, so this laptop's unlock key can be added to it."
   settings set enabled true
 
   echo

@@ -12,6 +12,7 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 STATUS = Path(os.environ.get("OMARCHY_TM_STATUS_FILE", "/run/omarchy-backups.status"))
@@ -49,6 +50,8 @@ def _user_status_path() -> Path | None:
 
 
 def write(data: dict) -> None:
+    # Lets the plugin tell this attempt's error from a leftover one.
+    data = dict(data, at=int(time.time()))
     payload = json.dumps(data) + "\n"
     STATUS.parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(str(STATUS) + ".tmp")

@@ -101,7 +101,49 @@ Item {
   }
 
   function enableSchedule() {
-    privileged(["schedule", "enable"])
+    if (root.linked) setSchedule("enabled", "true")
+    else privileged(["schedule", "enable"])
+  }
+
+  // Linked (see link.sh): everyday actions start systemd services that a
+  // polkit rule lets this user run without a password. Otherwise they go
+  // through sudo in a terminal, as before.
+  property bool linked: false
+  property real launchedAt: 0
+
+  function linkLaptop() {
+    privileged(["link"])
+  }
+
+  function startBackupService() {
+    root.launchedAt = Date.now() / 1000
+    startUnitProc.command = ["systemctl", "start", "--no-block", "oma-backups-backup.service"]
+    startUnitProc.running = true
+  }
+
+  // Opening a restore point: oma-backups-browse@TS mounts it read-only and
+  // writes /run/omarchy-backups-browse/TS.json when ready (or on error).
+  property string browseTs: ""
+  property string browsePhase: ""   // "", "opening", "open"
+  property int browseWaited: 0
+
+  function browse(ts) {
+    if (root.browseTs !== "" && root.browseTs !== ts) closeBrowse()
+    root.browseTs = ts
+    root.browsePhase = "opening"
+    root.browseWaited = 0
+    root.lastError = ""
+    browseStartProc.command = ["systemctl", "start", "oma-backups-browse@" + ts + ".service"]
+    browseStartProc.running = true
+    browsePoll.start()
+  }
+
+  function closeBrowse() {
+    if (root.browseTs === "") return
+    Quickshell.execDetached(["systemctl", "stop", "oma-backups-browse@" + root.browseTs + ".service"])
+    browsePoll.stop()
+    root.browseTs = ""
+    root.browsePhase = ""
   }
   readonly property bool backupMounted: detect && detect.backup_mounted === true
   readonly property var capsuleDisk: (detect && detect.capsule_disk) || null
@@ -150,6 +192,7 @@ Item {
     remoteFile.reload()
     scheduleFile.reload()
     timerFile.reload()
+    linkedFile.reload()
     if (!skipLoaded) loadSkipFile()
   }
 
@@ -265,11 +308,16 @@ Item {
     launchedBackup = false
     sawBackupStatus = false
     backupRunning = false
-    privileged(["stop"])
+    if (root.linked)
+      Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service", "oma-backups-scheduled.service"])
+    else
+      privileged(["stop"])
   }
 
   function openSnapshot(ts) {
-    if (!ts || root.remoteActive) return
+    if (!ts) return
+    if (root.linked) { browse(ts); return }
+    if (root.remoteActive) return
     Quickshell.execDetached([root.cli, "open", ts])
   }
 
@@ -357,7 +405,8 @@ Item {
       // the sudo/fingerprint-auth window before backup.sh writes its own
       // first status) — not a failure of this attempt. Ignore it rather
       // than tearing down state we just set.
-      if (root.launchedBackup && !root.sawBackupStatus) {
+      var fresh = typeof j.at === "number" && root.launchedAt > 0 && j.at >= root.launchedAt - 2
+      if (root.launchedBackup && !root.sawBackupStatus && !fresh) {
         // stale leftover — ignore
       } else {
         root.backupRunning = false
@@ -450,9 +499,80 @@ Item {
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        root.privileged(["backup", "--yes"])
+        if (root.linked) root.startBackupService()
+        else root.privileged(["backup", "--yes"])
       }
     }
+  }
+
+  Process {
+    id: startUnitProc
+    onExited: function (code) {
+      if (code === 0) return
+      root.backupRunning = false
+      root.launchedBackup = false
+      root.lastError = "Couldn't start the backup. Try Settings → link this laptop again."
+    }
+  }
+
+  Process {
+    id: browseStartProc
+    onExited: function (code) {
+      if (code !== 0 && root.browsePhase === "opening") {
+        root.lastError = "Couldn't open that restore point."
+        browsePoll.stop()
+        root.browseTs = ""
+        root.browsePhase = ""
+      }
+    }
+  }
+
+  property string _browseOut: ""
+  Process {
+    id: browseReadProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root._browseOut = String(text || "")
+    }
+    onExited: {
+      if (root.browsePhase !== "opening" || root._browseOut === "") return
+      var j
+      try { j = JSON.parse(root._browseOut) } catch (e) { return }
+      if (j.state === "ready" && j.path) {
+        browsePoll.stop()
+        root.browsePhase = "open"
+        Quickshell.execDetached(["xdg-open", String(j.path)])
+      } else if (j.state === "error") {
+        root.lastError = String(j.message || "Couldn't open that restore point.")
+        root.closeBrowse()
+      }
+    }
+  }
+
+  Timer {
+    id: browsePoll
+    interval: 500
+    repeat: true
+    onTriggered: {
+      root.browseWaited += 1
+      if (root.browseWaited > 120) {
+        root.lastError = "Opening that restore point timed out."
+        root.closeBrowse()
+        return
+      }
+      if (browseReadProc.running) return
+      root._browseOut = ""
+      browseReadProc.command = ["cat", "/run/omarchy-backups-browse/" + root.browseTs + ".json"]
+      browseReadProc.running = true
+    }
+  }
+
+  FileView {
+    id: linkedFile
+    path: "/etc/omarchy-backups/linked.json"
+    printErrors: false
+    onLoaded: root.linked = true
+    onLoadFailed: root.linked = false
   }
 
   Timer {

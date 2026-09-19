@@ -528,6 +528,12 @@ capsule_key_present() {
   [[ -f $OMA_CAPSULE_KEY ]]
 }
 
+create_capsule_key() {
+  capsule_key_present && return 0
+  mkdir -p "$(dirname "$OMA_CAPSULE_KEY")"
+  (umask 077 && head -c 4096 /dev/urandom >"$OMA_CAPSULE_KEY")
+}
+
 capsule_key_opens() {
   capsule_key_present && cryptsetup open --test-passphrase --key-file "$OMA_CAPSULE_KEY" "$1" 2>/dev/null
 }
@@ -537,10 +543,7 @@ capsule_key_opens() {
 ensure_capsule_key() {
   local part=$1
   capsule_key_opens "$part" && return 0
-  if [[ ! -f $OMA_CAPSULE_KEY ]]; then
-    mkdir -p "$(dirname "$OMA_CAPSULE_KEY")"
-    (umask 077 && head -c 4096 /dev/urandom >"$OMA_CAPSULE_KEY")
-  fi
+  create_capsule_key
   step "Adding this laptop's unlock key to the backup disk"
   gum style --foreground 8 "  Enter the backup disk password (the one you chose when setting it up)."
   # 4 KB of random data doesn't need argon2's slow, memory-hungry derivation,

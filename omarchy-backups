@@ -32,6 +32,8 @@ Destructive: format and restore wipe disks. Keep another backup until proven.
   oma-backups doctor
   oma-backups first-run /dev/sdX
   oma-backups remote pair HOST | status | forget
+  oma-backups link [--refresh]
+  oma-backups browse SNAPSHOT
   oma-backups status
   oma-backups root
   oma-backups version
@@ -131,6 +133,8 @@ case "$cmd" in
   restore-tui) exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/restore_tui.py" "$@" ;;
   refresh-rescue) exec "$OMARCHY_TM_ROOT/refresh-rescue.sh" "$@" ;;
   remote) exec "$OMARCHY_TM_ROOT/remote.sh" "$@" ;;
+  link) exec "$OMARCHY_TM_ROOT/link.sh" "$@" ;;
+  browse) exec "$OMARCHY_TM_ROOT/backup.sh" --browse "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
   schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)
@@ -150,6 +154,9 @@ case "$cmd" in
     # Switching disks: lock the old backup disk first, or the new one's first
     # backup would go to whichever is still mounted.
     "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
+    # format-disk adds this laptop's key while it has the new password, so
+    # nothing after setup ever asks for it again.
+    create_capsule_key
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" phase setup || true
     if ! "$OMARCHY_TM_ROOT/format-disk.sh" "$disk" --yes --force; then
       "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" fail "USB setup failed" || true
@@ -160,7 +167,7 @@ case "$cmd" in
       [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
       exit 130
     fi
-    echo "Disk is re-encrypted. Unlock it with the NEW password only."
+    "$OMARCHY_TM_ROOT/link.sh" --quiet || echo "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
     "$OMARCHY_TM_ROOT/mount.sh" mount --disk "$disk"
     extra=()
     [[ ${OMARCHY_TM_HOME_ONLY:-0} == 1 ]] && extra+=(--home-only)

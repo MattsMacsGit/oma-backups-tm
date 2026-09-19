@@ -73,6 +73,9 @@ command -v btrfs >/dev/null || need+=(btrfs-progs)
 command -v cryptsetup >/dev/null || need+=(cryptsetup-bin)
 command -v rrsync >/dev/null || need+=(rsync)
 command -v python3 >/dev/null || need+=(python3)
+# Opening restore points from the laptop: a sandboxed, read-only SFTP server.
+command -v bwrap >/dev/null || need+=(bubblewrap)
+[[ -x /usr/lib/openssh/sftp-server ]] || need+=(openssh-sftp-server)
 if [[ ${#need[@]} -gt 0 ]]; then
   step "Installing ${need[*]} (nothing else is upgraded)"
   apt-get update -qq

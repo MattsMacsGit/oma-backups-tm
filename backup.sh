@@ -35,6 +35,7 @@ while [[ $# -gt 0 ]]; do
     --home-only) HOME_ONLY=1; export OMARCHY_TM_HOME_ONLY=1; shift ;;
     --list) MODE=list; shift ;;
     --prune) MODE=prune; shift ;;
+    --browse) MODE=browse; shift; break ;;
     --json) LIST_JSON=1; shift ;;
     --check) MODE=check; shift ;;
     --files) MODE=files; shift; break ;;
@@ -262,18 +263,34 @@ on_backup_exit() {
   remote_close
   clear_pid
   if [[ $rc -ne 0 ]]; then
-    progress idle
+    # Keep fail_backup's message for the plugin; otherwise it was stopped.
+    [[ $BACKUP_FAILED == 1 ]] || progress idle
   else
     clear_incomplete
   fi
 }
 
+BACKUP_FAILED=0
 fail_backup() {
   echo
   gum style --bold --foreground 1 "Backup failed."
   gum style --foreground 8 "$*"
   gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
+  # The plugin shows this; backups started without a terminal have no other
+  # way to say why they stopped.
+  BACKUP_FAILED=1
+  if [[ -n ${BROWSE_STATE:-} ]]; then
+    browse_state error "$*"
+  else
+    progress fail "Backup failed: $*"
+  fi
   exit 130
+}
+
+backup_running() {
+  local p
+  p="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
 refuse_if_running() {
@@ -607,6 +624,74 @@ cmd_backup() {
   echo
 }
 
+BROWSE_DIR=/run/omarchy-backups-browse
+BROWSE_STATE=""
+
+# The plugin polls $BROWSE_DIR/TS.json: {"state": "ready", "path": ...} or
+# {"state": "error", "message": ...}.
+browse_state() {
+  local state=$1 value=${2:-}
+  [[ -n $BROWSE_STATE ]] || return 0
+  if [[ $state == ready ]]; then
+    jq -n --arg p "$value" '{state: "ready", path: $p}' >"$BROWSE_STATE.tmp"
+  else
+    jq -n --arg m "$value" '{state: "error", message: $m}' >"$BROWSE_STATE.tmp"
+  fi
+  chmod 644 "$BROWSE_STATE.tmp"
+  mv "$BROWSE_STATE.tmp" "$BROWSE_STATE"
+}
+
+# Open one restore point's copy of the user's home folder, read-only, until
+# stopped (the plugin starts/stops oma-backups-browse@TS.service).
+cmd_browse() {
+  local ts=${1:-} user=${SUDO_USER:-${USER:-}}
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups browse SNAPSHOT"
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose files to open"
+  mkdir -p "$BROWSE_DIR"
+  chmod 755 "$BROWSE_DIR"
+  BROWSE_STATE="$BROWSE_DIR/$ts.json"
+  rm -f "$BROWSE_STATE"
+
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  open_destination
+
+  if [[ $DEST_REMOTE != 1 ]]; then
+    local path="$MNT/home/$ts/$user"
+    [[ -d $path ]] || fail_backup "No copy of your home folder in that restore point."
+    trap 'rm -f "$BROWSE_STATE"' EXIT
+    browse_state ready "$path"
+    # Nothing to hold open for a plugged-in disk; just wait to be stopped.
+    sleep infinity &
+    wait $! || true
+    return 0
+  fi
+
+  [[ $(rgate version 2>/dev/null || echo 0) -ge 3 ]] ||
+    fail_backup "The Pi needs updating to open restore points. Run this on it: curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+  command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: oma-backups link --refresh)."
+  local mp="$BROWSE_DIR/$ts" pid
+  mkdir -p "$mp"
+  # Leave the disk unlocked if a backup is mid-way; it locks it when done.
+  trap 'fusermount3 -u "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null; rmdir "$mp" 2>/dev/null; rm -f "$BROWSE_STATE"; backup_running || remote_close' EXIT
+  # allow_other + default_permissions: mounted by root, readable by the user
+  # exactly as far as each file's own owner/permissions allow.
+  sshfs -f -o ro,allow_other,default_permissions,reconnect \
+    -o ssh_command="$(remote_rsh)" -o sftp_server="/browse $ts $user" \
+    "$REMOTE_HOST:/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
+  pid=$!
+  local i
+  for i in $(seq 1 60); do
+    mountpoint -q "$mp" && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.5
+  done
+  mountpoint -q "$mp" || fail_backup "Couldn't open that restore point on $REMOTE_HOST (see $OMARCHY_TM_LOG)."
+  browse_state ready "$mp"
+  wait "$pid" || true
+}
+
 cmd_prune() {
   # Even a dry run has to unlock the disk to read its restore points.
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
@@ -671,4 +756,5 @@ case "$MODE" in
   copy) cmd_copy "$@" ;;
   backup) cmd_backup ;;
   prune) cmd_prune ;;
+  browse) cmd_browse "$@" ;;
 esac

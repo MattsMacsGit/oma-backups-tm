@@ -88,6 +88,7 @@ cmd_pair() {
   remote_load
   local st
   st="$(rgate status 2>&1)" || fail "Couldn't reach the Pi as $OMA_REMOTE_ACCOUNT@$host: $st"
+  "$OMARCHY_TM_ROOT/link.sh" --quiet || warn "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
   # It's about to be unplugged; pulling it while mounted leaves a dead mount.
   "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
   echo

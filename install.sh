@@ -52,6 +52,14 @@ fi
 
 "$SHARE/omarchy-backups" compile-excludes >/dev/null 2>&1 || true
 
+# Password-free and automatic backups run from a root-owned copy; bring it
+# up to date with this install.
+if [[ -f /etc/omarchy-backups/linked.json ]]; then
+  echo "Updating the linked backup services (needs sudo)..."
+  sudo "$SHARE/omarchy-backups" link --refresh ||
+    echo "  couldn't update them; run: oma-backups link --refresh"
+fi
+
 if command -v omarchy >/dev/null; then
   omarchy plugin validate "$PLUGIN" || true
 fi
