@@ -62,6 +62,11 @@ Environment=OMARCHY_TM_UNATTENDED=1
 ExecStart=$base backup --yes
 # Stop exits 143 on purpose, after tidying up. Not a failure.
 SuccessExitStatus=143
+# Tidying up after a Stop can wait on the other end: locking a disk on a Pi
+# takes seconds, and a lock has to queue behind an unlock still in flight.
+# Never inherit a short DefaultTimeoutStopSec here -- being killed in the
+# middle of that is what leaves a disk unlocked.
+TimeoutStopSec=180
 EOF
   cat >"$UNIT_DIR/oma-backups-browse@.service" <<EOF
 [Unit]
@@ -90,6 +95,8 @@ ExecStart=$base schedule run
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+SuccessExitStatus=143
+TimeoutStopSec=180
 EOF
   cat >"$UNIT_DIR/oma-backups-scheduled.timer" <<'EOF'
 [Unit]

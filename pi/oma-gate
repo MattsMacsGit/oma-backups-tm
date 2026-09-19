@@ -23,10 +23,11 @@ import shutil
 import subprocess
 import sys
 import syslog
+import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "6"
+VERSION = "7"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -51,6 +52,10 @@ MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarc
 # saw nothing open yet, locked nothing, and the unlock landed behind it and
 # left the disk open -- which is what a Stop pressed while unlocking did.
 CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK", "")) if TEST else Path("/run/oma-gate.capsule.lock")
+# A lock request leaves this behind while it queues. If the laptop is killed
+# before its turn comes (a Stop cut short by a short service timeout), the
+# unlock it was chasing finishes, sees the note, and locks up after itself.
+LOCK_WANTED = CAPSULE_LOCK.with_name(CAPSULE_LOCK.name + ".wanted")
 
 
 def keys_file() -> Path:
@@ -155,6 +160,7 @@ def v_unlock(args: list[str]) -> None:
     key = b""
     if not mounted() and not mapper_open():
         key = sys.stdin.buffer.read(MAX_KEY + 1)
+    started = time.time()
     with capsule_turn():
         if mounted():
             return
@@ -169,16 +175,49 @@ def v_unlock(args: list[str]) -> None:
         run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
         os.chmod(MOUNT, 0o755)
         log("capsule unlocked")
+        # Somebody asked to lock while this unlock was in flight. Whether or
+        # not they are still waiting for their turn, they asked last: undo.
+        if lock_wanted_since(started):
+            do_lock()
+            log("locked again: a lock was waiting behind this unlock")
+
+
+def lock_wanted_since(started: float) -> bool:
+    """A lock request queued up after this unlock began. Old notes are junk
+    from a request that died long ago, so they get cleared, not obeyed."""
+    try:
+        wanted = LOCK_WANTED.stat().st_mtime
+    except OSError:
+        return False
+    fresh = wanted >= started
+    try:
+        LOCK_WANTED.unlink()
+    except OSError:
+        pass
+    return fresh
+
+
+def do_lock() -> None:
+    if mounted():
+        run("sync")
+        run("umount", str(MOUNT))
+    if mapper_open():
+        run("cryptsetup", "close", MAPPER)
 
 
 def v_lock(args: list[str]) -> None:
-    # Waits for an unlock in flight, so a lock always wins in the end.
+    # The note goes down before queueing: if this request is killed while it
+    # waits, the unlock it is chasing still finds it and locks up afterwards.
+    try:
+        LOCK_WANTED.touch()
+    except OSError:
+        pass
     with capsule_turn():
-        if mounted():
-            run("sync")
-            run("umount", str(MOUNT))
-        if mapper_open():
-            run("cryptsetup", "close", MAPPER)
+        do_lock()
+        try:
+            LOCK_WANTED.unlink()
+        except OSError:
+            pass
         log("capsule locked")
 
 
