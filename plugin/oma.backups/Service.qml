@@ -114,7 +114,10 @@ Item {
   readonly property string nextBackupText: {
     if (!scheduleOn) return ""
     var interval = { hourly: 3600, daily: 86400, weekly: 604800 }[schedule.every] || 86400
-    var due = Math.max(lastSuccess + interval - interval / 12, nowSec)
+    // Same margin as schedule.sh: a twelfth of the interval, never under
+    // 10 minutes, so this note and the actual check agree.
+    var grace = Math.max(interval / 12, 600)
+    var due = Math.max(lastSuccess + interval - grace, nowSec)
     // The timer fires on the hour in local time (not UTC: half-hour zones).
     var next = new Date(due * 1000)
     if (next.getMinutes() || next.getSeconds() || next.getMilliseconds()) {

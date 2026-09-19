@@ -97,7 +97,7 @@ nag_if_overdue() {
 
 cmd_run() {
   [[ ${EUID:-$(id -u)} -eq 0 ]] || die "schedule run is started by the system timer"
-  local s interval since last now
+  local s interval since last now grace
   s="$(settings get)"
   [[ $(jq -r .enabled <<<"$s") == true ]] || exit 0
   interval=$(jq -r .interval <<<"$s")
@@ -105,8 +105,13 @@ cmd_run() {
   since=$(jq -r .enabled_at <<<"$s")
   ((last > since)) && since=$last
   now=$(date +%s)
-  # Due a little early rather than a whole timer tick late.
-  ((now - last >= interval - interval / 12)) || exit 0
+  # Due a little early rather than a whole timer tick late. The timer's
+  # random delay can leave two ticks under an hour apart, so on the hourly
+  # setting the margin must be wider than that jitter or a tick is turned
+  # away and the backup waits another whole hour.
+  grace=$((interval / 12))
+  ((grace < 600)) && grace=600
+  ((now - last >= interval - grace)) || exit 0
 
   local pidf other
   pidf="$(pid_file)"

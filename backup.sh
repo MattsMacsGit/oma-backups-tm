@@ -566,8 +566,11 @@ prune_restore_points() {
 cmd_backup() {
   require_excludes_visible
   dest_mounted() { findmnt -n "$MNT" >/dev/null 2>&1; }
-  local ts
+  local ts run_started
   ts="$(now_timestamp)"
+  # When this run began. The schedule counts from here rather than from the
+  # finish, so a slow backup doesn't push the next one a whole tick late.
+  run_started="$(date +%s)"
   if [[ $(id -u) -eq 0 ]]; then
     refresh_excludes_from_user
   fi
@@ -745,7 +748,7 @@ cmd_backup() {
   fi
   trap - ERR
   if [[ $valid == true ]]; then
-    date +%s >"$OMARCHY_TM_STATE/last-success"
+    echo "$run_started" >"$OMARCHY_TM_STATE/last-success"
     chmod 644 "$OMARCHY_TM_STATE/last-success" 2>/dev/null || true
     progress phase "tidy"
     prune_restore_points || warn "Couldn't tidy up old restore points (this backup is still saved)."
