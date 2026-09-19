@@ -71,7 +71,12 @@ Item {
     }
     return null
   }
-  readonly property bool hasCapsule: capsule !== null
+  // A paired Pi holding the backup USB (see remote.sh). It counts as the
+  // backup disk whenever the USB isn't plugged in here, like backup.sh.
+  property var remote: null
+  readonly property bool remoteActive: remote !== null && capsule === null
+  readonly property string remoteHost: remote ? String(remote.host || "") : ""
+  readonly property bool hasCapsule: capsule !== null || remote !== null
   readonly property bool backupMounted: detect && detect.backup_mounted === true
   readonly property var capsuleDisk: (detect && detect.capsule_disk) || null
   readonly property string selectedDiskLabel: {
@@ -115,6 +120,8 @@ Item {
     }
     if (!statusProc.running) statusProc.running = true
     refreshSnapshots()
+    // Also catches pairing/unpairing: the file may not exist to be watched.
+    remoteFile.reload()
     if (!skipLoaded) loadSkipFile()
   }
 
@@ -234,8 +241,18 @@ Item {
   }
 
   function openSnapshot(ts) {
-    if (!ts) return
+    if (!ts || root.remoteActive) return
     Quickshell.execDetached([root.cli, "open", ts])
+  }
+
+  function pairRemote(host) {
+    var h = String(host || "").trim()
+    if (!h) return
+    privileged(["remote", "pair", h])
+  }
+
+  function forgetRemote() {
+    privileged(["remote", "forget"])
   }
 
   function pickFolder() { pickProc.command = ["python3", root.picker]; pickProc.running = true }
@@ -270,7 +287,7 @@ Item {
         for (var i = 0; i < disks.length; i++) {
           if (disks[i].kind === "capsule" && !disks[i].protected) cap = true
         }
-        if (!cap) {
+        if (!cap && root.remote === null) {
           root.snapshots = []
           snapList.clear()
         }
@@ -423,6 +440,23 @@ Item {
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
+  }
+
+  FileView {
+    id: remoteFile
+    path: "/etc/omarchy-backups/remote.json"
+    watchChanges: true
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.remote = (j && j.host) ? j : null
+      } catch (e) {
+        root.remote = null
+      }
+    }
+    onLoadFailed: root.remote = null
+    onFileChanged: reload()
   }
 
   FileView {

@@ -146,8 +146,11 @@ cmd_forget() {
     warn "The backup disk isn't plugged in here, so its unlock-key slot for this laptop stays (harmless once this laptop's copy is deleted)."
   fi
   rm -rf "$OMA_REMOTE_DIR" "$OMA_REMOTE_CONF"
-  echo "Forgot $REMOTE_HOST. To clean up the Pi too, run there:"
+  echo
+  gum style --bold "Unpaired from $REMOTE_HOST."
+  gum style --foreground 8 "  To clean up the Pi too, run this on it:"
   echo "  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --uninstall"
+  press_enter
 }
 
 sub=${1:-}

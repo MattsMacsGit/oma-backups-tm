@@ -243,6 +243,16 @@ Panel {
             }
 
             Text {
+              visible: svc.remoteActive
+              width: parent.width
+              text: "Backup disk on " + svc.remoteHost + "  ·  locked between backups"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
               visible: svc.lastError !== ""
               width: parent.width
               text: svc.lastError
@@ -319,7 +329,9 @@ Panel {
                 width: parent.width
                 text: svc.snapshotCount === 0
                   ? "No dated copies yet. After a backup they appear here."
-                  : "Open a date to browse that copy."
+                  : (svc.remoteActive
+                    ? "Stored on " + svc.remoteHost + ". Plug the backup USB in here to browse a copy."
+                    : "Open a date to browse that copy.")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -365,6 +377,7 @@ Panel {
                   }
                   MouseArea {
                     anchors.fill: parent
+                    enabled: !svc.remoteActive
                     cursorShape: Qt.PointingHandCursor
                     onClicked: svc.openSnapshot(snapId)
                   }
@@ -459,7 +472,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "beta 0.9.1  ·  skip folders, disks, erase disk"
+              meta: "beta 0.9.1  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -584,6 +597,53 @@ Panel {
 
             PanelSeparator { foreground: root.foreground }
             PanelSectionHeader {
+              text: "BACK UP TO A PI"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+            Text {
+              width: parent.width
+              text: svc.remote !== null
+                ? "Paired with " + svc.remoteHost + ". Backups go there whenever the backup USB isn’t plugged into this laptop."
+                : "Keep the backup USB in an always-on Raspberry Pi and back up over your network or Tailscale."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            TextField {
+              id: remoteHostField
+              visible: svc.remote === null
+              width: parent.width
+              placeholderText: "Pi name or IP, e.g. my-pi"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              onAccepted: if (pairBtn.enabled) svc.pairRemote(text)
+            }
+            Button {
+              id: pairBtn
+              visible: svc.remote === null
+              width: parent.width
+              text: svc.capsule !== null ? "Pair with this Pi" : "Plug the backup USB in here to pair"
+              bordered: true
+              enabled: svc.capsule !== null && remoteHostField.text.trim() !== "" && !svc.backupRunning
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: svc.pairRemote(remoteHostField.text)
+            }
+            Button {
+              visible: svc.remote !== null
+              width: parent.width
+              text: "Unpair"
+              bordered: true
+              enabled: !svc.backupRunning
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              onClicked: svc.forgetRemote()
+            }
+
+            PanelSeparator { foreground: root.foreground }
+            PanelSectionHeader {
               text: "START OVER"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -599,15 +659,17 @@ Panel {
             Toggle {
               width: parent.width
               label: "Erase this backup disk"
-              description: svc.hasCapsule
+              description: svc.capsule !== null
                 ? "Deletes every restore point, then sets a new encryption password."
-                : "No backup USB is set up. Go back and pick the USB on the home page."
+                : (svc.remoteActive
+                  ? "The backup USB is on " + svc.remoteHost + ". Plug it in here to erase it."
+                  : "No backup USB is set up. Go back and pick the USB on the home page.")
               checked: svc.replaceDisk
-              enabled: svc.hasCapsule
+              enabled: svc.capsule !== null
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: {
-                if (!svc.hasCapsule) return
+                if (svc.capsule === null) return
                 svc.replaceDisk = !svc.replaceDisk
                 svc.wipeConfirmed = false
                 if (svc.capsule) svc.selectedDisk = svc.capsule.path
