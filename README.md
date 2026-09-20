@@ -10,10 +10,10 @@ The daily UI is an Omarchy bar plugin.
 This is **off-box** backup. Snapper + Limine snapshots stay for “undo a bad
 update.”
 
-> **Beta.** Format and restore **wipe disks**. A bug can destroy the machine
-> you restore onto, or the USB you format. Do not use this as your only copy.
-> Keep Clonezilla (or similar) until you have booted a restored disk
-> successfully **on hardware you can afford to lose**.
+> Format and restore **wipe disks**. A bug can destroy the machine you restore
+> onto, or the USB you format. Do not use this as your only copy. Keep
+> Clonezilla (or similar) until you have booted a restored disk successfully
+> **on hardware you can afford to lose**.
 
 ## What you get
 
@@ -44,6 +44,13 @@ Open the **OmaBackups** disk icon on the bar. Plug in a USB disk.
 To update: `git pull` in the clone, then `./install.sh` again. If the laptop is
 linked (see below), this asks for sudo once to refresh the linked copy.
 
+### If the bar icon goes missing
+
+`omarchy plugin enable oma.backups`, then `omarchy-restart-shell`.
+
+Do **not** run `omarchy refresh shell` — that resets the bar and drops
+third-party plugins. Restart is fine; refresh is not.
+
 ## Uninstall
 
 ```bash
@@ -68,13 +75,6 @@ It locks the backup disk, deletes the `omabackups` account and its home, and
 removes the gatekeeper, its config and its sudoers rule. `btrfs-progs` and
 `cryptsetup` are left installed. The backup disk itself is untouched — it
 keeps its restore points, and you can plug it back into a laptop and use it.
-
-Do **not** run `omarchy refresh shell` — that resets the bar and drops
-third-party plugins. If the icon is missing: `omarchy plugin enable oma.backups`
-then `omarchy-restart-shell` (restart is OK; refresh is not).
-
-After editing plugin QML, `omarchy-shell shell rescanPlugins` is often not
-enough — use `omarchy-restart-shell`.
 
 ## How a backup works
 
@@ -203,7 +203,9 @@ becomes the backup disk. The old disk isn't touched and keeps its restore
 points.
 
 The current disk is remembered by its encryption ID, so two backup USBs plugged
-in at once never get mixed up.
+in at once never get mixed up. If the disk you set up isn't plugged in and a
+different backup USB is, nothing is written to it: backups go to the Pi if you
+have one, and otherwise say which disk they were expecting.
 
 ## Back up to a Raspberry Pi
 
@@ -250,12 +252,13 @@ share can knock those drives offline for a moment while it spins up. Stop
 services that use them (e.g. Docker) before plugging it in, or give the
 backup drive its own power.
 
-### Network rescue stick (new)
+### Network rescue stick
 
-A USB that restores this laptop from the Pi, without the backup disk: at
-home, or from anywhere over Tailscale. Proven on hardware both ways, but it is
-the newest part of this, so make one and check it boots before you need it. Keep it somewhere other than the laptop
-bag, so a lost or stolen laptop doesn't take it along.
+A USB that restores this laptop from the Pi, without the backup disk: at home,
+or from anywhere over Tailscale. Proven on hardware both ways, but it is the
+newest part of this, so make one and check it boots before you need it. Keep it
+somewhere other than the laptop bag, so a lost or stolen laptop doesn't take it
+along.
 
 You need:
 
@@ -292,6 +295,12 @@ stick too: the old one would still open, but couldn't unlock the backup disk.
 - Wiping requires an explicit erase confirm
 - Ventoy / Clonezilla sticks stay hidden unless you show all disks
 - A disk that already has backups is **used as-is** until you explicitly start over
+- Disks that already hold something — a backup disk, a rescue stick, a system —
+  say so in every list they appear in. They are never hidden: it is your disk
+- While the backup disk is mounted, its folders are readable by everyone on
+  this computer, which is what lets restore points open in Files as you. On a
+  machine with other accounts on it, that is worth knowing. The disk itself
+  stays encrypted, and it is locked again between backups
 
 Restore from a running desktop is expert-only (`--allow-internal`).
 The intended path is **booting the USB**.
@@ -323,13 +332,14 @@ oma-backups stop
 oma-backups prune [--dry-run]
 oma-backups schedule enable | disable | status
 oma-backups snapshots
-oma-backups browse SNAPSHOT
+oma-backups open TIMESTAMP    # open one restore point read-only in Files
 oma-backups remote pair HOST | status | forget
 oma-backups rescue-stick /dev/sdX
 oma-backups link [--refresh]
 oma-backups doctor
 oma-backups version
 oma-backups restore-to-disk /dev/TARGET --snapshot TS --dry-run
+oma-backups restore-to-disk /dev/TARGET --snapshot TS --level settings
 ```
 
 `oma-backups --help` lists everything.
@@ -367,6 +377,16 @@ Disk names (`sda` / `nvme0n1` / …) shuffle. Identify by **label** and `lsblk T
 | Runtime | `/run/omarchy-backups` |
 
 `omarchy-backups` and `omarchy-tm` are aliases of the same CLI.
+
+The folders keep the older `omarchy-backups` spelling. Renaming them would
+mean migrating existing installs, which is not worth the risk.
+
+## Working on it
+
+After editing the plugin's QML, `omarchy-shell shell rescanPlugins` is often
+not enough — use `omarchy-restart-shell`.
+
+`share/selftest.sh` runs the unprivileged checks. It never formats or restores.
 
 ## License
 
