@@ -24,8 +24,9 @@ update.”
    in Files. Copy files out.
 5. **No password prompts** for everyday use once the laptop is linked to its disk.
 6. **Bare-metal restore** — firmware-boot the USB (Limine: “Rescue Disk”).
-   Real Omarchy live environment + a restore wizard. Pick a date, pick a disk,
-   type the name and YES.
+   Real Omarchy live environment + a restore wizard. Pick what to bring back
+   (everything, or just the system and your settings), pick a date, pick a
+   disk, type the name and YES.
 7. **Optional Raspberry Pi** — keep the USB in an always-on Pi and back up over
    the network.
 
@@ -127,6 +128,60 @@ Works with the USB plugged in, or from a paired Pi over `sshfs` (slower, and a
 notification says it's opening). On the Pi, the folder is served by
 `sftp-server -R` inside a `bubblewrap` sandbox that contains nothing else.
 
+## Restoring
+
+Boot the backup USB (firmware boot menu → Limine: **Rescue Disk**). The wizard
+asks what to bring back:
+
+- **Everything** — the system and your whole home folder, as it was on that date.
+- **System + settings** — Omarchy, your apps and all your settings, but not the
+  contents of Documents, Pictures, Videos, Downloads and so on. Those folders
+  come back empty, and anything over 100 MB is left for later. It's much
+  quicker, and gets you to a working desktop sooner.
+
+Then pick a date, pick a disk, and type the disk name and YES. Restoring
+**wipes** the disk you restore onto.
+
+### Restore my files
+
+After a **System + settings** restore, the plugin shows **Restore my files**.
+It copies back everything that was left behind, without overwriting anything
+you've changed since. Stop it and carry on later if you like. Until your files
+are back, the restore point they came from is kept safe from thinning — it's
+the only one that still has them.
+
+### Backups pause until the system is whole again
+
+A system restored with **System + settings** is missing files that are still in
+the backup. If it backed up in that state, rsync would delete them from the
+backup's current copy and turn the gap into a restore point. That matters most
+when you restore onto a spare disk and boot it to check it: the restored system
+is a faithful clone, so it has the same backup disk, the same Pi and the same
+schedule as the machine it came from.
+
+So on a restored system:
+
+- automatic backups don't run, and say so once a day
+- **Backup now** is greyed out
+
+Press **Restore my files** and backups start again by themselves. If you meant
+to keep only what's on this system — setting up a second machine, say — hold
+**Ctrl** and the Backup now button wakes up. It spells out what gets dropped
+before anything happens. From a terminal that's
+`oma-backups backup --force-after-restore`.
+
+### Sync apps
+
+Pause or quit Nextcloud, Dropbox, Syncthing and friends before restoring, and
+start them again once you're happy with the result. A sync client that comes
+back with your restored settings starts refilling those folders itself, at the
+same time as **Restore my files**, and you end up with two things writing the
+same tree.
+
+Restoring an older date over a synced folder needs more care: everything you've
+done since looks like a deletion to the sync client, and it may push that up to
+the server.
+
 ## Using a different disk
 
 Settings → **Use a different disk**: pick another USB, confirm the erase, and it
@@ -136,7 +191,7 @@ points.
 The current disk is remembered by its encryption ID, so two backup USBs plugged
 in at once never get mixed up.
 
-## Back up to a Raspberry Pi (beta)
+## Back up to a Raspberry Pi
 
 Keep the backup USB plugged into an always-on Pi (Raspberry Pi OS / Debian 12
 or newer) and back up over your network or Tailscale.
@@ -153,7 +208,14 @@ The disk stays locked between backups; the laptop sends the unlock key each
 time. The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
 that unlocks this one disk and writes backups to it, nothing else on the Pi.
 The home page shows the disk's free space as of the last backup.
-Full restores still need the USB brought back and booted.
+Full restores still need the USB brought back and booted, unless you have made
+a network rescue stick (below).
+
+When the Pi is on the same network as the laptop, backups go straight to its
+local address instead of round through the Tailscale tunnel, which is faster
+and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
+and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
+address is used, the Pi's key is still checked under the name you paired it as.
 
 After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
 
@@ -165,15 +227,20 @@ Unpairing (`oma-backups remote forget`) removes the Pi connection but keeps the
 laptop's unlock key, which automatic backups to the USB still use. To clean up
 the Pi, run the same script there with `--uninstall`.
 
+**Heat:** a Pi 4 doing a big first backup can sit at 80–85 °C in a cupboard and
+throttle, which makes the backup slower still. A heatsink, a fan, or just more
+air around it is worth it if your first backup is large.
+
 **Power:** a USB-powered backup drive plugged into a hub the Pi's other drives
 share can knock those drives offline for a moment while it spins up. Stop
 services that use them (e.g. Docker) before plugging it in, or give the
 backup drive its own power.
 
-### Network rescue stick (beta)
+### Network rescue stick (new)
 
 A USB that restores this laptop from the Pi, without the backup disk: at
-home, or from anywhere over Tailscale. Keep it somewhere other than the laptop
+home, or from anywhere over Tailscale. Proven on hardware both ways, but it is
+the newest part of this, so make one and check it boots before you need it. Keep it somewhere other than the laptop
 bag, so a lost or stolen laptop doesn't take it along.
 
 You need:
@@ -181,7 +248,7 @@ You need:
 - a paired Pi with the backup disk plugged in, at least one restore point on
   it, and a linked laptop (the Settings section only shows up once all of
   these are true)
-- the Pi's gatekeeper at version 5 or newer (run the `--update` command above)
+- the Pi's gatekeeper at version 7 or newer (run the `--update` command above)
 - a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
   rescue uses)
 - for away-from-home restores: Tailscale already working on the laptop and the
@@ -218,7 +285,9 @@ The intended path is **booting the USB**.
 ## UI
 
 - **Home:** last copy, disk free space, Backup now / Stop, next automatic
-  backup, last 5 restore points (click to open), **More**, gear
+  backup, last 5 restore points (click to open), **More**, gear. After a
+  part restore it also shows **Restore my files**, and Backup now is greyed
+  out until your files are back.
 - **Settings:** automatic backups, Smart thinning, quick skips, skip list, show
   all disks, back up to a Pi, network rescue stick, use a different disk,
   erase / start over
@@ -235,6 +304,7 @@ oma-backups detect
 oma-backups disks            # USB default
 oma-backups disks --all
 oma-backups backup --yes
+oma-backups backup --force-after-restore   # back up a part-restored system anyway
 oma-backups stop
 oma-backups prune [--dry-run]
 oma-backups schedule enable | disable | status
