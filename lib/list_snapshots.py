@@ -185,7 +185,6 @@ def print_human(rows: list[dict]) -> None:
         print("No restore points on this disk.")
         return
     for s in rows:
-        flag = "VALID" if (s["valid"] or s["home_only"]) else "INVAL"
         print(f"{s['label']} | {s['timestamp']}")
 
 

@@ -30,7 +30,10 @@ LIVE_LABEL=OmaNetRescue
 KEYS_LABEL=OmaNetKeys
 KEYS_MAPPER=oma-netkeys-new
 HOST_ALIAS=oma-pi
-MIN_GATE=5
+# Track the current stable gatekeeper rather than the oldest that would work:
+# one number for the README and the code to agree on. `pi-setup.sh --update`
+# brings an older Pi up to it without disturbing the pairing.
+MIN_GATE=7
 
 usage() {
   cat <<'EOF'
@@ -114,7 +117,10 @@ is_capsule="$(printf '%s' "$DETECT_JSON" | jq -r --arg p "$disk_real" --arg n "$
   '.disks[] | select(.path == $p or .path == $n) | .capsule // empty | tostring')"
 [[ -z $is_capsule ]] || fail "$DISK is a backup disk. Use a different USB for the rescue stick."
 
-iso="$(ensure_omarchy_iso)" || fail "No Omarchy ISO found (see above)."
+# Plain call, not a command substitution: the ISO-verified cache it sets would
+# not survive a subshell, and it is checked again when the image is built.
+ensure_omarchy_iso >/dev/null
+iso="$OMARCHY_ISO_FOUND"
 iso_bytes=$(stat -c %s "$iso")
 disk_bytes=$(lsblk -n -b -d -o SIZE "$DISK")
 # ISO + 10% for the filesystem and the repacked image, + the two small partitions.

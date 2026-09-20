@@ -22,6 +22,13 @@ press_enter() {
   [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty || true
 }
 
+# Guarded like press_enter. Unguarded, these two prompts killed the whole
+# command when there was no terminal — after remote.json had already been
+# written, so the laptop was left thinking it had a Pi it had never checked.
+press_ready() {
+  [[ -r /dev/tty ]] && read -r -p "Press Enter once it says \"This Pi is ready\"." _ </dev/tty || true
+}
+
 fail() {
   echo
   gum style --bold --foreground 1 "Pairing failed."
@@ -38,9 +45,10 @@ cmd_pair() {
 
   # Backups run as root, which can't see the user's ~/.ssh/config: store the
   # real hostname and port that the user's alias points at.
-  local host port
-  host="$(as_user ssh -G "$alias" 2>/dev/null | awk '$1=="hostname"{print $2; exit}')"
-  port="$(as_user ssh -G "$alias" 2>/dev/null | awk '$1=="port"{print $2; exit}')"
+  local host port cfg
+  cfg="$(as_user ssh -G "$alias" 2>/dev/null || true)"
+  host="$(awk '$1=="hostname"{print $2; exit}' <<<"$cfg")"
+  port="$(awk '$1=="port"{print $2; exit}' <<<"$cfg")"
   host=${host:-$alias} port=${port:-22}
   [[ $host =~ ^[A-Za-z0-9._:-]+$ ]] || fail "\"$alias\" doesn't look like a host name."
 
@@ -76,12 +84,12 @@ cmd_pair() {
     if ! as_user ssh -t "$login" "$setup"; then
       warn "That didn't work. Run this on the Pi yourself instead:"
       echo; echo "$setup"; echo
-      read -r -p "Press Enter once it says \"This Pi is ready\"." _ </dev/tty
+      press_ready
     fi
   else
     gum style --foreground 8 "  Run this on the Pi:"
     echo; echo "$setup"; echo
-    read -r -p "Press Enter once it says \"This Pi is ready\"." _ </dev/tty
+    press_ready
   fi
 
   step "Checking the connection"
@@ -130,7 +138,9 @@ cmd_forget() {
   require_root forget
   [[ -f $OMA_REMOTE_CONF ]] || { echo "Not paired with a Pi."; return 0; }
   remote_load
-  # Keeps the disk unlock key: scheduled backups to the USB use it too.
+  # Not a no-op: on setups from before the key moved, this migrates it out of
+  # $OMA_REMOTE_DIR — which the next line deletes. Scheduled backups to the USB
+  # still need that key, so unpairing must not take it with it.
   capsule_key_present || true
   rm -rf "$OMA_REMOTE_DIR" "$OMA_REMOTE_CONF"
   echo
