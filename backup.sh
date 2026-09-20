@@ -165,6 +165,53 @@ step_size() {
   jq -r --arg n "$1" '.sizes[$n] // 0' "$RESUME_FILE" 2>/dev/null || echo 0
 }
 
+# ---- Progress ---------------------------------------------------------------
+# The panel shows two bars: the step running now, and the whole backup. The
+# overall one is weighted by how much data each step has to move, so a huge
+# "your files" step doesn't sit at "1 of 4" for hours. A resumed run marks
+# what is already finished so the bar starts where the last attempt got to.
+plan_progress() {
+  local steps=() item name finished json='[]'
+  # Getting ready and snapshotting have both happened by the time the plan is
+  # built, so they go in as finished: their share of the run is time already
+  # spent, and the overall bar should say so rather than owing it twice.
+  steps+=("prepare:1")
+  [[ $RESUMED == 1 ]] || steps+=("snapshot:1")
+  steps+=("measure:0")
+  if [[ $HOME_ONLY != 1 ]]; then
+    steps+=("os:$(is_done os && echo 1 || echo 0)")
+  fi
+  steps+=("home:$(is_done home && echo 1 || echo 0)")
+  steps+=("esp:$(is_done esp && echo 1 || echo 0)")
+  steps+=("finalize:0")
+  steps+=("tidy:0")
+  for item in "${steps[@]}"; do
+    name=${item%%:*}
+    finished=false
+    [[ ${item##*:} == 1 ]] && finished=true
+    json="$(jq -c --arg n "$name" --argjson d "$finished" '. + [{name: $n, done: $d}]' <<<"$json")"
+  done
+  progress plan "$(jq -cn --argjson s "$json" '{steps: $s}')"
+}
+
+# How much a step has to get through, so both bars have a real denominator
+# instead of rsync's percentage against a file list it is still building.
+# A dry run against an empty folder: the source side only, no file contents
+# read, nothing sent over the network, and the same skip list the real copy
+# uses — so the total is what will actually be copied, not what du would say.
+measure_tree() {
+  local src=$1 ex=${2:-} step=$3 empty
+  is_dry_run && return 0
+  empty="$(mktemp -d)" || return 0
+  local args=(-a --dry-run --stats --info=flist2)
+  [[ -n $ex ]] && args+=(--exclude-from="$ex")
+  set +o pipefail
+  rsync "${args[@]}" "$src"/ "$empty"/ 2>&1 |
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" measure "$step" || true
+  set -o pipefail
+  rmdir "$empty" 2>/dev/null || true
+}
+
 # Where this backup goes: the backup USB plugged into this laptop, or (once
 # paired, and only while the USB isn't plugged in here) the Pi it lives on.
 # Every d_* helper takes paths relative to the backup disk's top level.
@@ -325,8 +372,12 @@ rsync_tree() {
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
   # --partial: a file cut off mid-copy continues next time instead of
   # starting over (safe: `current` only becomes a restore point on success).
+  # --no-inc-recursive: build the whole file list before copying, so rsync
+  # knows the real total from its first progress line. Folder-by-folder it
+  # reports a total that keeps growing, which is why the bar could only ever
+  # say "working" through the longest step of the backup.
   stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
-    --info=progress2,name0,flist2 --stats \
+    --no-inc-recursive --info=progress2,name0,flist2 --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
   local rc=${PIPESTATUS[0]}
@@ -725,6 +776,23 @@ cmd_backup() {
     resume_start "$ts"
   fi
 
+  # Both bars need to know the size of the job before the copying starts.
+  # Steps already finished by an earlier attempt are not measured again.
+  plan_progress
+  progress phase "measure"
+  step "Working out how much there is to copy"
+  if [[ $HOME_ONLY != 1 ]]; then
+    if ! is_done os; then
+      measure_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS" os
+    fi
+  fi
+  if ! is_done home; then
+    measure_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME" home
+  fi
+  if ! is_done esp; then
+    measure_tree /boot "" esp
+  fi
+
   if [[ $HOME_ONLY != 1 ]] && ! is_done os; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$(d_target os/current)" "$EX_OS" os
     step_done os "$TREE_SIZE"
@@ -739,7 +807,8 @@ cmd_backup() {
     local esp_dest=esp/current
     [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
     set +o pipefail
-    rsync "${RSYNC_RSH[@]}" -a --delete --partial --info=progress2 /boot/ "$(d_target "$esp_dest")/" \
+    rsync "${RSYNC_RSH[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
+      /boot/ "$(d_target "$esp_dest")/" \
       2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
     set -o pipefail
     step_done esp

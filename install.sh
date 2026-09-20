@@ -43,11 +43,11 @@ mkdir -p "$PLUGIN"
 rsync -a "$ROOT/plugin/oma.backups/" "$PLUGIN/"
 
 printf '%s\n' "$SHARE" >"$CFG/root"
+# Nothing is skipped to begin with. The recommended quick-skips (Trash,
+# caches, thumbnails) are seeded as switches the first time the panel opens,
+# and every one of them can be turned off — see lib/skip_defaults.py.
 if [[ ! -f $CFG/skip-paths.txt ]]; then
-  cat >"$CFG/skip-paths.txt" <<'EOF'
-# OmaBackups skip list — one entry per line
-# Example: /home/you/Videos
-EOF
+  printf '%s\n' "# OmaBackups skip list — one entry per line" >"$CFG/skip-paths.txt"
 fi
 
 "$SHARE/omarchy-backups" compile-excludes >/dev/null 2>&1 || true

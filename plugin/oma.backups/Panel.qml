@@ -359,6 +359,45 @@ Panel {
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
               }
+
+              // The second bar: the whole backup, not just this step. Thinner
+              // and dimmer, because the step above is what's happening now.
+              Column {
+                visible: svc.hasOverall
+                width: parent.width
+                spacing: Style.space(4)
+                Item { width: 1; height: Style.space(2) }
+                Text {
+                  width: parent.width
+                  text: svc.overallText
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+                Rectangle {
+                  width: parent.width
+                  height: 5
+                  radius: 3
+                  clip: true
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                  Rectangle {
+                    width: Math.max(5, parent.width * Math.min(100, Math.max(0, svc.overallPercent)) / 100)
+                    height: parent.height
+                    radius: 3
+                    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
+                  }
+                }
+                Text {
+                  visible: text !== ""
+                  width: parent.width
+                  text: svc.overallDetail
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
+              }
             }
 
             Item {
@@ -710,7 +749,7 @@ Panel {
               }
               Button {
                 width: parent.width
-                text: "Erase USB and start first backup"
+                text: "Erase USB and set it up"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
@@ -908,51 +947,60 @@ Panel {
               onClicked: svc.showAllDisks = !svc.showAllDisks
             }
 
-            PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader {
-              text: "BACK UP TO A PI"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-            Text {
+            // Not part of setting up: moving the disk to a Pi only makes
+            // sense once this laptop has made a backup on it, so the whole
+            // section stays out of the way until there is one (or until a Pi
+            // is already paired, so it can still be unpaired).
+            Column {
+              visible: svc.snapshotCount > 0 || svc.remote !== null
               width: parent.width
-              text: svc.remote !== null
-                ? "Paired with " + svc.remoteHost + ". Backups go there whenever the backup USB isn’t plugged into this laptop."
-                : "Keep the backup USB in an always-on Raspberry Pi and back up over your network or Tailscale."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-            TextField {
-              id: remoteHostField
-              visible: svc.remote === null
-              width: parent.width
-              placeholderText: "Pi name or IP, e.g. my-pi"
-              foreground: root.foreground
-              font.family: root.fontFamily
-              onAccepted: if (pairBtn.enabled) svc.pairRemote(text)
-            }
-            Button {
-              id: pairBtn
-              visible: svc.remote === null
-              width: parent.width
-              text: svc.capsule !== null ? "Pair with this Pi" : "Plug the backup USB in here to pair"
-              bordered: true
-              enabled: svc.capsule !== null && remoteHostField.text.trim() !== "" && !svc.backupRunning
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.pairRemote(remoteHostField.text)
-            }
-            Button {
-              visible: svc.remote !== null
-              width: parent.width
-              text: "Unpair"
-              bordered: true
-              enabled: !svc.backupRunning
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.forgetRemote()
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "BACK UP TO A PI"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: svc.remote !== null
+                  ? "Paired with " + svc.remoteHost + ". Backups go there whenever the backup USB isn’t plugged into this laptop."
+                  : "Keep the backup USB in an always-on Raspberry Pi and back up over your network or Tailscale."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              TextField {
+                id: remoteHostField
+                visible: svc.remote === null
+                width: parent.width
+                placeholderText: "Pi name or IP, e.g. my-pi"
+                foreground: root.foreground
+                font.family: root.fontFamily
+                onAccepted: if (pairBtn.enabled) svc.pairRemote(text)
+              }
+              Button {
+                id: pairBtn
+                visible: svc.remote === null
+                width: parent.width
+                text: svc.capsule !== null ? "Pair with this Pi" : "Plug the backup USB in here to pair"
+                bordered: true
+                enabled: svc.capsule !== null && remoteHostField.text.trim() !== "" && !svc.backupRunning
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.pairRemote(remoteHostField.text)
+              }
+              Button {
+                visible: svc.remote !== null
+                width: parent.width
+                text: "Unpair"
+                bordered: true
+                enabled: !svc.backupRunning
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.forgetRemote()
+              }
             }
 
             // Needs the Pi, something on it to restore, and a linked laptop.
@@ -1082,7 +1130,7 @@ Panel {
               Button {
                 visible: root.newDisk !== ""
                 width: parent.width
-                text: "Erase it and back up to it from now on"
+                text: "Erase it and use it from now on"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent

@@ -1,20 +1,20 @@
 # OmaBackups
 
-**v1.2.0** — a safety and polish pass over all of it: it never writes to a
-disk that isn't the backup disk, it checks a disk again immediately before
-wiping it, and the bar plugin stops working when nothing is happening.
+**v1.3.0** — Time Machine-style **encrypted backups** for
+[Omarchy](https://omarchy.org/).
 
-Time Machine-style **encrypted USB backups** for [Omarchy](https://omarchy.org/).
-A USB disk holds system + home copies. The same USB can boot a restore wizard.
-The daily UI is an Omarchy bar plugin.
+A USB disk keeps dated copies of your system and your home folder. Click a
+date to open that day's files read-only. Boot the same USB, or a small network
+stick, to put the whole machine back. The everyday UI is an Omarchy bar plugin,
+and there is a CLI for everything it does.
 
-This is **off-box** backup. Snapper + Limine snapshots stay for “undo a bad
-update.”
+This is **off-box** backup: the copies live on a disk you can unplug, or on a
+Raspberry Pi across the room. Snapper + Limine snapshots stay for "undo a bad
+update".
 
-> Format and restore **wipe disks**. A bug can destroy the machine you restore
-> onto, or the USB you format. Do not use this as your only copy. Keep
-> Clonezilla (or similar) until you have booted a restored disk successfully
-> **on hardware you can afford to lose**.
+> Setting up a disk and restoring onto one both **erase that disk**. Until you
+> have booted a restored disk yourself, on hardware you can afford to lose,
+> keep another copy of anything you cannot lose.
 
 ## What you get
 
@@ -25,11 +25,14 @@ update.”
 4. **File history** — click a date to open your home folder as it was, read-only,
    in Files. Copy files out.
 5. **No password prompts** for everyday use once the laptop is linked to its disk.
-6. **Bare-metal restore** — firmware-boot the USB (Limine: “Rescue Disk”).
+6. **Bare-metal restore** — firmware-boot the USB (Limine: "Rescue Disk").
    Real Omarchy live environment + a restore wizard. Pick what to bring back
    (everything, or just the system and your settings), pick a date, pick a
    disk, type the name and YES.
-7. **Optional Raspberry Pi** — keep the USB in an always-on Pi and back up over
+7. **Restore over the network** — a separate bootable stick restores this
+   laptop from the Pi without the backup disk: on your own network, or from
+   anywhere over Tailscale.
+8. **Optional Raspberry Pi** — keep the USB in an always-on Pi and back up over
    the network.
 
 ## Install (Omarchy)
@@ -52,40 +55,19 @@ linked (see below), this asks for sudo once to refresh the linked copy.
 Do **not** run `omarchy refresh shell` — that resets the bar and drops
 third-party plugins. Restart is fine; refresh is not.
 
-## Uninstall
+## Your first backup
 
-```bash
-~/src/oma-backups/uninstall.sh          # keeps your skip list / settings
-~/src/oma-backups/uninstall.sh --purge  # removes those too
-```
+Pick the USB in the panel, confirm the erase, and set a password for it. That
+password is the disk's own — not your login — and you need it to restore.
 
-Undoes what `install.sh` set up on this account, and removes the backup
-services, the polkit rule and the root-owned copy in `/usr/local/lib/oma-backups`.
-Then offers to delete the cloned repo folder too. Never touches any backup USB
-disk.
+Setting up the disk **does not start a backup**. When it finishes, the disk is
+ready and empty: go through Settings first (what to skip, how often to back up),
+then press **Backup now** when you are ready. The first one copies everything
+and takes a while; later ones only copy what changed.
 
-### Removing it from the Pi
-
-If you paired a Raspberry Pi, clean that up separately — run this **on the Pi**:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --uninstall
-```
-
-It locks the backup disk, deletes the `omabackups` account and its home, and
-removes the gatekeeper, its config and its sudoers rule. `btrfs-progs` and
-`cryptsetup` are left installed. The backup disk itself is untouched — it
-keeps its restore points, and you can plug it back into a laptop and use it.
-
-## How a backup works
-
-Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
-
-1. Freeze with `btrfs subvolume snapshot -r`
-2. `rsync -aHAX --delete --delete-excluded` onto the USB (skip list applied every time)
-3. Snapshot the destination so you can browse dated copies
-
-Not restic. Not `btrfs send`. Not `dd`.
+While it runs, the panel shows two bars: the step running now — how much data
+of how much, how many files of how many, and how long that step has left — and
+underneath, the whole backup, weighted by how much data each step has to move.
 
 ## Automatic backups
 
@@ -114,11 +96,11 @@ Turn Smart thinning off in Settings to keep everything; you get a warning when
 the disk is nearly full instead. Preview what thinning would do:
 `oma-backups prune --dry-run`.
 
-## Linking the laptop (no password prompts)
+## No password prompts
 
-Linking happens when you set up a disk or pair a Pi. Existing setups get a
-**Stop asking for my password** button on the home page. `oma-backups link`
-asks for sudo once and:
+Linking happens when you set up a disk. Existing setups get a **Stop asking for
+my password** button on the home page. `oma-backups link` asks for sudo once
+and:
 
 - adds a root-only unlock key held by this laptop to the backup disk
 - installs systemd services for back up now, opening a restore point, and the
@@ -127,8 +109,7 @@ asks for sudo once and:
   session**, start and stop **only those services** without a password
 
 After that, backing up, stopping, automatic backups and opening restore points
-don't ask for a password. Setting up or erasing a disk, restoring, and pairing
-or unpairing a Pi still do.
+don't ask for a password. Setting up or erasing a disk, and restoring, still do.
 
 The disk stays encrypted. Away from this laptop it's useless without its
 password.
@@ -137,16 +118,108 @@ password.
 
 Click a date on the home page. Your own home folder from that date opens in
 Files, **read-only**. Copy what you need out, then press **Done** in the panel
-to close it (on a Pi this also locks the disk again).
+to close it.
 
-Works with the USB plugged in, or from a paired Pi over `sshfs` (slower, and a
-notification says it's opening). On the Pi, the folder is served by
+## Using a different disk
+
+Settings → **Use a different disk**: pick another USB, confirm the erase, and it
+becomes the backup disk. The old disk isn't touched and keeps its restore
+points.
+
+The current disk is remembered by its encryption ID, so two backup USBs plugged
+in at once never get mixed up. If the disk you set up isn't plugged in and a
+different backup USB is, nothing is written to it: backups go to the Pi if you
+have one, and otherwise say which disk they were expecting.
+
+## Back up to a Raspberry Pi
+
+Keep the backup USB plugged into an always-on Pi (Raspberry Pi OS / Debian 12
+or newer) and back up over your network or Tailscale.
+
+1. Set up the backup USB and run a backup, as usual.
+2. With it still plugged into the laptop: Settings → **Back up to a Pi**, or
+   `oma-backups remote pair my-pi` (a Tailscale name, IP, or ssh alias). This
+   adds a laptop-only unlock key to the disk and sets up the Pi over your normal
+   SSH login (it asks for the Pi's sudo password once).
+3. Plug the USB into the Pi. Backups now go there whenever the USB isn't
+   plugged into the laptop.
+
+The Pi section only appears in Settings once the backup disk has a restore
+point on it: pairing moves a working backup disk to the Pi, so there has to be
+a backup on it first.
+
+The disk stays locked between backups; the laptop sends the unlock key each
+time. The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
+that unlocks this one disk and writes backups to it, nothing else on the Pi.
+The home page shows the disk's free space as of the last backup.
+
+Restore points on the Pi open in Files the same way, over `sshfs` (slower, and
+a notification says it's opening). On the Pi, the folder is served by
 `sftp-server -R` inside a `bubblewrap` sandbox that contains nothing else.
+
+When the Pi is on the same network as the laptop, backups go straight to its
+local address instead of round through the Tailscale tunnel, which is faster
+and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
+and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
+address is used, the Pi's key is still checked under the name you paired it as.
+
+After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
+```
+
+Unpairing (`oma-backups remote forget`) removes the Pi connection but keeps the
+laptop's unlock key, which automatic backups to the USB still use.
+
+**Heat:** a Pi 4 doing a big first backup can sit at 80–85 °C in a cupboard and
+throttle, which makes the backup slower still. A heatsink, a fan, or just more
+air around it is worth it if your first backup is large.
+
+**Power:** a USB-powered backup drive plugged into a hub the Pi's other drives
+share can knock those drives offline for a moment while it spins up. Stop
+services that use them (e.g. Docker) before plugging it in, or give the
+backup drive its own power.
+
+### Network rescue stick
+
+A USB that restores this laptop from the Pi, without the backup disk: at home,
+or from anywhere over Tailscale. Make one and check it boots before you need
+it, and keep it somewhere other than the laptop bag, so a lost or stolen laptop
+doesn't take it along.
+
+You need:
+
+- a paired Pi with the backup disk plugged in, at least one restore point on
+  it, and a linked laptop (the Settings section only shows up once all of
+  these are true)
+- the Pi's gatekeeper at version 7 or newer (run the `--update` command above)
+- a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
+  rescue uses)
+- for away-from-home restores: Tailscale already working on the laptop and the
+  Pi. The stick carries its own copy of Tailscale; at boot you log in by
+  scanning a code with your phone. No Tailscale login is stored on the stick.
+
+Settings → **Network rescue stick**, pick the USB, confirm the erase, and type
+the backup disk's password (or `oma-backups rescue-stick /dev/sdX`).
+
+To restore: boot any computer from the stick and type the backup disk's
+password. It opens the stick, connects (it offers Wi-Fi if there's no cable),
+finds the Pi on your home network or over Tailscale, and sends the password
+there to unlock the backup disk. Then it's the usual restore wizard.
+
+What's on the stick: the Omarchy ISO and the restore wizard (not secret), and a
+small partition locked with the backup disk's password that holds the Pi's
+address and fingerprint and the stick's own SSH key. That key can only unlock,
+list, read and lock; it can't write, delete or open anything else on the Pi.
+Making a new stick switches off the previous one's key, so if a stick goes
+missing, make a new one. If you change the backup disk's password, make a new
+stick too: the old one would still open, but couldn't unlock the backup disk.
 
 ## Restoring
 
-Boot the backup USB (firmware boot menu → Limine: **Rescue Disk**). The wizard
-asks what to bring back:
+Boot the backup USB (firmware boot menu → Limine: **Rescue Disk**), or the
+network rescue stick. The wizard asks what to bring back:
 
 - **Everything** — the system and your whole home folder, as it was on that date.
 - **System + settings** — Omarchy, your apps and all your settings, but not the
@@ -156,6 +229,9 @@ asks what to bring back:
 
 Then pick a date, pick a disk, and type the disk name and YES. Restoring
 **wipes** the disk you restore onto.
+
+Restore from a running desktop is expert-only (`--allow-internal`). The
+intended path is **booting**.
 
 ### Restore my files
 
@@ -197,103 +273,43 @@ Restoring an older date over a synced folder needs more care: everything you've
 done since looks like a deletion to the sync client, and it may push that up to
 the server.
 
-## Using a different disk
-
-Settings → **Use a different disk**: pick another USB, confirm the erase, and it
-becomes the backup disk. The old disk isn't touched and keeps its restore
-points.
-
-The current disk is remembered by its encryption ID, so two backup USBs plugged
-in at once never get mixed up. If the disk you set up isn't plugged in and a
-different backup USB is, nothing is written to it: backups go to the Pi if you
-have one, and otherwise say which disk they were expecting.
-
-## Back up to a Raspberry Pi
-
-Keep the backup USB plugged into an always-on Pi (Raspberry Pi OS / Debian 12
-or newer) and back up over your network or Tailscale.
-
-1. Set up the backup USB and run a backup, as usual.
-2. With it still plugged into the laptop: Settings → **Back up to a Pi**, or
-   `oma-backups remote pair my-pi` (a Tailscale name, IP, or ssh alias). This
-   adds a laptop-only unlock key to the disk and sets up the Pi over your normal
-   SSH login (it asks for the Pi's sudo password once).
-3. Plug the USB into the Pi. Backups now go there whenever the USB isn't
-   plugged into the laptop.
-
-The disk stays locked between backups; the laptop sends the unlock key each
-time. The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
-that unlocks this one disk and writes backups to it, nothing else on the Pi.
-The home page shows the disk's free space as of the last backup.
-Full restores still need the USB brought back and booted, unless you have made
-a network rescue stick (below).
-
-When the Pi is on the same network as the laptop, backups go straight to its
-local address instead of round through the Tailscale tunnel, which is faster
-and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
-and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
-address is used, the Pi's key is still checked under the name you paired it as.
-
-After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
+## Uninstall
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
+~/src/oma-backups/uninstall.sh                  # asks about your settings
+~/src/oma-backups/uninstall.sh --purge          # removes them without asking
+~/src/oma-backups/uninstall.sh --keep-settings  # keeps them without asking
 ```
 
-Unpairing (`oma-backups remote forget`) removes the Pi connection but keeps the
-laptop's unlock key, which automatic backups to the USB still use. To clean up
-the Pi, run the same script there with `--uninstall`.
+Undoes what `install.sh` set up on this account, and removes the backup
+services, the polkit rule and the root-owned copy in `/usr/local/lib/oma-backups`.
+Then offers to delete the cloned repo folder too. Never touches any backup USB
+disk.
 
-**Heat:** a Pi 4 doing a big first backup can sit at 80–85 °C in a cupboard and
-throttle, which makes the backup slower still. A heatsink, a fan, or just more
-air around it is worth it if your first backup is large.
+Your settings are the skip list and the rest of `~/.config/omarchy-backups`.
+Deleting them is the default, so that reinstalling gives you a genuinely fresh
+start rather than quietly bringing back folders you once skipped.
 
-**Power:** a USB-powered backup drive plugged into a hub the Pi's other drives
-share can knock those drives offline for a moment while it spins up. Stop
-services that use them (e.g. Docker) before plugging it in, or give the
-backup drive its own power.
+### Removing it from the Pi
 
-### Network rescue stick
+If you paired a Raspberry Pi, clean that up separately — run this **on the Pi**:
 
-A USB that restores this laptop from the Pi, without the backup disk: at home,
-or from anywhere over Tailscale. Proven on hardware both ways, but it is the
-newest part of this, so make one and check it boots before you need it. Keep it
-somewhere other than the laptop bag, so a lost or stolen laptop doesn't take it
-along.
+```bash
+curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --uninstall
+```
 
-You need:
-
-- a paired Pi with the backup disk plugged in, at least one restore point on
-  it, and a linked laptop (the Settings section only shows up once all of
-  these are true)
-- the Pi's gatekeeper at version 7 or newer (run the `--update` command above)
-- a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
-  rescue uses)
-- for away-from-home restores: Tailscale already working on the laptop and the
-  Pi. The stick carries its own copy of Tailscale; at boot you log in by
-  scanning a code with your phone. No Tailscale login is stored on the stick.
-
-Settings → **Network rescue stick**, pick the USB, confirm the erase, and type
-the backup disk's password (or `oma-backups rescue-stick /dev/sdX`).
-
-To restore: boot any computer from the stick and type the backup disk's
-password. It opens the stick, connects (it offers Wi-Fi if there's no cable),
-finds the Pi on your home network or over Tailscale, and sends the password
-there to unlock the backup disk. Then it's the usual restore wizard.
-
-What's on the stick: the Omarchy ISO and the restore wizard (not secret), and a
-small partition locked with the backup disk's password that holds the Pi's
-address and fingerprint and the stick's own SSH key. That key can only unlock,
-list, read and lock; it can't write, delete or open anything else on the Pi.
-Making a new stick switches off the previous one's key, so if a stick goes
-missing, make a new one. If you change the backup disk's password, make a new
-stick too: the old one would still open, but couldn't unlock the backup disk.
+It locks the backup disk, deletes the `omabackups` account and its home, and
+removes the gatekeeper, its config and its sudoers rule. `btrfs-progs` and
+`cryptsetup` are left installed. The backup disk itself is untouched — it
+keeps its restore points, and you can plug it back into a laptop and use it.
 
 ## Safety
 
 - USB disks only, unless **Show all disks** (Settings)
 - Live root is never a format/restore target
 - Wiping requires an explicit erase confirm
+- The disk is checked again, immediately before it is wiped, to make sure it is
+  still the disk you picked
 - Ventoy / Clonezilla sticks stay hidden unless you show all disks
 - A disk that already has backups is **used as-is** until you explicitly start over
 - Disks that already hold something — a backup disk, a rescue stick, a system —
@@ -303,21 +319,30 @@ stick too: the old one would still open, but couldn't unlock the backup disk.
   machine with other accounts on it, that is worth knowing. The disk itself
   stays encrypted, and it is locked again between backups
 
-Restore from a running desktop is expert-only (`--allow-internal`).
-The intended path is **booting the USB**.
+## How a backup works
+
+Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
+
+1. Freeze with `btrfs subvolume snapshot -r`
+2. Work out the size of the job, so the progress bars mean something
+3. `rsync -aHAX --delete --delete-excluded` onto the USB (skip list applied every time)
+4. Snapshot the destination so you can browse dated copies
 
 ## UI
 
 - **Home:** last copy, disk free space, Backup now / Stop, next automatic
-  backup, last 5 restore points (click to open), **More**, gear. After a
-  part restore it also shows **Restore my files**, and Backup now is greyed
-  out until your files are back.
+  backup, last 5 restore points (click to open), **More**, gear. While a backup
+  runs: a bar for the step and a bar for the whole run. After a part restore it
+  also shows **Restore my files**, and Backup now is greyed out until your
+  files are back.
 - **Settings:** automatic backups, Smart thinning, quick skips, skip list, show
   all disks, back up to a Pi, network rescue stick, use a different disk,
   erase / start over
 
-Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Compiled into rsync
-excludes at the start of **every** backup.
+Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Nothing of yours is
+skipped to begin with; the recommended quick-skips (Trash, caches, thumbnails)
+are switches you can turn off like any other. Compiled into rsync excludes at
+the start of **every** backup.
 
 ## CLI
 
