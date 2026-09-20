@@ -31,14 +31,17 @@ Those three PARTUUIDs must be the same.
 
 ## What restore does now
 
-After mkinitcpio:
+After mkinitcpio, `lib/patch_boot_cmdline.py` runs unconditionally and:
 
-1. `lib/patch_boot_cmdline.py --verify-only` — every `cryptdevice=` in the UKI
-   and `limine.conf` must be the **new** PARTUUID
-2. If not, dump/update the UKI `.cmdline` with the restored OS’s `objcopy`
-   (`arch-chroot`; Arch ISO has no binutils) and rewrite `limine.conf`
-3. Drop `limine_history/` (source-machine Snapper UKIs)
-4. Verify again; **abort** if it still would not unlock
+1. drops `limine_history/` — the source machine's Snapper UKIs, every one of
+   which points at a PARTUUID this disk does not have. Always, even when the
+   main entry is already correct
+2. checks every `cryptdevice=` in the UKI and `limine.conf` is the **new**
+   PARTUUID
+3. if not, dumps and updates the UKI `.cmdline` with the restored OS’s
+   `objcopy` (`arch-chroot`; the Arch ISO has no binutils) and rewrites
+   `limine.conf`
+4. verifies again, and **aborts the restore** if the disk still would not unlock
 
 Hibernation `resume=` / `resume_offset=` are stripped (invalid on a new disk).
 
@@ -50,5 +53,3 @@ strings $ESP/EFI/Linux/omarchy_linux.efi | grep cryptdevice
 
 shows the **new** disk’s PARTUUID.
 
-Boot the default Omarchy entry, not a Snapshots submenu left over from the
-source machine.

@@ -115,8 +115,14 @@ omarchy_iso_path() {
 # Structural sanity check only — we don't know which version the user has,
 # so there's no checksum to verify against; just confirm it is really an
 # archiso-layout Omarchy ISO before mounting it.
+# Reading the table of contents of a ~6 GB ISO is not free, and this used to
+# happen twice per setup: once for the early "do we even have an ISO" check,
+# then again when it was actually used. Remember the one that passed.
+OMARCHY_ISO_VERIFIED=""
 omarchy_iso_looks_valid() {
-  bsdtar -tf "$1" 2>/dev/null | grep -qx 'arch/x86_64/airootfs.sfs'
+  [[ -n $OMARCHY_ISO_VERIFIED && $1 == "$OMARCHY_ISO_VERIFIED" ]] && return 0
+  bsdtar -tf "$1" 2>/dev/null | grep -qx 'arch/x86_64/airootfs.sfs' || return 1
+  OMARCHY_ISO_VERIFIED="$1"
 }
 
 ensure_omarchy_iso() {
@@ -156,16 +162,24 @@ extract_omarchy_iso() {
   local iso loop
   rescue_umask
   progress set setup 40
-  iso="$(ensure_omarchy_iso)"
+  # Not `iso="$(ensure_omarchy_iso)"`: a command substitution runs in a
+  # subshell, so the ISO-verified cache it sets would be thrown away again.
+  ensure_omarchy_iso >/dev/null
+  iso="$OMARCHY_ISO_FOUND"
   step "Using Omarchy ISO: $(basename "$iso")"
   progress set setup 45
-  loop=$(mktemp -d /run/oma-archiso-XXXXXX)
-  mount -o loop,ro "$iso" "$loop"
-  [[ -d $loop/arch ]] || { umount "$loop"; rmdir "$loop"; die "ISO has no /arch — not an archiso-layout Omarchy ISO"; }
-  step "Extracting the Omarchy live system (this is the big one — it's ~6GB)"
-  rsync -a --delete "$loop/arch/" "$live/arch/"
-  umount "$loop"
-  rmdir "$loop"
+  # Subshell so the cleanup trap belongs to this block alone. A failure during
+  # the copy used to leave the ISO still loop-mounted with nothing said about
+  # it; a trap in the function itself would replace the caller's (format-disk
+  # and rescue-stick both install one).
+  (
+    loop="$(mktemp -d /run/oma-archiso-XXXXXX)"
+    trap 'umount "$loop" 2>/dev/null || umount -l "$loop" 2>/dev/null || true; rmdir "$loop" 2>/dev/null || true' EXIT
+    mount -o loop,ro "$iso" "$loop"
+    [[ -d $loop/arch ]] || die "That file is not an Omarchy installer ISO (there is no arch/ folder inside it)."
+    step "Extracting the Omarchy live system (this is the big one — it's ~6GB)"
+    rsync -a --delete "$loop/arch/" "$live/arch/"
+  )
   [[ -d $live/arch/x86_64 || -d $live/arch/boot ]] || die "extracted ISO missing arch/boot or arch/x86_64"
   progress set setup 65
   step "Omarchy live system extracted"
@@ -198,13 +212,30 @@ install_rescue_files() {
 patch_airootfs() {
   local live=$1
   local sfs="$live/arch/x86_64/airootfs.sfs"
-  local work launch
+  local launch
   [[ -f $sfs ]] || die "missing $sfs"
   ensure_deps unsquashfs mksquashfs
   rescue_umask
   launch="$OMARCHY_TM_ROOT/share/oma-rescue-launch.sh"
   [[ -f $launch ]] || die "missing $launch"
-  work=$(mktemp -d /var/tmp/oma-airoot.XXXXXX)
+  # Subshell with its own cleanup trap: this unpacks and repacks ~6-10 GB in
+  # /var/tmp, and a failure in the repack (the slow, most interruptible step)
+  # used to leave every byte of it behind without a word, so a second failed
+  # attempt quietly added another copy.
+  (
+  ok=0
+  work="$(mktemp -d /var/tmp/oma-airoot.XXXXXX)"
+  newsfs="$(mktemp /var/tmp/oma-airootfs.XXXXXX.sfs)"
+  cleanup_airoot() {
+    local mb=0
+    if ((ok == 0)) && [[ -d $work ]]; then
+      mb="$(du -sm "$work" 2>/dev/null | awk '{print $1+0}')"
+    fi
+    rm -rf "$work" "$newsfs"
+    ((mb > 100)) && warn "Cleaned up ${mb} MB of half-built rescue image from /var/tmp."
+    return 0
+  }
+  trap cleanup_airoot EXIT
   step "Patching the rescue image with the restore launcher (the slow part — repacking ~6GB, can take a while)"
   progress set setup 68
   unsquashfs -f -d "$work" "$sfs" >/dev/null
@@ -234,13 +265,12 @@ fi
 Z
   # Signature of the stock ISO no longer matches; do not leave a stale sig.
   rm -f "$live/arch/x86_64/airootfs.sfs.cms.sig"
-  local newsfs=/var/tmp/oma-airootfs.sfs.new
-  rm -f "$newsfs"
   mksquashfs "$work" "$newsfs" -noappend -comp xz -b 1048576 -Xbcj x86
   progress set setup 92
   mv -f "$newsfs" "$sfs"
   (cd "$live/arch/x86_64" && sha512sum airootfs.sfs >airootfs.sha512)
-  rm -rf "$work"
+  ok=1
+  )
   step "Rescue image patched"
 }
 
@@ -336,9 +366,4 @@ install_archiso_rescue() {
   install_rescue_files "$live" "$efi"
   install_rescue_kernel "$live" "$efi"
   progress set setup 96
-}
-
-write_rescue_fstab() {
-  # Archiso does not use a LIVE-as-root fstab. Keep a no-op for callers.
-  :
 }

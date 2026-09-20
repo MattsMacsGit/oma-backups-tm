@@ -69,17 +69,21 @@ MAPPER="$(cfg '.restore_layout.luks_mapper')"
 refuse_dangerous_disk "$TARGET" "restore onto"
 require_usb_or_allow "$TARGET" "restore onto"
 
-if findmnt -n "$MNT" >/dev/null 2>&1; then
+# Never restore onto the disk being restored from. Checked here and again
+# just before the wipe, because the mounted backup disk can change in between.
+refuse_if_backup_disk() {
+  local cap_src cap_disk parent
+  findmnt -n "$MNT" >/dev/null 2>&1 || return 0
   cap_src="$(findmnt -n -o SOURCE "$MNT")"
   cap_disk="$(lsblk -n -o PKNAME "$cap_src" 2>/dev/null | head -1 || true)"
-  if [[ -n $cap_disk ]]; then
-    parent="$(lsblk -n -o PKNAME "/dev/$cap_disk" 2>/dev/null | head -1 || true)"
-    [[ -n $parent ]] && cap_disk=$parent
-    if [[ $(real_dev "/dev/$cap_disk") == "$(real_dev "$TARGET")" ]]; then
-      die "REFUSING to restore onto the backup disk itself"
-    fi
+  [[ -n $cap_disk ]] || return 0
+  parent="$(lsblk -n -o PKNAME "/dev/$cap_disk" 2>/dev/null | head -1 || true)"
+  [[ -n $parent ]] && cap_disk=$parent
+  if [[ $(real_dev "/dev/$cap_disk") == "$(real_dev "$TARGET")" ]]; then
+    die "REFUSING to restore onto the backup disk itself — that would destroy the copy you are restoring from."
   fi
-fi
+}
+refuse_if_backup_disk
 
 # Where the restore point is read from: the mounted backup disk, or the Pi.
 RSYNC_RSH=()
@@ -105,7 +109,7 @@ print_plan() {
   cat <<EOF
 == restore-to-disk --snapshot $SNAPSHOT ==
 Target:     $TARGET   $(lsblk -n -d -o SIZE,MODEL,TRAN "$TARGET" 2>/dev/null || true)
-Capsule:    $(src "")
+Restore from: $(src "")
 Snapshot:   $SNAPSHOT  (restore level: $LEVEL)
 Live root:  $(printf '%s' "$DETECT_JSON" | jq -r '.live_root_disk')  [always refused]
 Rescue:     $(is_rescue && echo yes || echo no)
@@ -185,16 +189,68 @@ ask_new_luks_pass() {
   p1="" p2=""
 }
 
+# Which physical disk passed the checks above, before the password prompt
+# gave a person unlimited time to replug something.
+TARGET_WAS="$(disk_identity "$TARGET")"
+
 ask_new_luks_pass
+
+# Restoring is the highest-stakes thing this tool does, and the person
+# watching has usually just had a computer break. A failure has to leave a
+# clear message and a tidy machine — not a bash error with a new encrypted
+# volume left open and four filesystems still mounted. Setting up a disk has
+# had this for a while; restoring had nothing at all.
+RESTORE_STARTED=0
+RESTORE_FAILED=0
+restore_cleanup() {
+  local d
+  for d in boot home var/log var/cache/pacman/pkg; do
+    umount "$NEW_ROOT/$d" 2>/dev/null || true
+  done
+  umount -R "$NEW_ROOT" 2>/dev/null || umount -l "$NEW_ROOT" 2>/dev/null || true
+  umount "$NEW_ESP" 2>/dev/null || true
+  [[ -e /dev/mapper/$MAPPER ]] && cryptsetup close "$MAPPER" 2>/dev/null
+  return 0
+}
+on_restore_exit() {
+  local rc=$?
+  ((rc == 0)) && return 0
+  ((RESTORE_FAILED)) && return 0
+  RESTORE_FAILED=1
+  restore_cleanup
+  echo
+  gum style --bold --foreground 1 "Restore failed."
+  if ((RESTORE_STARTED)); then
+    gum style --foreground 8 "  $TARGET was only partly written, so it will not start up yet."
+    gum style --foreground 8 "  Your backup was only read from — nothing on it was changed."
+    gum style --foreground 8 "  You can run the restore again; it starts from the beginning."
+  else
+    gum style --foreground 8 "  Nothing on $TARGET was changed."
+  fi
+  gum style --foreground 8 "  Details are in $OMARCHY_TM_LOG."
+  [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
+  return 0
+}
+trap on_restore_exit EXIT
+
+# Last chance to notice the disk changed under us while the password was being
+# typed, and to catch a backup disk that was mounted in the meantime.
+recheck_disk "$TARGET" "restore onto" "$TARGET_WAS"
+refuse_if_backup_disk
 
 while read -r mp; do
   [[ -z $mp ]] && continue
   case "$mp" in
-    /|/boot|/home) die "$TARGET is mounted as $mp" ;;
+    /|/boot|/home) die "REFUSING to restore onto $TARGET — this computer is running from it (it is mounted as $mp)." ;;
   esac
   umount -R "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
 done < <(lsblk -n -o MOUNTPOINTS "$TARGET" | awk 'NF')
+# An encrypted volume still open on the target stops the partitioning below
+# with nothing to explain why. Setting up a backup disk has always done this;
+# restoring never did.
+close_crypt_on_disk "$TARGET"
 
+RESTORE_STARTED=1
 run wipefs -a "$TARGET" || true
 run sgdisk --zap-all "$TARGET"
 run sgdisk \
@@ -259,7 +315,16 @@ fi
 mkdir -p "$NEW_ESP"
 run mount "$P1" "$NEW_ESP"
 log "rsync ESP snapshot"
-rsync "${RSYNC_RSH[@]}" -a --info=progress2 --delete-delay "$(src "esp/$SNAPSHOT")"/ "$NEW_ESP/" || true
+# Not `|| true`: the boot files are what makes the restored disk start up. The
+# UKI check further down catches most bad outcomes but not all of them — a copy
+# cut off partway can still leave a correct-looking main entry. 23 and 24 are
+# rsync's "some attributes weren't copied" and "a file vanished", neither of
+# which matters here.
+esp_rc=0
+rsync "${RSYNC_RSH[@]}" -a --info=progress2 --delete-delay "$(src "esp/$SNAPSHOT")"/ "$NEW_ESP/" || esp_rc=$?
+if ((esp_rc != 0 && esp_rc != 23 && esp_rc != 24)); then
+  die "Couldn't copy the boot files onto $TARGET (rsync code $esp_rc). Without them the restored disk would not start up."
+fi
 
 NEW_BTRFS_UUID="$(blkid -s UUID -o value "/dev/mapper/$MAPPER")"
 NEW_ESP_UUID="$(blkid -s UUID -o value "$P1")"
@@ -268,7 +333,7 @@ NEW_PARTUUID="$(blkid -s PARTUUID -o value "$P2")"
 
 FSTAB="$NEW_ROOT/@/etc/fstab"
 if [[ -f $FSTAB ]]; then
-  python3 - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
+  "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
 import re, sys
 path, btrfs_uuid, esp_uuid = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
@@ -317,7 +382,7 @@ fi
 rewrite_cryptdevice() {
   local file=$1
   [[ -f $file ]] || return 0
-  python3 - "$file" "$NEW_PARTUUID" <<'PY'
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_PARTUUID" <<'PY'
 import re, sys
 path, partuuid = sys.argv[1], sys.argv[2]
 text = open(path, encoding="utf-8", errors="replace").read()
@@ -363,13 +428,15 @@ fi
 
 # Boot reads the UKI .cmdline and ESP limine.conf, not /etc/default/limine.
 # Official Arch ISO rescue has no binutils; objcopy comes from this chroot.
-if ! "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --chroot "$NEW_ROOT" --verify-only; then
-  log "UKI/limine.conf still have the old cryptdevice; patching PARTUUID=$NEW_PARTUUID"
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-    --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --chroot "$NEW_ROOT" \
-    || die "could not patch UKI cmdline"
-fi
+# Run unconditionally. As well as pointing the boot entry at this disk's
+# encrypted partition, this clears the source machine's leftover snapshot
+# entries; skipping it when the main entry already looked right left those
+# behind, and every one of them is unbootable here. It only rewrites the UKI
+# when the UKI actually needs it.
+log "checking the boot entry points at PARTUUID $NEW_PARTUUID"
+"$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
+  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --chroot "$NEW_ROOT" \
+  || die "could not patch UKI cmdline"
 if ! "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
   --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --verify-only; then
   die "restored disk would not unlock LUKS (UKI cmdline PARTUUID != $NEW_PARTUUID). Restore aborted."
