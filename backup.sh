@@ -13,7 +13,7 @@ source "$OMARCHY_TM_ROOT/lib/remote.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  oma-backups backup [--dry-run] [--yes] [--home-only]
+  oma-backups backup [--dry-run] [--yes] [--home-only] [--force-after-restore]
   oma-backups snapshots
   oma-backups files SNAPSHOT [PATH]
   oma-backups copy SNAPSHOT SRC DEST
@@ -24,6 +24,7 @@ EOF
 
 MODE=backup
 HOME_ONLY=0
+FORCE_AFTER_RESTORE=0
 LIST_JSON=0
 ORIG_ARGS=("$@")
 
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) export OMARCHY_TM_DRY_RUN=1; shift ;;
     --yes) export OMARCHY_TM_YES=1; shift ;;
     --home-only) HOME_ONLY=1; export OMARCHY_TM_HOME_ONLY=1; shift ;;
+    --force-after-restore) FORCE_AFTER_RESTORE=1; shift ;;
     --list) MODE=list; shift ;;
     --prune) MODE=prune; shift ;;
     --browse) MODE=browse; shift; break ;;
@@ -84,7 +86,7 @@ refresh_excludes_from_user() {
   step "Skip list: $n_home home, $n_os os entries excluded"
 }
 
-ensure_src_top() {
+mount_src_top() {
   mkdir -p "$SRC_TOP"
   if ! findmnt -n "$SRC_TOP" >/dev/null 2>&1; then
     run_quiet mount -o subvolid=5,compress=zstd:3 "$ROOT_DEV" "$SRC_TOP"
@@ -92,15 +94,72 @@ ensure_src_top() {
   if [[ ! -e $SRC_TOP/$SNAP_SUB ]]; then
     run_quiet btrfs subvolume create "$SRC_TOP/$SNAP_SUB"
   fi
-  # Source snapshots only live for one backup; a crashed run leaves its pair
-  # behind, pinning old data on the system disk. Only one backup runs at a
-  # time (pid file), so anything here now is a leftover.
-  local s
+}
+
+# Source snapshots only live for one backup (or until it's resumed). Anything
+# else here was left by a run that won't be resumed, and pins old data on the
+# system disk. Only one backup runs at a time (pid file).
+clean_src_snapshots() {
+  local keep=${1:-} s
   for s in "$SRC_TOP/$SNAP_SUB"/os-* "$SRC_TOP/$SNAP_SUB"/home-*; do
     [[ -e $s ]] || continue
+    [[ -n $keep && ${s##*-} == "$keep" ]] && continue
     btrfs subvolume delete "$s" >/dev/null 2>>"$OMARCHY_TM_LOG" &&
       log_file "removed leftover source snapshot $s"
   done
+}
+
+# ---- Resume -----------------------------------------------------------------
+# A stopped or interrupted backup carries on where it left off: same restore
+# point, same source snapshots, finished steps skipped, half-copied files
+# continued (rsync --partial). Only for the same backup disk, the same kind of
+# backup, within a day; anything else starts fresh.
+RESUME_FILE="$OMARCHY_TM_STATE/in-progress.json"
+RESUME_MAX_AGE=86400
+RESUMED=0
+
+dest_id() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    printf 'remote:%s:%s\n' "$REMOTE_HOST" "$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF")"
+  else
+    printf 'local:%s\n' "$(luks_uuid_of "$(capsule_luks_partition 2>/dev/null || true)")"
+  fi
+}
+
+# Prints the restore point to carry on with, or nothing.
+resumable_ts() {
+  [[ -f $RESUME_FILE ]] || return 0
+  local ts dest home_only started
+  ts="$(jq -r '.ts // ""' "$RESUME_FILE" 2>/dev/null)" || return 0
+  dest="$(jq -r '.dest // ""' "$RESUME_FILE")"
+  home_only="$(jq -r '.home_only // 0' "$RESUME_FILE")"
+  started="$(jq -r '.started // 0' "$RESUME_FILE")"
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ && $dest == "$(dest_id)" && $home_only == "$HOME_ONLY" ]] || return 0
+  (($(date +%s) - started < RESUME_MAX_AGE)) || return 0
+  [[ -d $SRC_TOP/$SNAP_SUB/home-$ts ]] || return 0
+  [[ $HOME_ONLY == 1 || -d $SRC_TOP/$SNAP_SUB/os-$ts ]] || return 0
+  printf '%s\n' "$ts"
+}
+
+resume_start() {
+  jq -n --arg ts "$1" --arg dest "$(dest_id)" --argjson ho "$HOME_ONLY" --argjson at "$(date +%s)" \
+    '{ts: $ts, dest: $dest, home_only: $ho, started: $at, done: [], sizes: {}}' >"$RESUME_FILE"
+  chmod 644 "$RESUME_FILE" 2>/dev/null || true
+}
+
+step_done() {
+  local name=$1 size=${2:-0}
+  [[ $size =~ ^[0-9]+$ ]] || size=0
+  jq --arg n "$name" --argjson s "$size" '.done += [$n] | .sizes[$n] = $s' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
+    chmod 644 "$RESUME_FILE.tmp" && mv "$RESUME_FILE.tmp" "$RESUME_FILE"
+}
+
+is_done() {
+  jq -e --arg n "$1" '.done | index($n)' "$RESUME_FILE" >/dev/null 2>&1
+}
+
+step_size() {
+  jq -r --arg n "$1" '.sizes[$n] // 0' "$RESUME_FILE" 2>/dev/null || echo 0
 }
 
 # Where this backup goes: the backup USB plugged into this laptop, or (once
@@ -129,11 +188,22 @@ remote_open() {
 }
 
 remote_close() {
-  [[ $DEST_REMOTE == 1 ]] && rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  # Gatekeepers before v6 don't queue a lock behind an unlock, so a Stop
+  # pressed while unlocking could lock nothing and leave the disk open once
+  # the unlock landed. Check, and lock again if it's still open.
+  local i
+  for i in 1 2 3; do
+    rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+    [[ $(rgate status 2>/dev/null | jq -r '.unlocked // false' 2>/dev/null) == true ]] || return 0
+    sleep 5
+  done
+  warn "Couldn't lock the backup disk on $REMOTE_HOST — it may still be unlocked there."
+  return 0
 }
 
 d_target() {
-  if [[ $DEST_REMOTE == 1 ]]; then printf '%s:%s\n' "$REMOTE_HOST" "$1"; else printf '%s\n' "$MNT/$1"; fi
+  if [[ $DEST_REMOTE == 1 ]]; then printf '%s:%s\n' "$(remote_target)" "$1"; else printf '%s\n' "$MNT/$1"; fi
 }
 
 d_exists() {
@@ -205,9 +275,10 @@ rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_OS \\
   $SRC_TOP/$SNAP_SUB/os-$ts/   $MNT/os/current/
 rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_HOME \\
   $SRC_TOP/$SNAP_SUB/home-$ts/ $MNT/home/current/
-rsync -a --info=progress2 /boot/ $MNT/esp/$ts/
+rsync -a --delete --partial --info=progress2 /boot/ $MNT/esp/current/
 btrfs subvolume snapshot -r $MNT/os/current   $MNT/os/$ts
 btrfs subvolume snapshot -r $MNT/home/current $MNT/home/$ts
+btrfs subvolume snapshot -r $MNT/esp/current  $MNT/esp/$ts
 # also refresh rescue EFI from this /boot (so updates stay restorable)
 EOF
 }
@@ -228,29 +299,38 @@ announce_backup() {
 }
 
 # Parse rsync progress2 on stderr without a PTY and without du.
+# Copy one tree. Sets TREE_SIZE to rsync's "Total file size" (the restore
+# point's size for this part), so nothing ever has to walk the tree again.
+TREE_SIZE=0
 rsync_tree() {
   local src=$1 dest=$2 ex=$3 label=$4
   progress phase "$label"
   if is_dry_run; then
-    echo "[dry-run] rsync -aHAX --numeric-ids --delete --info=progress2 --no-inc-recursive --exclude-from=$ex $src/ $dest/"
+    echo "[dry-run] rsync -aHAX --numeric-ids --delete --partial --info=progress2 --exclude-from=$ex $src/ $dest/"
     return 0
   fi
   step "Backing up $label — live progress in the plugin panel"
   [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
+  local stats
+  stats="$(mktemp)"
   set +e
   set +o pipefail
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
-  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded \
-    --info=progress2,name0,flist0 --no-inc-recursive \
+  # --partial: a file cut off mid-copy continues next time instead of
+  # starting over (safe: `current` only becomes a restore point on success).
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
+    --info=progress2,name0,flist2 --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
-    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label"
+    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
   local rc=${PIPESTATUS[0]}
+  TREE_SIZE="$(cat "$stats" 2>/dev/null || echo 0)"
+  rm -f "$stats"
   set -o pipefail
   set -e
   # 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
   # None of those should abort the restore point.
   if [[ $rc -ne 0 && $rc -ne 23 && $rc -ne 24 ]]; then
-    fail_backup "rsync $label failed (exit $rc)"
+    fail_backup "$(rsync_failure_text "$rc")"
   fi
   if [[ $rc -ne 0 ]]; then
     warn "rsync $label finished with warnings (exit $rc) — restore point will still be saved"
@@ -258,8 +338,32 @@ rsync_tree() {
   progress set "$label" 100
 }
 
+# rsync's exit codes mean nothing to most people; say what probably
+# happened and what to do. The code stays at the end for the log.
+rsync_failure_text() {
+  local rc=$1 where="The backup disk"
+  [[ $DEST_REMOTE == 1 ]] && where="The backup disk on $REMOTE_HOST"
+  case $rc in
+    11)
+      echo "$where stopped responding partway through. Check its power and cable, then press Resume. (rsync code $rc)" ;;
+    10 | 12 | 30 | 35 | 255)
+      if [[ $DEST_REMOTE == 1 ]]; then
+        echo "Lost the connection to $REMOTE_HOST partway through. Check it's switched on and connected, then press Resume. (rsync code $rc)"
+      else
+        echo "$where stopped responding partway through. Check it's still plugged in, then press Resume. (rsync code $rc)"
+      fi ;;
+    20)
+      echo "The copy was interrupted. Press Resume to carry on. (rsync code $rc)" ;;
+    *)
+      echo "Copying stopped with an error. Press Resume to try again; details are in $OMARCHY_TM_LOG. (rsync code $rc)" ;;
+  esac
+}
+
 on_backup_exit() {
   local rc=$?
+  # Locking a disk on a Pi takes a few seconds; say so rather than leaving
+  # the plugin to guess whether the backup is still running.
+  [[ $STOPPED == 1 && $DEST_REMOTE == 1 ]] && progress phase stopping
   remote_close
   clear_pid
   if [[ $rc -ne 0 ]]; then
@@ -270,6 +374,19 @@ on_backup_exit() {
   fi
 }
 
+# Stop button / systemctl stop: exit cleanly (the EXIT trap tidies up and the
+# backup can be resumed) instead of carrying on and reporting rsync's
+# "killed by signal" as a failure.
+STOPPED=0
+# 1 once cmd_backup's EXIT handler is on. Other commands that unlock the disk
+# install a smaller "lock it again" trap; during a backup that must not
+# replace on_backup_exit, which locks up AND clears the pid and status.
+BACKUP_TRAPS=0
+on_stop_signal() {
+  STOPPED=1
+  exit 143
+}
+
 BACKUP_FAILED=0
 fail_backup() {
   echo
@@ -278,6 +395,7 @@ fail_backup() {
   gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
   # The plugin shows this; backups started without a terminal have no other
   # way to say why they stopped.
+  [[ $STOPPED == 1 ]] && exit 143
   BACKUP_FAILED=1
   if [[ -n ${BROWSE_STATE:-} ]]; then
     browse_state error "$*"
@@ -293,13 +411,75 @@ backup_running() {
   [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
+# After a "system + settings" restore this system isn't whole yet: the files
+# that haven't been brought back are on the backup and not here. Backing up
+# now would push that gap over the top of the real backup (rsync --delete)
+# and make a restore point out of it -- which is exactly what happens when a
+# restored spare disk is booted to check it. So every backup is refused
+# until the files are back, unless someone deliberately forces one, meaning
+# "this is my system now; keep only what's on it".
+partial_restore_snapshot() {
+  jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true
+}
+
+OMA_FORCE_NOTE() { printf '%s' "$OMARCHY_TM_STATE/force-after-restore"; }
+
+# A systemd unit takes no arguments, so the plugin leaves a note instead of
+# passing a flag. Only a hand-started backup may use it; an automatic one
+# never does, and never eats the note either.
+take_force_note() {
+  [[ ${OMARCHY_TM_SCHEDULED:-0} == 1 ]] && return 1
+  [[ -f $(OMA_FORCE_NOTE) ]] || return 1
+  [[ ${1:-} == peek ]] || rm -f "$(OMA_FORCE_NOTE)"
+  return 0
+}
+
+# Called twice: once before the sudo re-exec so a refusal costs no password
+# prompt ("peek", consumes nothing), then again as root for real.
+refuse_if_partial_restore() {
+  local peek=${1:-} snap
+  snap="$(partial_restore_snapshot)"
+  [[ -n $snap ]] || return 0
+  if [[ $FORCE_AFTER_RESTORE == 1 ]] || take_force_note "$peek"; then
+    FORCE_AFTER_RESTORE=1
+    [[ $peek == peek ]] && return 0
+    warn "Backing up anyway. From here on the backup keeps only what's on this system."
+    log_file "forced backup after a partial restore from $snap"
+    return 0
+  fi
+  echo
+  gum style --bold "This system isn't whole yet, so backups are paused."
+  gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
+  gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
+  gum style --foreground 8 "  up now would delete them from the backup's current copy."
+  echo
+  gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  gum style --foreground 8 "  To back up anyway and keep only what's here, hold Ctrl and press"
+  gum style --foreground 8 "  \"Backup now\" in the plugin, or run:"
+  gum style --foreground 8 "    oma-backups backup --force-after-restore"
+  echo
+  exit 0
+}
+
+# Checks for another backup and claims the pid file in one step, under a
+# short lock. The pid file used to be written only after the disk was
+# unlocked (several seconds on a Pi), so an automatic backup and a Resume
+# press close together could both get through.
 refuse_if_running() {
   local other
-  other="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  exec 9>"$(pid_file).lock"
+  flock -w 10 9 || true
+  other="$(tr -d '[:space:]' 2>/dev/null <"$(pid_file)" || true)"
   if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
     grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
-    fail_backup "Another backup is already running (pid $other)."
+    exec 9>&-
+    # Not a failure: leave the status file alone so the plugin keeps
+    # following the backup that's already running.
+    gum style --bold "A backup is already running (pid $other). Leaving it to finish."
+    exit 0
   fi
+  write_pid
+  exec 9>&-
 }
 
 open_destination() {
@@ -307,7 +487,7 @@ open_destination() {
     step "Unlocking the backup disk on $REMOTE_HOST"
     progress phase "unlock"
     remote_open
-    trap remote_close EXIT
+    ((BACKUP_TRAPS)) || trap remote_close EXIT
     # Setups from before the current-disk record: adopt the disk in use.
     local u
     u="$(jq -r '.luks_uuid // empty' "$OMA_REMOTE_CONF")"
@@ -368,7 +548,13 @@ d_delete_point() {
         btrfs subvolume delete "$MNT/$kind/$ts" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
       fi
     done
-    rm -rf "${MNT:?}/esp/$ts"
+    # Boot files are a snapshot of esp/current now; older restore points
+    # have a plain folder.
+    if btrfs subvolume show "$MNT/esp/$ts" >/dev/null 2>&1; then
+      btrfs subvolume delete "$MNT/esp/$ts" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+    else
+      rm -rf "${MNT:?}/esp/$ts"
+    fi
   fi
 }
 
@@ -409,6 +595,13 @@ prune_restore_points() {
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
+  # After a "system + settings" restore, the restore point it came from is the
+  # only one that still has the user's files until they're brought back.
+  local protected
+  protected="$(jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
+  if [[ -n $protected ]]; then
+    plan="$(jq --arg p "$protected" '.thin -= [$p] | .space_order -= [$p] | .keep = (.keep + [$p] | unique)' <<<"$plan")"
+  fi
   if [[ $dry == 1 ]]; then
     echo "Setting: $mode"
     jq -r '"Keep:    \(.keep | length)", "Thin:    \(.thin | join(" "))", "If the disk fills, oldest first: \(.space_order | join(" "))"' <<<"$plan"
@@ -440,8 +633,11 @@ prune_restore_points() {
 cmd_backup() {
   require_excludes_visible
   dest_mounted() { findmnt -n "$MNT" >/dev/null 2>&1; }
-  local ts
+  local ts run_started
   ts="$(now_timestamp)"
+  # When this run began. The schedule counts from here rather than from the
+  # finish, so a slow backup doesn't push the next one a whole tick late.
+  run_started="$(date +%s)"
   if [[ $(id -u) -eq 0 ]]; then
     refresh_excludes_from_user
   fi
@@ -450,8 +646,16 @@ cmd_backup() {
     echo "Dry-run only."
     exit 0
   fi
+  refuse_if_partial_restore peek
   require_root "${ORIG_ARGS[@]}"
+  refuse_if_partial_restore
   refuse_if_running
+  # From here on this run owns the pid file, and the next steps can unlock
+  # the disk, so Stop must already be handled: without these traps a Stop
+  # during unlocking killed us outright and left the disk open.
+  trap on_backup_exit EXIT
+  trap on_stop_signal INT TERM
+  BACKUP_TRAPS=1
   if [[ -f $OMA_SCHEDULE_UNIT && ${OMARCHY_TM_UNATTENDED:-0} != 1 ]]; then
     refresh_root_copy || warn "Couldn't update the copy automatic backups run from."
   fi
@@ -462,41 +666,72 @@ cmd_backup() {
   pick_destination
   announce_backup "$ts"
   open_destination
-  while d_exists "os/$ts" || d_exists "home/$ts"; do
-    sleep 1
-    ts="$(now_timestamp)"
-  done
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
 
-  write_pid
   mark_incomplete
-  trap on_backup_exit EXIT INT TERM
   trap 'fail_backup "unexpected failure"' ERR
-  progress phase "snapshot"
+  progress phase "prepare"
 
-  ensure_src_top
+  mount_src_top
+  local resume_ts
+  resume_ts="$(resumable_ts)"
+  if [[ -n $resume_ts ]]; then
+    ts=$resume_ts
+    RESUMED=1
+    progress phase "resume"
+    step "Carrying on the backup from $ts where it stopped"
+  else
+    rm -f "$RESUME_FILE"
+    while d_exists "os/$ts" || d_exists "home/$ts"; do
+      sleep 1
+      ts="$(now_timestamp)"
+    done
+  fi
+  clean_src_snapshots "$([[ $RESUMED == 1 ]] && echo "$ts")"
+
+  # Boot files: rsync into esp/current and snapshot it, like os/home, so only
+  # changed files are sent. A Pi whose gatekeeper can't delete such snapshots
+  # yet (before v4) gets a full copy per restore point, as before.
+  local esp_subvol=1
+  if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 4 ]]; then
+    esp_subvol=0
+  fi
+
   ensure_dest_current os
   ensure_dest_current home
   d_mkdir esp
+  [[ $esp_subvol == 1 ]] && ensure_dest_current esp
   d_mkdir meta
 
-  step "Snapshotting the current system"
-  if [[ $HOME_ONLY != 1 ]]; then
-    run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
+  if [[ $RESUMED != 1 ]]; then
+    progress phase "snapshot"
+    step "Snapshotting the current system"
+    if [[ $HOME_ONLY != 1 ]]; then
+      run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
+    fi
+    run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
+    resume_start "$ts"
   fi
-  run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
 
-  if [[ $HOME_ONLY != 1 ]]; then
+  if [[ $HOME_ONLY != 1 ]] && ! is_done os; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$(d_target os/current)" "$EX_OS" os
+    step_done os "$TREE_SIZE"
   fi
-  rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
-  d_mkdir "esp/$ts"
-  step "Backing up the boot partition"
-  progress phase "esp"
-  set +o pipefail
-  rsync "${RSYNC_RSH[@]}" -a --info=progress2 /boot/ "$(d_target "esp/$ts")/" \
-    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
-  set -o pipefail
+  if ! is_done home; then
+    rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
+    step_done home "$TREE_SIZE"
+  fi
+  if ! is_done esp; then
+    step "Backing up the boot partition"
+    progress phase "esp"
+    local esp_dest=esp/current
+    [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
+    set +o pipefail
+    rsync "${RSYNC_RSH[@]}" -a --delete --partial --info=progress2 /boot/ "$(d_target "$esp_dest")/" \
+      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
+    set -o pipefail
+    step_done esp
+  fi
 
   # The rescue partitions can only be refreshed with the USB plugged in here.
   if [[ $DEST_REMOTE != 1 && $(cfg '.backup.refresh_rescue_boot') == true ]]; then
@@ -509,16 +744,24 @@ cmd_backup() {
 
   step "Saving this as a restore point"
   progress phase "finalize"
-  if d_exists "os/$ts"; then fail_backup "dest os/$ts already exists"; fi
-  if [[ $HOME_ONLY != 1 ]]; then
+  # Each part is skipped if it's already there: a run interrupted while
+  # saving just finishes the job when resumed.
+  if [[ $HOME_ONLY != 1 ]] && ! d_exists "os/$ts"; then
     d_snapshot os/current "os/$ts"
   fi
-  d_snapshot home/current "home/$ts"
+  d_exists "home/$ts" || d_snapshot home/current "home/$ts"
+  if [[ $esp_subvol == 1 ]] && ! d_exists "esp/$ts"; then
+    d_snapshot esp/current "esp/$ts"
+  fi
 
   if [[ $HOME_ONLY != 1 ]]; then
     run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/os-$ts" || true
   fi
   run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
+  local size_os size_home
+  size_os="$(step_size os)" size_home="$(step_size home)"
+  # Saved as a restore point: nothing left to resume.
+  rm -f "$RESUME_FILE"
 
   local valid=true
   if [[ $HOME_ONLY == 1 ]]; then
@@ -527,33 +770,11 @@ cmd_backup() {
     { d_exists "os/$ts" && d_exists "home/$ts" && d_exists "esp/$ts"; } || valid=false
   fi
 
-  # One btrfs filesystem du per side, right now while the snapshot is
-  # fresh — the only place this is ever computed. Stored in machine.json
-  # and carried forward by list_snapshots.py on every later (frequent,
-  # plugin-polled) scan, never recomputed. "Total" is the snapshot's
-  # apparent size; "exclusive" is what deleting *only* this snapshot
-  # would actually free (btrfs COW shares data with other snapshots, so
-  # total overstates that) — exclusive is what a future "delete to make
-  # space" feature should sort/act on.
-  step "Measuring this restore point's size"
-  snapshot_du() {
-    local rel=$1 line
-    if [[ $DEST_REMOTE == 1 ]]; then
-      line="$(rgate du "$rel" 2>>"$OMARCHY_TM_LOG" || true)"
-    else
-      line="$(btrfs filesystem du -s --raw "$MNT/$rel" 2>/dev/null | awk 'NR==2{print $1, $2}')"
-    fi
-    [[ -n $line ]] && printf '%s\n' "$line" || printf '0 0\n'
-  }
-  local os_total=0 os_excl=0 home_total=0 home_excl=0
-  if [[ $HOME_ONLY != 1 ]] && d_exists "os/$ts"; then
-    read -r os_total os_excl < <(snapshot_du "os/$ts")
-  fi
-  if d_exists "home/$ts"; then
-    read -r home_total home_excl < <(snapshot_du "home/$ts")
-  fi
-  local size_total=$((os_total + home_total))
-  local size_excl=$((os_excl + home_excl))
+  # The restore point's size: what rsync reported for each part (kept in the
+  # resume record, so a resumed backup still knows the parts done earlier).
+  # Stored in machine.json and carried forward on every later scan; nothing
+  # walks the tree to measure it.
+  local size_total=$((size_os + size_home))
 
   local meta="$MNT/meta/machine.json"
   local user_name="${SUDO_USER:-${USER:-}}"
@@ -564,8 +785,8 @@ cmd_backup() {
   else
     snaps_json="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json)"
   fi
-  snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" --argjson excl "$size_excl" \
-    'map(if .timestamp == $ts then . + {size_total: $total, size_exclusive: $excl} else . end)')"
+  snaps_json="$(printf '%s' "$snaps_json" | jq --arg ts "$ts" --argjson total "$size_total" \
+    'map(if .timestamp == $ts then . + {size_total: $total} else . end)')"
   jq -n \
     --arg host "$HOSTNAME" --arg mid "$MACHINE_ID" --arg ker "$KERNEL" \
     --arg ver "$OS_VER" --arg user "$user_name" --argjson snaps "$snaps_json" \
@@ -599,12 +820,22 @@ cmd_backup() {
   fi
   trap - ERR
   if [[ $valid == true ]]; then
-    date +%s >"$OMARCHY_TM_STATE/last-success"
+    echo "$run_started" >"$OMARCHY_TM_STATE/last-success"
     chmod 644 "$OMARCHY_TM_STATE/last-success" 2>/dev/null || true
     progress phase "tidy"
     prune_restore_points || warn "Couldn't tidy up old restore points (this backup is still saved)."
+    # A forced backup settles the question: this system is the real one now,
+    # so the plugin stops offering "Restore my files" and automatic backups
+    # start again. Cleared after the prune above, so the restore point the
+    # files are still in survives this run rather than being thinned on the
+    # way out.
+    if [[ $FORCE_AFTER_RESTORE == 1 && -f $OMARCHY_TM_STATE/partial-restore.json ]]; then
+      rm -f "$OMARCHY_TM_STATE/partial-restore.json"
+      log_file "partial-restore marker cleared by a forced backup"
+    fi
   fi
   cache_remote_df
+  [[ $DEST_REMOTE == 1 ]] && remote_refresh_addresses || true
   progress done "valid=$valid ts=$ts"
   log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
   local listing
@@ -679,7 +910,7 @@ cmd_browse() {
   # exactly as far as each file's own owner/permissions allow.
   sshfs -f -o ro,allow_other,default_permissions,reconnect \
     -o ssh_command="$(remote_rsh)" -o sftp_server="/browse $ts $user" \
-    "$REMOTE_HOST:/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
+    "$(remote_target):/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
   pid=$!
   local i
   for i in $(seq 1 60); do

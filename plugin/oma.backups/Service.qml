@@ -15,6 +15,9 @@ Item {
   readonly property var snapModel: snapList
   property string statusLine: "idle"
   property string lastError: ""
+  // The last failed backup's message from the status file. Kept separately
+  // so the disk-list refresh doesn't blank it and make the panel jump.
+  property string backupError: ""
   property bool refreshing: false
   property bool backupRunning: false
   property bool launchedBackup: false
@@ -23,6 +26,14 @@ Item {
   property string progressEta: ""
   property string progressSpeed: ""
   property string progressPhase: ""
+  // One step at a time (see lib/progress.py): its name, whether it has a real
+  // percentage or is just "working", and a details line (copied / speed / ETA).
+  property string progressLabel: ""
+  property bool progressBusy: false
+  property string progressDetail: ""
+  readonly property string progressText: progressBusy || progressLabel === ""
+    ? (progressLabel || Model.phaseLabel(progressPhase))
+    : progressLabel + "  " + progressPercent + "%"
   property string selectedDisk: ""
   property bool showAllDisks: false
   property bool wipeConfirmed: false
@@ -103,7 +114,10 @@ Item {
   readonly property string nextBackupText: {
     if (!scheduleOn) return ""
     var interval = { hourly: 3600, daily: 86400, weekly: 604800 }[schedule.every] || 86400
-    var due = Math.max(lastSuccess + interval - interval / 12, nowSec)
+    // Same margin as schedule.sh: a twelfth of the interval, never under
+    // 10 minutes, so this note and the actual check agree.
+    var grace = Math.max(interval / 12, 600)
+    var due = Math.max(lastSuccess + interval - grace, nowSec)
     // The timer fires on the hour in local time (not UTC: half-hour zones).
     var next = new Date(due * 1000)
     if (next.getMinutes() || next.getSeconds() || next.getMilliseconds()) {
@@ -134,9 +148,17 @@ Item {
     privileged(["link"])
   }
 
-  function startBackupService() {
+  function startBackupService(force) {
     root.launchedAt = Date.now() / 1000
-    startUnitProc.command = ["systemctl", "start", "--no-block", "oma-backups-backup.service"]
+    // A systemd unit takes no arguments, so a forced backup leaves a note in
+    // the state folder and backup.sh picks it up and deletes it. $1 keeps a
+    // home folder with spaces in it safe.
+    startUnitProc.command = force
+      ? ["sh", "-c",
+         "touch \"$1/.local/state/omarchy-backups/force-after-restore\"; "
+         + "exec systemctl start --no-block oma-backups-backup.service",
+         "sh", root.home]
+      : ["systemctl", "start", "--no-block", "oma-backups-backup.service"]
     startUnitProc.running = true
   }
 
@@ -145,9 +167,30 @@ Item {
   property string browseTs: ""
   property string browsePhase: ""   // "", "opening", "open"
   property int browseWaited: 0
+  property string browseMode: "open"  // "open" in Files, or "restore" (Restore my files)
 
-  function browse(ts) {
+  // After a "system + settings" restore: which restore point still has the
+  // user's files (written by restore-to-disk.sh into their state folder).
+  property string partialSnapshot: ""
+  property bool restoringFiles: false
+  property int restorePercent: 0
+
+  function restoreMyFiles() {
+    if (root.partialSnapshot === "" || !root.linked) return
+    root.restoringFiles = true
+    root.restorePercent = 0
+    browse(root.partialSnapshot, "restore")
+  }
+
+  function stopRestoringFiles() {
+    restoreProc.running = false
+    root.restoringFiles = false
+    closeBrowse()
+  }
+
+  function browse(ts, mode) {
     if (root.browseTs !== "" && root.browseTs !== ts) closeBrowse()
+    root.browseMode = mode || "open"
     root.browseTs = ts
     root.browsePhase = "opening"
     root.browseWaited = 0
@@ -216,6 +259,7 @@ Item {
     timerFile.reload()
     linkedFile.reload()
     lastSuccessFile.reload()
+    if (!root.restoringFiles) partialFile.reload()
     nowSec = Date.now() / 1000
     if (!skipLoaded) loadSkipFile()
   }
@@ -321,17 +365,35 @@ Item {
     compileThen("first")
   }
 
-  function startBackup() {
+  // force: this system came back from a partial restore and the user has
+  // deliberately chosen to back it up anyway (Ctrl + Backup now), keeping
+  // only what's on it. Automatic backups never take this path.
+  function startBackup(force) {
+    root.pendingForce = force === true
     compileThen("backup")
   }
+
+  property bool pendingForce: false
+
+  // Stopping takes a moment (a Pi has to lock its disk over the network).
+  // Until the backup has really exited, say so instead of flipping between
+  // "running" and "Resume" as the status catches up.
+  property bool stopping: false
+  property real stoppingSince: 0
 
   function stopBackup() {
     pendingStop = true
     pendingBackup = false
+    pendingForce = false
     pendingFirstRunDisk = ""
     launchedBackup = false
     sawBackupStatus = false
-    backupRunning = false
+    stopping = true
+    stoppingSince = Date.now() / 1000
+    backupRunning = true
+    progressLabel = "Stopping and locking the backup disk"
+    progressBusy = true
+    progressDetail = ""
     if (root.linked)
       Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service", "oma-backups-scheduled.service"])
     else
@@ -353,6 +415,11 @@ Item {
 
   function forgetRemote() {
     privileged(["remote", "forget"])
+  }
+
+  function makeRescueStick(disk) {
+    if (!disk) return
+    privileged(["rescue-stick", disk])
   }
 
   function pickFolder() { pickProc.command = ["python3", root.picker]; pickProc.running = true }
@@ -391,7 +458,7 @@ Item {
           root.snapshots = []
           snapList.clear()
         }
-        if (!root.backupRunning) root.lastError = ""
+        if (!root.backupRunning) root.lastError = root.backupError
       } catch (e) {
         root.lastError = "Could not list disks"
       }
@@ -422,6 +489,20 @@ Item {
     var j
     try { j = JSON.parse(raw) } catch (e) { return }
     if (!j || typeof j !== "object") return
+    if (root.stopping) {
+      var stillGoing = j.running === true && j.stale !== true && j.phase !== "idle"
+      if (stillGoing && Date.now() / 1000 - root.stoppingSince < 60) {
+        root.backupRunning = true
+        root.progressLabel = "Stopping and locking the backup disk"
+        root.progressBusy = true
+        root.progressDetail = ""
+        return
+      }
+      root.stopping = false
+      root.backupRunning = false
+      root.launchedBackup = false
+      root.sawBackupStatus = false
+    }
     if (j.phase === "error") {
       // If we just launched this attempt and haven't seen it report
       // running yet, an "error" here is leftover from a *previous*,
@@ -436,7 +517,7 @@ Item {
         root.backupRunning = false
         root.launchedBackup = false
         root.sawBackupStatus = false
-        if (j.line) root.lastError = String(j.line)
+        if (j.line) root.backupError = root.lastError = String(j.line)
       }
     } else if (j.stale === true) {
       if (root.launchedBackup && j.phase !== "error") root.backupRunning = true
@@ -444,6 +525,7 @@ Item {
     } else if (j.running === true) {
       root.backupRunning = true
       root.sawBackupStatus = true
+      root.backupError = ""
     } else if (root.launchedBackup) {
       if (j.phase === "done" || j.phase === "idle") {
         root.backupRunning = false
@@ -461,6 +543,9 @@ Item {
     root.progressEta = j.eta || ""
     root.progressSpeed = j.speed || ""
     if (j.phase) root.progressPhase = j.phase
+    root.progressLabel = j.label ? String(j.label) : ""
+    root.progressBusy = j.busy === true
+    root.progressDetail = j.detail ? String(j.detail) : ""
     var rp = parseInt(j.rsync_percent, 10)
     if (!isNaN(rp)) root.statusLine = Model.phaseLabel(j.phase) + "  " + rp + "%"
     else if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
@@ -512,19 +597,22 @@ Item {
       if (root.pendingFirstRunDisk !== "") {
         var disk = root.pendingFirstRunDisk
         root.pendingFirstRunDisk = ""
-        root.lastError = ""
+        root.lastError = root.backupError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
         root.privileged(["first-run", disk])
       } else if (root.pendingBackup) {
         root.pendingBackup = false
-        root.lastError = ""
+        var forced = root.pendingForce
+        root.pendingForce = false
+        root.lastError = root.backupError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        if (root.linked) root.startBackupService()
-        else root.privileged(["backup", "--yes"])
+        if (root.linked) root.startBackupService(forced)
+        else root.privileged(forced ? ["backup", "--yes", "--force-after-restore"]
+                                    : ["backup", "--yes"])
       }
     }
   }
@@ -565,12 +653,61 @@ Item {
       if (j.state === "ready" && j.path) {
         browsePoll.stop()
         root.browsePhase = "open"
-        Quickshell.execDetached(["xdg-open", String(j.path)])
+        if (root.browseMode === "restore") {
+          // Only what's missing: never overwrite anything changed since.
+          restoreProc.command = ["rsync", "-a", "--ignore-existing", "--info=progress2",
+            String(j.path) + "/", root.home + "/"]
+          restoreProc.running = true
+        } else {
+          Quickshell.execDetached(["xdg-open", String(j.path)])
+        }
       } else if (j.state === "error") {
         root.lastError = String(j.message || "Couldn't open that restore point.")
+        root.restoringFiles = false
         root.closeBrowse()
       }
     }
+  }
+
+  Process {
+    id: restoreProc
+    stdout: SplitParser {
+      splitMarker: "\r"
+      onRead: function (line) {
+        var m = /\s(\d{1,3})%\s/.exec(line)
+        if (m) root.restorePercent = parseInt(m[1], 10)
+      }
+    }
+    onExited: function (code) {
+      var wasRestoring = root.restoringFiles
+      root.restoringFiles = false
+      root.closeBrowse()
+      if (!wasRestoring) return
+      if (code === 0) {
+        // Everything's back: the protected restore point can be thinned again.
+        Quickshell.execDetached(["rm", "-f", root.home + "/.local/state/omarchy-backups/partial-restore.json"])
+        root.partialSnapshot = ""
+        Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
+          "Everything from the backup has been restored to your home folder."])
+      } else {
+        root.lastError = "Restoring your files stopped before finishing. Press Restore my files to carry on."
+      }
+    }
+  }
+
+  FileView {
+    id: partialFile
+    path: root.home + "/.local/state/omarchy-backups/partial-restore.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.partialSnapshot = /^\d{8}T\d{6}Z$/.test(j.snapshot || "") ? j.snapshot : ""
+      } catch (e) {
+        root.partialSnapshot = ""
+      }
+    }
+    onLoadFailed: root.partialSnapshot = ""
   }
 
   Timer {

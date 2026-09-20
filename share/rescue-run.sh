@@ -15,15 +15,20 @@ find_root() {
       return 0
     fi
   done
-  # Extracted ISO: LIVE is labeled OMARCHY-LIVE
+  # Extracted ISO: the rescue partition's label. The 1.1 names come first;
+  # the older ones keep discs made before the rename working.
   local mp
-  mp="$(lsblk -n -o LABEL,MOUNTPOINT 2>/dev/null | awk '$1=="OMARCHY-LIVE" && $2!=""{print $2; exit}')"
+  mp="$(lsblk -n -o LABEL,MOUNTPOINT 2>/dev/null | awk '($1=="OmaRescue" || $1=="OmaNetRescue" || $1=="OMARCHY-LIVE" || $1=="OMANET-LIVE") && $2!=""{print $2; exit}')"
   if [[ -n $mp && -x $mp/oma-backups/omarchy-backups ]]; then
     printf '%s\n' "$mp/oma-backups"
     return 0
   fi
   mkdir -p /run/oma-live
-  if mountpoint -q /run/oma-live || mount -L OMARCHY-LIVE /run/oma-live 2>/dev/null; then
+  if mountpoint -q /run/oma-live ||
+    mount -L OmaRescue /run/oma-live 2>/dev/null ||
+    mount -L OmaNetRescue /run/oma-live 2>/dev/null ||
+    mount -L OMARCHY-LIVE /run/oma-live 2>/dev/null ||
+    mount -L OMANET-LIVE /run/oma-live 2>/dev/null; then
     if [[ -x /run/oma-live/oma-backups/omarchy-backups ]]; then
       printf '%s\n' /run/oma-live/oma-backups
       return 0
@@ -40,7 +45,7 @@ timeout 20 systemctl is-system-running --wait >/dev/null 2>&1 || true
 ROOT="$(find_root || true)"
 if [[ -z ${ROOT:-} ]]; then
   echo "OmaBackups scripts not found on this USB."
-  echo "Mount the OMARCHY-LIVE partition and run:"
+  echo "Mount the rescue partition (OmaRescue) and run:"
   echo "  python3 /path/to/oma-backups/lib/restore_tui.py"
   exit 1
 fi

@@ -19,6 +19,14 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
+  // A system restored without its files: backups are paused so this machine
+  // can't overwrite the real backup with the gap. Holding Ctrl wakes the
+  // Backup now button for a one-off forced backup; automatic backups stay
+  // off until the files are back or a forced backup settles it.
+  readonly property bool blockedByRestore: svc.partialSnapshot !== ""
+  property bool ctrlHeld: false
+  property bool forceAsked: false
+  property bool forceConfirmed: false
   readonly property var quickSkips: [
     { label: "Downloads", paths: [svc.home + "/Downloads"], note: "" },
     { label: "Trash", paths: ["**/.local/share/Trash", ".Trash"], note: "Recommended" },
@@ -40,6 +48,15 @@ Panel {
   // "Use a different disk": every eligible disk except the current backup disk.
   property string newDisk: ""
   property bool newDiskConfirmed: false
+  property string stickDisk: ""
+  property bool stickConfirmed: false
+  // USBs that could become a network rescue stick: never a backup disk.
+  readonly property var stickDisks: {
+    var out = []
+    for (var i = 0; i < svc.disks.length; i++)
+      if (!svc.disks[i].capsule && svc.disks[i].kind !== "capsule") out.push(svc.disks[i])
+    return out
+  }
   readonly property var otherDisks: {
     var out = []
     var cur = svc.capsule ? svc.capsule.path : ""
@@ -67,6 +84,11 @@ Panel {
       showAllSnaps = false
       newDisk = ""
       newDiskConfirmed = false
+      ctrlHeld = false
+      forceAsked = false
+      forceConfirmed = false
+      stickDisk = ""
+      stickConfirmed = false
     }
   }
 
@@ -139,7 +161,7 @@ Panel {
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
     tooltipText: svc.backupRunning
-      ? ("OmaBackups — " + Model.phaseLabel(svc.progressPhase) + " " + svc.progressPercent + "%")
+      ? ("OmaBackups — " + svc.progressText)
       : (svc.hasCapsule ? "OmaBackups" : "OmaBackups — set up a disk")
     onPressed: root.toggle()
   }
@@ -164,7 +186,7 @@ Panel {
       onActivateRequested: {}
       onTextKey: function (t) {
         if (t === "b" || t === "B") {
-          if (svc.hasCapsule && !svc.backupRunning) svc.startBackup()
+          if (svc.hasCapsule && !svc.backupRunning && !root.blockedByRestore) svc.startBackup()
         } else if (t === "s" || t === "S") {
           if (svc.backupRunning) svc.stopBackup()
         } else if (t === "r" || t === "R") {
@@ -203,8 +225,8 @@ Panel {
                 anchors.rightMargin: Style.space(8)
                 title: "OmaBackups"
                 meta: svc.backupRunning
-                  ? (Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%")
-                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.0.1 RC") : "1.0.1 RC  ·  no backup disk yet")
+                  ? svc.progressText
+                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.1.0") : "1.1.0  ·  no backup disk yet")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -282,42 +304,151 @@ Panel {
               spacing: Style.space(6)
               Text {
                 width: parent.width
-                text: Model.phaseLabel(svc.progressPhase) + "  " + svc.progressPercent + "%"
+                text: svc.progressText
                 color: root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
               }
               Rectangle {
+                id: progressTrack
                 width: parent.width
                 height: 8
                 radius: 4
+                clip: true
                 color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                // A step with a real percentage.
                 Rectangle {
+                  visible: !svc.progressBusy
                   width: Math.max(8, parent.width * Math.min(100, Math.max(0, svc.progressPercent)) / 100)
                   height: parent.height
                   radius: 4
                   color: Color.accent
                 }
+                // A step with nothing to measure: a moving "working" segment
+                // instead of a made-up number.
+                Rectangle {
+                  id: busySegment
+                  visible: svc.progressBusy
+                  width: parent.width * 0.3
+                  height: parent.height
+                  radius: 4
+                  color: Color.accent
+                  SequentialAnimation on x {
+                    running: busySegment.visible
+                    loops: Animation.Infinite
+                    NumberAnimation { from: -busySegment.width; to: progressTrack.width; duration: 1400; easing.type: Easing.InOutQuad }
+                  }
+                }
               }
               Text {
-                visible: svc.progressSpeed !== "" || svc.progressEta !== ""
+                visible: text !== ""
                 width: parent.width
-                text: [svc.progressSpeed, svc.progressEta ? ("ETA " + svc.progressEta) : ""].filter(function (s) { return s && s.length }).join("   ")
+                text: svc.progressDetail !== "" ? svc.progressDetail
+                  : [svc.progressSpeed, svc.progressEta ? ("ETA " + svc.progressEta) : ""].filter(function (s) { return s && s.length }).join("   ")
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
+                elide: Text.ElideRight
               }
             }
 
-            Button {
+            Item {
               width: parent.width
+              height: backupBtn.implicitHeight
               visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
-              text: svc.backupIncomplete ? "Resume backup" : "Backup now"
-              foreground: Color.background
-              background: Color.accent
-              accent: Color.accent
-              fontFamily: root.fontFamily
-              onClicked: svc.startBackup()
+              Button {
+                id: backupBtn
+                width: parent.width
+                text: svc.backupIncomplete ? "Resume backup" : "Backup now"
+                // Greyed out while this system is missing its files, and lit
+                // again for as long as Ctrl is held.
+                foreground: root.blockedByRestore && !root.ctrlHeld ? root.dim : Color.background
+                background: root.blockedByRestore && !root.ctrlHeld ? "transparent" : Color.accent
+                bordered: root.blockedByRestore && !root.ctrlHeld
+                accent: Color.accent
+                enabled: !root.blockedByRestore
+                fontFamily: root.fontFamily
+                onClicked: svc.startBackup()
+              }
+              // The shared Button's clicked() carries no modifiers, so the
+              // blocked case gets its own layer on top: it reads Ctrl at
+              // click time and only ever opens the warning below.
+              MouseArea {
+                anchors.fill: parent
+                visible: root.blockedByRestore
+                enabled: root.blockedByRestore
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
+                cursorShape: root.ctrlHeld ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onPositionChanged: function (mouse) {
+                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
+                }
+                onExited: root.ctrlHeld = false
+                onPressed: function (mouse) {
+                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
+                  if (root.ctrlHeld) root.forceAsked = true
+                }
+              }
+            }
+            Text {
+              visible: root.blockedByRestore && !root.forceAsked
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Paused until your files are back. Hold Ctrl to back up anyway."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Column {
+              visible: root.blockedByRestore && root.forceAsked
+              width: parent.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                text: "Backing up now keeps only what's on this system. Everything that "
+                  + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
+                  + " — your documents, photos and other files — is dropped from the "
+                  + "backup's current copy and won't be in any new restore point. "
+                  + "Older restore points still have it."
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Toggle {
+                width: parent.width
+                label: "I understand: keep only what's on this system"
+                checked: root.forceConfirmed
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.forceConfirmed = !root.forceConfirmed
+              }
+              Button {
+                width: parent.width
+                text: "Back up anyway"
+                foreground: root.urgent
+                bordered: true
+                enabled: root.forceConfirmed && !svc.backupRunning
+                fontFamily: root.fontFamily
+                onClicked: {
+                  root.forceAsked = false
+                  root.forceConfirmed = false
+                  svc.startBackup(true)
+                }
+              }
+              Button {
+                width: parent.width
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  root.forceAsked = false
+                  root.forceConfirmed = false
+                }
+              }
             }
             Text {
               visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup
@@ -330,7 +461,7 @@ Panel {
             }
             Button {
               width: parent.width
-              visible: svc.backupRunning || svc.launchedBackup
+              visible: (svc.backupRunning || svc.launchedBackup) && !svc.stopping
               text: "Stop backup"
               foreground: root.urgent
               bordered: true
@@ -339,7 +470,7 @@ Panel {
             }
 
             Rectangle {
-              visible: svc.browseTs !== ""
+              visible: svc.browseTs !== "" && svc.browseMode === "open"
               width: parent.width
               height: doneBtn.implicitHeight + Style.space(10)
               radius: Style.cornerRadius
@@ -383,6 +514,52 @@ Panel {
               fontFamily: root.fontFamily
               tooltipText: "One-time setup: backing up and opening restore points won't ask again"
               onClicked: svc.linkLaptop()
+            }
+
+            Column {
+              visible: svc.partialSnapshot !== ""
+              width: parent.width
+              spacing: Style.space(8)
+              PanelSectionHeader {
+                text: "YOUR FILES"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: svc.restoringFiles
+                  ? (svc.browsePhase === "opening"
+                    ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
+                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                  : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
+                    + ". Your documents, photos and other files are still on the backup."
+                    + (svc.linked ? "" : " Link this laptop (button above) to bring them back.")
+                color: svc.restoringFiles ? root.foreground : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Button {
+                visible: !svc.restoringFiles
+                width: parent.width
+                text: "Restore my files"
+                foreground: Color.background
+                background: Color.accent
+                accent: Color.accent
+                enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
+                fontFamily: root.fontFamily
+                tooltipText: "Copies back everything that's missing. Never overwrites a file you've changed since."
+                onClicked: svc.restoreMyFiles()
+              }
+              Button {
+                visible: svc.restoringFiles
+                width: parent.width
+                text: "Stop (carry on later)"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.stopRestoringFiles()
+              }
             }
 
             Column {
@@ -542,7 +719,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "1.0.1 RC  ·  skip folders, disks, Pi, erase disk"
+              meta: "1.1.0  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -757,6 +934,77 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: svc.forgetRemote()
+            }
+
+            // Needs the Pi, something on it to restore, and a linked laptop.
+            Column {
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "NETWORK RESCUE STICK"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: "A USB (8 GB or bigger) that can restore this laptop from " + svc.remoteHost
+                  + " without the backup disk: at home, or anywhere over Tailscale. It opens with the backup disk’s password and can only read backups. Making a new one switches the old one off."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Text {
+                visible: root.stickDisks.length === 0
+                width: parent.width
+                text: "Plug in the USB you want to use."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+              }
+              Repeater {
+                model: root.stickDisks
+                delegate: Button {
+                  required property var modelData
+                  width: column.width
+                  text: Model.diskLabel(modelData)
+                  bordered: true
+                  selected: root.stickDisk === modelData.path
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  leftAlign: true
+                  onClicked: {
+                    root.stickDisk = modelData.path
+                    root.stickConfirmed = false
+                  }
+                }
+              }
+              Toggle {
+                visible: root.stickDisk !== ""
+                width: parent.width
+                label: "I understand this will erase that USB"
+                checked: root.stickConfirmed
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.stickConfirmed = !root.stickConfirmed
+              }
+              Button {
+                visible: root.stickDisk !== ""
+                width: parent.width
+                text: "Make the rescue stick"
+                foreground: Color.background
+                background: Color.accent
+                accent: Color.accent
+                enabled: root.stickConfirmed && !svc.backupRunning
+                fontFamily: root.fontFamily
+                onClicked: {
+                  svc.makeRescueStick(root.stickDisk)
+                  root.stickDisk = ""
+                  root.stickConfirmed = false
+                }
+              }
             }
 
             Column {

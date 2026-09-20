@@ -11,10 +11,10 @@ state_dir = "~/.local/state/omarchy-backups"
 
 [layout]
 efi_size = "1G"
-efi_label = "OMARCHY-EFI"
+efi_label = "OMABOOT"
 live_size = "16G"
-live_label = "OMARCHY-LIVE"
-tm_label = "OMARCHY-TM"
+live_label = "OmaRescue"
+tm_label = "OmaBackups"
 luks_mapper = "omarchy-backups"
 
 [restore_layout]

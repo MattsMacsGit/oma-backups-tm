@@ -23,6 +23,7 @@ source "$OMARCHY_TM_ROOT/lib/remote.sh"
 
 UNIT_DIR=/etc/systemd/system
 POLKIT_RULE=/etc/polkit-1/rules.d/50-oma-backups.rules
+UDEV_RULE=/etc/udev/rules.d/99-oma-backups.rules
 OMA_LINKED=/etc/omarchy-backups/linked.json
 
 REFRESH=0 QUIET=0
@@ -60,6 +61,13 @@ Type=oneshot
 Environment=SUDO_USER=$user
 Environment=OMARCHY_TM_UNATTENDED=1
 ExecStart=$base backup --yes
+# Stop exits 143 on purpose, after tidying up. Not a failure.
+SuccessExitStatus=143
+# Tidying up after a Stop can wait on the other end: locking a disk on a Pi
+# takes seconds, and a lock has to queue behind an unlock still in flight.
+# Never inherit a short DefaultTimeoutStopSec here -- being killed in the
+# middle of that is what leaves a disk unlocked.
+TimeoutStopSec=180
 EOF
   cat >"$UNIT_DIR/oma-backups-browse@.service" <<EOF
 [Unit]
@@ -88,6 +96,8 @@ ExecStart=$base schedule run
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
+SuccessExitStatus=143
+TimeoutStopSec=180
 EOF
   cat >"$UNIT_DIR/oma-backups-scheduled.timer" <<'EOF'
 [Unit]
@@ -105,6 +115,18 @@ EOF
   systemctl daemon-reload
   # Always on: `schedule run` exits at once unless the user switched it on.
   systemctl enable --now oma-backups-scheduled.timer >/dev/null 2>&1 || true
+}
+
+# Stops the desktop auto-mounting our own partitions and popping a window for
+# each one. The tool mounts what it needs itself.
+write_udev_rule() {
+  local src=$OMARCHY_TM_ROOT/share/99-oma-backups.rules
+  [[ -f $src ]] || return 0
+  install -d -m 755 "$(dirname "$UDEV_RULE")"
+  install -m 644 "$src" "$UDEV_RULE"
+  udevadm control --reload >/dev/null 2>&1 || true
+  # Existing disks keep the old flags until they're re-probed.
+  udevadm trigger --subsystem-match=block >/dev/null 2>&1 || true
 }
 
 write_polkit_rule() {
@@ -146,6 +168,7 @@ main() {
     refresh_root_copy
     write_units "$user"
     write_polkit_rule "$user"
+    write_udev_rule
     [[ $QUIET == 1 ]] || echo "Updated the copy automatic and password-free backups run from."
     return 0
   fi
@@ -164,6 +187,7 @@ main() {
   write_units "$user"
   step "Letting $user run them without a password"
   write_polkit_rule "$user"
+  write_udev_rule
   jq -n --arg u "$user" --arg at "$(ts)" '{user: $u, linked_at: $at}' >"$OMA_LINKED.tmp"
   chmod 644 "$OMA_LINKED.tmp"
   mv "$OMA_LINKED.tmp" "$OMA_LINKED"

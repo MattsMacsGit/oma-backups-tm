@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Update the rescue USB (OMARCHY-LIVE + OMARCHY-EFI) without wiping backups.
+# Update the rescue USB (OmaRescue + OMABOOT) without wiping backups.
 # --boot-only: copy the Arch ISO kernel already on LIVE onto EFI.
 set -euo pipefail
 
@@ -26,10 +26,12 @@ done
 
 require_root "${ORIG_ARGS[@]}"
 
-EFI_DEV="$(lsblk -n -p -o PATH,LABEL | awk '$2=="OMARCHY-EFI"{print $1; exit}')"
-LIVE_DEV="$(lsblk -n -p -o PATH,LABEL | awk '$2=="OMARCHY-LIVE"{print $1; exit}')"
-[[ -n $EFI_DEV ]] || die "OMARCHY-EFI not found — plug in the backup USB"
-[[ -n $LIVE_DEV ]] || die "OMARCHY-LIVE not found — plug in the backup USB"
+EFI_DEV="$(lsblk -n -p -o PATH,LABEL |
+  awk "$(oma_label_match '$2' "${OMA_LABELS_EFI[@]}"){print \$1; exit}")"
+LIVE_DEV="$(lsblk -n -p -o PATH,LABEL |
+  awk "$(oma_label_match '$2' "${OMA_LABELS_LIVE[@]}"){print \$1; exit}")"
+[[ -n $EFI_DEV ]] || die "The backup USB's boot partition wasn't found — plug the backup USB in"
+[[ -n $LIVE_DEV ]] || die "The backup USB's rescue partition wasn't found — plug the backup USB in"
 
 DISK="/dev/$(lsblk -n -o PKNAME "$EFI_DEV" | head -1)"
 

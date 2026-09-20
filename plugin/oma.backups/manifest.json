@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "oma.backups",
   "name": "OmaBackups",
-  "version": "1.0.1-rc",
+  "version": "1.1.0",
   "author": "OmaBackups",
   "license": "MIT",
   "description": "Beta. Encrypted Omarchy system+home backups to a USB disk. Format and restore wipe disks.",

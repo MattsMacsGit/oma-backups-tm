@@ -97,7 +97,7 @@ nag_if_overdue() {
 
 cmd_run() {
   [[ ${EUID:-$(id -u)} -eq 0 ]] || die "schedule run is started by the system timer"
-  local s interval since last now
+  local s interval since last now grace
   s="$(settings get)"
   [[ $(jq -r .enabled <<<"$s") == true ]] || exit 0
   interval=$(jq -r .interval <<<"$s")
@@ -105,13 +105,30 @@ cmd_run() {
   since=$(jq -r .enabled_at <<<"$s")
   ((last > since)) && since=$last
   now=$(date +%s)
-  # Due a little early rather than a whole timer tick late.
-  ((now - last >= interval - interval / 12)) || exit 0
+  # Due a little early rather than a whole timer tick late. The timer's
+  # random delay can leave two ticks under an hour apart, so on the hourly
+  # setting the margin must be wider than that jitter or a tick is turned
+  # away and the backup waits another whole hour.
+  grace=$((interval / 12))
+  ((grace < 600)) && grace=600
+  ((now - last >= interval - grace)) || exit 0
 
   local pidf other
   pidf="$(pid_file)"
   other="$(tr -d '[:space:]' <"$pidf" 2>/dev/null || true)"
   if [[ -n $other ]] && pid_alive "$other"; then
+    exit 0
+  fi
+
+  # A system restored without its files must never back up on its own: it
+  # would push that gap over the real backup. Only bringing the files back,
+  # or a deliberate forced backup, starts automatic backups again. Ctrl-
+  # forcing is a manual act by design, so it never reaches this path.
+  if [[ -s $OMARCHY_TM_STATE/partial-restore.json ]]; then
+    log_file "scheduled backup skipped: this system was restored without its files"
+    notify_user "Automatic backups are paused" \
+      "This system was restored without your files. Open OmaBackups and press \"Restore my files\"." \
+      partial-restore
     exit 0
   fi
 
@@ -135,7 +152,8 @@ cmd_run() {
   fi
 
   log_file "scheduled backup starting"
-  if ! "$OMARCHY_TM_ROOT/backup.sh" --yes; then
+  # Marks this run as automatic: backup.sh must not honour a force note here.
+  if ! OMARCHY_TM_SCHEDULED=1 "$OMARCHY_TM_ROOT/backup.sh" --yes; then
     log_file "scheduled backup failed"
     nag_if_overdue "The last automatic backup failed." "$interval" "$since"
     exit 1
