@@ -953,6 +953,25 @@ browse_state() {
   mv "$BROWSE_STATE.tmp" "$BROWSE_STATE"
 }
 
+# Tidying up after a browse, as one function rather than a string of commands
+# in the trap. Under `set -e` a failing command in a trap takes the rest of
+# the trap with it, and the first thing here is an unmount that routinely
+# fails: systemd's SIGTERM reaches sshfs and this script at the same moment,
+# so by the time this runs the mount is often already gone. That left the
+# state file behind (which pauses every automatic backup, for good), the
+# mount point behind, and — the one that matters — the disk on the Pi
+# unlocked, because remote_close never got its turn.
+browse_cleanup() {
+  local mp=${1:-}
+  if [[ -n $mp ]]; then
+    fusermount3 -u "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null || true
+    rmdir "$mp" 2>/dev/null || true
+  fi
+  rm -f "$BROWSE_STATE" 2>/dev/null || true
+  # Mid-backup, the backup owns the disk and locks it itself on its way out.
+  backup_running || remote_close || true
+}
+
 # Open one restore point's copy of the user's home folder, read-only, until
 # stopped (the plugin starts/stops oma-backups-browse@TS.service).
 cmd_browse() {
@@ -972,7 +991,7 @@ cmd_browse() {
   if [[ $DEST_REMOTE != 1 ]]; then
     local path="$MNT/home/$ts/$user"
     [[ -d $path ]] || fail_backup "No copy of your home folder in that restore point."
-    trap 'rm -f "$BROWSE_STATE"' EXIT
+    trap 'browse_cleanup' EXIT
     browse_state ready "$path"
     # Nothing to hold open for a plugged-in disk; just wait to be stopped.
     sleep infinity &
@@ -986,7 +1005,7 @@ cmd_browse() {
   local mp="$BROWSE_DIR/$ts" pid
   mkdir -p "$mp"
   # Leave the disk unlocked if a backup is mid-way; it locks it when done.
-  trap 'fusermount3 -u "$mp" 2>/dev/null || umount -l "$mp" 2>/dev/null; rmdir "$mp" 2>/dev/null; rm -f "$BROWSE_STATE"; backup_running || remote_close' EXIT
+  trap 'browse_cleanup "$mp"' EXIT
   # allow_other + default_permissions: mounted by root, readable by the user
   # exactly as far as each file's own owner/permissions allow.
   sshfs -f -o ro,allow_other,default_permissions,reconnect \

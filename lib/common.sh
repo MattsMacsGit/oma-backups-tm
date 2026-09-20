@@ -611,6 +611,12 @@ recheck_disk() {
 }
 
 progress() {
+  # A browse session borrows open_destination (and so its "Unlocking the
+  # backup disk" step), but it is not a backup: the status file is the
+  # plugin's answer to "is a backup running?", nothing here ever writes it
+  # back to idle, and a browse that says "running" pins the panel to a
+  # backup that does not exist — long after the browse has gone.
+  [[ -n ${BROWSE_STATE:-} ]] && return 0
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$@" || true
 }
 
@@ -783,7 +789,19 @@ pid_file() {
 OMA_BROWSE_DIR=/run/omarchy-backups-browse
 
 browse_in_progress() {
-  compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1
+  local f ts
+  compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1 || return 1
+  # The state file is only as trustworthy as the unit behind it. A browse
+  # killed before its cleanup ran leaves the file there for good, and this
+  # question is what pauses automatic backups — so one leftover file used to
+  # mean no automatic backup ever happened again. Check, and sweep up.
+  for f in "$OMA_BROWSE_DIR"/*.json; do
+    ts=$(basename "$f" .json)
+    systemctl is-active --quiet "oma-backups-browse@$ts.service" 2>/dev/null && return 0
+    rm -f "$f" 2>/dev/null || true
+    rmdir "$OMA_BROWSE_DIR/$ts" 2>/dev/null || true
+  done
+  return 1
 }
 
 # "Does a process with this number exist?" — nothing more. For the question

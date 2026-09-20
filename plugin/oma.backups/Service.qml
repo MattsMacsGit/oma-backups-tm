@@ -195,6 +195,7 @@ Item {
   property string browsePhase: ""   // "", "opening", "open"
   property int browseWaited: 0
   property string browseMode: "open"  // "open" in Files, or "restore" (Restore my files)
+  property int browseMissed: 0
 
   // After a "system + settings" restore: which restore point still has the
   // user's files (written by restore-to-disk.sh into their state folder).
@@ -221,7 +222,9 @@ Item {
     root.browseTs = ts
     root.browsePhase = "opening"
     root.browseWaited = 0
+    root.browseMissed = 0
     root.lastError = ""
+    browsePoll.interval = 500
     browseStartProc.command = ["systemctl", "start", "oma-backups-browse@" + ts + ".service"]
     browseStartProc.running = true
     browsePoll.start()
@@ -233,9 +236,16 @@ Item {
   function closeBrowse() {
     if (root.browseTs === "") return
     Quickshell.execDetached(["systemctl", "stop", "oma-backups-browse@" + root.browseTs + ".service"])
+    forgetBrowse()
+  }
+
+  // The session has ended — either we stopped it, or it ended without us.
+  // Only the panel's own state is cleared here; there is nothing left to stop.
+  function forgetBrowse() {
     browsePoll.stop()
     root.browseTs = ""
     root.browsePhase = ""
+    root.browseMissed = 0
   }
   readonly property bool backupMounted: detect && detect.backup_mounted === true
   readonly property var capsuleDisk: (detect && detect.capsule_disk) || null
@@ -444,6 +454,12 @@ Item {
 
   function openSnapshot(ts) {
     if (!ts) return
+    // Opening another restore point unmounts this one, and the restore is
+    // copying out of it. Say so rather than killing it halfway.
+    if (root.restoringFiles) {
+      root.lastError = "Your files are still being restored. Press Stop first, or let it finish."
+      return
+    }
     if (root.linked) { browse(ts); return }
     if (root.remoteActive) {
       // Clicking did nothing whatsoever before this.
@@ -537,13 +553,22 @@ Item {
     }
   }
 
-  function applyStatusText(raw) {
+  // Two things read the backup's status, and they are not equally informed.
+  // `oma-backups status` checks the pid behind the file and marks a reading
+  // "stale"; the file itself is watched as well, because that arrives the
+  // instant it changes, but it cannot tell a live backup from one that was
+  // killed before it could write "idle". So the file is allowed to keep a
+  // backup we already know about up to date, and nothing more: on its own it
+  // asks the CLI rather than declaring a backup running. Without that, one
+  // leftover status file pinned the panel to a backup that no longer existed.
+  function applyStatusText(raw, authoritative) {
     raw = String(raw || "").trim()
     if (!raw) return
     var j
     try { j = JSON.parse(raw) } catch (e) { return }
     if (!j || typeof j !== "object") return
     if (root.stopping) {
+      if (!authoritative) return
       var stillGoing = j.running === true && j.stale !== true && j.phase !== "idle"
       if (stillGoing && Date.now() / 1000 - root.stoppingSince < 60) {
         root.backupRunning = true
@@ -577,9 +602,16 @@ Item {
       if (root.launchedBackup && j.phase !== "error") root.backupRunning = true
       else if (typeof j.running === "boolean") root.backupRunning = false
     } else if (j.running === true) {
-      root.backupRunning = true
-      root.sawBackupStatus = true
-      root.backupError = ""
+      if (authoritative || root.launchedBackup || root.backupRunning || root.stopping) {
+        root.backupRunning = true
+        root.sawBackupStatus = true
+        root.backupError = ""
+      } else {
+        // A file we weren't expecting says a backup is running. Ask the one
+        // reading that knows leftover from live, and decide on its answer.
+        if (!statusProc.running) statusProc.running = true
+        return
+      }
     } else if (root.launchedBackup) {
       if (j.phase === "done" || j.phase === "idle") {
         root.backupRunning = false
@@ -614,7 +646,7 @@ Item {
     path: "/run/omarchy-backups.status"
     watchChanges: true
     printErrors: false
-    onLoaded: root.applyStatusText(text())
+    onLoaded: root.applyStatusText(text(), false)
     onFileChanged: reload()
   }
 
@@ -623,7 +655,7 @@ Item {
     command: [root.cli, "status"]
     stdout: StdioCollector {
       waitForEnd: true
-      onStreamFinished: root.applyStatusText(text)
+      onStreamFinished: root.applyStatusText(text, true)
     }
   }
 
@@ -705,12 +737,33 @@ Item {
       onStreamFinished: root._browseOut = String(text || "")
     }
     onExited: {
+      if (root.browseTs === "") return
+      if (root.browsePhase === "open") {
+        // Its state file lives exactly as long as the session does. If it has
+        // gone, the browse ended without us: stopped from a terminal, the Pi
+        // dropped, or it was killed. Saying "Browsing…" and keeping Backup
+        // now paused after that leaves the panel stuck with no way out.
+        if (root._browseOut === "") {
+          root.browseMissed += 1
+          // Two in a row, so a single unlucky read doesn't end a good session.
+          if (root.browseMissed >= 2 && !root.restoringFiles) {
+            root.forgetBrowse()
+            root.refresh()
+          }
+        } else {
+          root.browseMissed = 0
+        }
+        return
+      }
       if (root.browsePhase !== "opening" || root._browseOut === "") return
       var j
       try { j = JSON.parse(root._browseOut) } catch (e) { return }
       if (j.state === "ready" && j.path) {
-        browsePoll.stop()
         root.browsePhase = "open"
+        root.browseMissed = 0
+        // Keep the timer going, slower: from here it is watching for the
+        // session ending rather than waiting for it to start.
+        browsePoll.interval = 2000
         if (root.browseMode === "restore") {
           // Only what's missing: never overwrite anything changed since.
           restoreProc.command = ["rsync", "-a", "--ignore-existing", "--info=progress2",
@@ -737,10 +790,12 @@ Item {
       }
     }
     onExited: function (code) {
-      var wasRestoring = root.restoringFiles
+      // Stopped from the panel, or overtaken by a restore point the user has
+      // since opened: either way this copy no longer owns the browse session,
+      // and closing it here shut a window they were reading.
+      if (!root.restoringFiles) return
       root.restoringFiles = false
-      root.closeBrowse()
-      if (!wasRestoring) return
+      if (root.browseMode === "restore") root.closeBrowse()
       if (code === 0) {
         // Everything's back: the protected restore point can be thinned again.
         Quickshell.execDetached(["rm", "-f", root.home + "/.local/state/omarchy-backups/partial-restore.json"])
@@ -773,11 +828,13 @@ Item {
     interval: 500
     repeat: true
     onTriggered: {
-      root.browseWaited += 1
-      if (root.browseWaited > 120) {
-        root.lastError = "Opening that restore point timed out."
-        root.closeBrowse()
-        return
+      if (root.browsePhase === "opening") {
+        root.browseWaited += 1
+        if (root.browseWaited > 120) {
+          root.lastError = "Opening that restore point timed out."
+          root.closeBrowse()
+          return
+        }
       }
       if (browseReadProc.running) return
       root._browseOut = ""
