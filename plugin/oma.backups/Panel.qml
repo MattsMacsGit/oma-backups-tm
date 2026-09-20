@@ -24,6 +24,13 @@ Panel {
   // Backup now button for a one-off forced backup; automatic backups stay
   // off until the files are back or a forced backup settles it.
   readonly property bool blockedByRestore: svc.partialSnapshot !== ""
+  // A restore point open for browsing keeps the backup disk (or the Pi's)
+  // unlocked, and a backup would lock it again on its way out — from under the
+  // window still being read. Same device as blockedByRestore: the button goes
+  // quiet and says why. No Ctrl override here; pressing Done is the answer.
+  readonly property bool blockedByBrowse: svc.browseTs !== "" && !svc.restoringFiles
+  readonly property bool backupBlocked: blockedByRestore || blockedByBrowse
+  readonly property bool backupGreyed: (blockedByRestore && !ctrlHeld) || blockedByBrowse
   property bool ctrlHeld: false
   property bool forceAsked: false
   property bool forceConfirmed: false
@@ -76,6 +83,7 @@ Panel {
   property real spin: 0
 
   onOpenedChanged: {
+    svc.panelOpen = opened
     if (opened) {
       svc.refresh()
       Qt.callLater(function () { keyCatcher.forceActiveFocus() })
@@ -186,7 +194,7 @@ Panel {
       onActivateRequested: {}
       onTextKey: function (t) {
         if (t === "b" || t === "B") {
-          if (svc.hasCapsule && !svc.backupRunning && !root.blockedByRestore) svc.startBackup()
+          if (svc.hasCapsule && !svc.backupRunning && !root.backupBlocked) svc.startBackup()
         } else if (t === "s" || t === "S") {
           if (svc.backupRunning) svc.stopBackup()
         } else if (t === "r" || t === "R") {
@@ -226,7 +234,7 @@ Panel {
                 title: "OmaBackups"
                 meta: svc.backupRunning
                   ? svc.progressText
-                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.1.0") : "1.1.0  ·  no backup disk yet")
+                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : ("Ready  ·  " + svc.version)) : (svc.version + "  ·  no backup disk yet"))
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -361,13 +369,14 @@ Panel {
                 id: backupBtn
                 width: parent.width
                 text: svc.backupIncomplete ? "Resume backup" : "Backup now"
-                // Greyed out while this system is missing its files, and lit
-                // again for as long as Ctrl is held.
-                foreground: root.blockedByRestore && !root.ctrlHeld ? root.dim : Color.background
-                background: root.blockedByRestore && !root.ctrlHeld ? "transparent" : Color.accent
-                bordered: root.blockedByRestore && !root.ctrlHeld
+                // Greyed out while this system is missing its files (lit again
+                // for as long as Ctrl is held), and while a restore point is
+                // open for browsing (no override — press Done).
+                foreground: root.backupGreyed ? root.dim : Color.background
+                background: root.backupGreyed ? "transparent" : Color.accent
+                bordered: root.backupGreyed
                 accent: Color.accent
-                enabled: !root.blockedByRestore
+                enabled: !root.backupBlocked
                 fontFamily: root.fontFamily
                 onClicked: svc.startBackup()
               }
@@ -376,8 +385,8 @@ Panel {
               // click time and only ever opens the warning below.
               MouseArea {
                 anchors.fill: parent
-                visible: root.blockedByRestore
-                enabled: root.blockedByRestore
+                visible: root.blockedByRestore && !root.blockedByBrowse
+                enabled: root.blockedByRestore && !root.blockedByBrowse
                 hoverEnabled: true
                 acceptedButtons: Qt.LeftButton
                 cursorShape: root.ctrlHeld ? Qt.PointingHandCursor : Qt.ArrowCursor
@@ -392,7 +401,17 @@ Panel {
               }
             }
             Text {
-              visible: root.blockedByRestore && !root.forceAsked
+              visible: root.blockedByBrowse
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Paused while a restore point is open. Press Done above to finish."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Text {
+              visible: root.blockedByRestore && !root.forceAsked && !root.blockedByBrowse
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: "Paused until your files are back. Hold Ctrl to back up anyway."
@@ -402,7 +421,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
             Column {
-              visible: root.blockedByRestore && root.forceAsked
+              visible: root.blockedByRestore && root.forceAsked && !root.blockedByBrowse
               width: parent.width
               spacing: Style.space(8)
               Text {
@@ -719,7 +738,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "1.1.0  ·  skip folders, disks, Pi, erase disk"
+              meta: svc.version + "  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

@@ -39,6 +39,12 @@ Item {
   property bool wipeConfirmed: false
   property bool skipLoaded: false
   property bool backupIncomplete: false
+  // Set by the Panel: the disk scan only needs to run while someone is looking.
+  property bool panelOpen: false
+
+  // Read from the VERSION file rather than written out by hand in the Panel:
+  // it was the pair of copies most easily forgotten at release time.
+  property string version: ""
 
   readonly property string home: Quickshell.env("HOME") || ""
   readonly property string cli: home + "/.local/bin/oma-backups"
@@ -235,13 +241,26 @@ Item {
     return false
   }
 
+  function shQuote(argv) {
+    return argv.map(function (a) {
+      return "'" + String(a).replace(/'/g, "'\\''") + "'"
+    }).join(" ")
+  }
+
   function privileged(args) {
     // Always a visible terminal: sudo/pkexec's own auth prompt (password
     // or fingerprint) happens before our code even runs, so a hidden
     // pkexec route can't show progress for it either way — the terminal
     // is the one place that prompt is actually visible.
-    var cmd = ["omarchy-launch-floating-terminal-with-presentation", "sudo", root.cli].concat(args)
-    Quickshell.execDetached(cmd)
+    //
+    // Wrapped in sh so a missing terminal helper says so. Detached, this used
+    // to fail invisibly: the button clicked, nothing happened, no explanation.
+    var inner = root.shQuote(["sudo", root.cli].concat(args))
+    var term = "omarchy-launch-floating-terminal-with-presentation"
+    Quickshell.execDetached(["sh", "-c",
+      "if command -v " + term + " >/dev/null 2>&1; then exec " + term + " " + inner + "; fi; "
+      + "notify-send -a OmaBackups 'OmaBackups needs a terminal window' "
+      + "\"Couldn't open one. Run this in a terminal instead: " + inner + "\""])
   }
 
   function refresh() {
@@ -252,7 +271,9 @@ Item {
       detectProc.running = true
     }
     if (!statusProc.running) statusProc.running = true
-    refreshSnapshots()
+    // No refreshSnapshots() here: `detect` rewrites the restore-point cache as
+    // part of its own scan, and snapFile below watches that file — so this was
+    // a second python process every two seconds for an answer already coming.
     // Also catches pairing/unpairing: the file may not exist to be watched.
     remoteFile.reload()
     scheduleFile.reload()
@@ -403,7 +424,12 @@ Item {
   function openSnapshot(ts) {
     if (!ts) return
     if (root.linked) { browse(ts); return }
-    if (root.remoteActive) return
+    if (root.remoteActive) {
+      // Clicking did nothing whatsoever before this.
+      root.lastError = "To open a restore point kept on " + root.remoteHost
+        + ", press \"Stop asking for my password\" above first."
+      return
+    }
     Quickshell.execDetached([root.cli, "open", ts])
   }
 
@@ -433,7 +459,14 @@ Item {
       onStreamFinished: root._pickOut = String(text || "").trim()
     }
     onExited: function (code) {
-      if (code === 0 && root._pickOut !== "") root.addSkip(root._pickOut)
+      if (code === 0 && root._pickOut !== "") {
+        root.addSkip(root._pickOut)
+        return
+      }
+      // 1 is "cancelled", which needs no comment. 2 is the picker not being
+      // installed — the button did nothing at all and said nothing either.
+      if (code === 2)
+        root.lastError = "Couldn't open the file chooser. Install it with:  sudo pacman -S python-gobject gtk3"
     }
   }
 
@@ -546,9 +579,7 @@ Item {
     root.progressLabel = j.label ? String(j.label) : ""
     root.progressBusy = j.busy === true
     root.progressDetail = j.detail ? String(j.detail) : ""
-    var rp = parseInt(j.rsync_percent, 10)
-    if (!isNaN(rp)) root.statusLine = Model.phaseLabel(j.phase) + "  " + rp + "%"
-    else if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
+    if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
   }
 
   FileView {
@@ -747,16 +778,32 @@ Item {
     onLoadFailed: root.linked = false
   }
 
+  FileView {
+    id: versionFile
+    path: root.shareRoot + "/VERSION"
+    printErrors: false
+    onLoaded: root.version = String(text()).trim()
+  }
+
+  // Idle cost matters: the bar runs from login to logout, panel open or not.
+  // Both of these used to run flat out the whole time — a status call twice a
+  // second and a full disk scan every two seconds, forever, for about 9% of a
+  // core. Everything that changes on its own (the status file, the
+  // restore-point list, the Pi pairing, the schedule, the timer unit) is
+  // watched by a FileView below and arrives the moment it changes, so polling
+  // is only needed for the two things no file can tell us about: how far a
+  // running backup has got, and a disk being plugged in while you are looking
+  // at the list.
   Timer {
     interval: 500
-    running: true
+    running: root.backupRunning || root.launchedBackup || root.stopping || root.restoringFiles
     repeat: true
     triggeredOnStart: true
     onTriggered: if (!statusProc.running) statusProc.running = true
   }
   Timer {
     interval: 2000
-    running: true
+    running: root.panelOpen || root.backupRunning || root.launchedBackup
     repeat: true
     triggeredOnStart: true
     onTriggered: root.refresh()
