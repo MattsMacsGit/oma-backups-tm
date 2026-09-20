@@ -18,8 +18,8 @@ def dest_home() -> Path | None:
     media = Path("/run/media")
     if media.is_dir():
         for userdir in media.iterdir():
-            candidates.append(userdir / "OMARCHY-TM" / "home" / "current")
-            candidates.append(userdir / "OMARCHY-BACKUPS" / "home" / "current")
+            for name in ("OmaBackups", "OMARCHY-TM", "OMARCHY-BACKUPS"):
+                candidates.append(userdir / name / "home" / "current")
     for p in candidates:
         if p.is_dir():
             return p
@@ -75,7 +75,7 @@ def main() -> int:
         rc = 1
 
     if dest is None:
-        print("dest not mounted (checked /run/omarchy-backups and /run/media/*/OMARCHY-TM)")
+        print("dest not mounted (checked /run/omarchy-backups and /run/media/*/OmaBackups)")
         return rc
 
     print(f"dest: {dest}")

@@ -14,9 +14,9 @@ usage() {
 Usage: oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--force] [--skip-live] [--iso PATH]
 
 GPT:
-  1. ~1G FAT32   OMARCHY-EFI    UEFI ESP (Limine + Omarchy ISO kernel)
-  2. ~16G ext4   OMARCHY-LIVE   real Omarchy installer ISO + restore scripts
-  3. rest LUKS2→btrfs OMARCHY-TM  backups
+  1. ~1G FAT32   OMABOOT        UEFI ESP (Limine + Omarchy ISO kernel)
+  2. ~16G ext4   OmaRescue      real Omarchy installer ISO + restore scripts
+  3. rest LUKS2→btrfs OmaBackups  backups
 
 Rescue is the real Omarchy installer environment (not a pacstrap of this
 machine). Firmware boots Limine → Omarchy live → restore wizard. Needs an

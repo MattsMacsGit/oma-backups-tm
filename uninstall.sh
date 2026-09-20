@@ -48,6 +48,10 @@ if compgen -G "/etc/systemd/system/oma-backups-*" >/dev/null || [[ -d /usr/local
   sudo systemctl stop 'oma-backups-browse@*.service' >/dev/null 2>&1 || true
   sudo rm -f /etc/systemd/system/oma-backups-* /etc/polkit-1/rules.d/50-oma-backups.rules &&
     sudo systemctl daemon-reload || true
+  if [[ -f /etc/udev/rules.d/99-oma-backups.rules ]]; then
+    sudo rm -f /etc/udev/rules.d/99-oma-backups.rules &&
+      sudo udevadm control --reload >/dev/null 2>&1 || true
+  fi
   sudo rm -rf /usr/local/lib/oma-backups ||
     echo "  could not remove it — remove yourself: sudo rm -rf /usr/local/lib/oma-backups"
 fi

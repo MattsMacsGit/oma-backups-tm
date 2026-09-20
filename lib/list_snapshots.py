@@ -2,7 +2,7 @@
 """List restore points that actually exist on the backup disk.
 
 Finds the disk at /run/omarchy-backups or a desktop automount
-(/run/media/$USER/OMARCHY-TM). machine.json is metadata only.
+(/run/media/$USER/OmaBackups). machine.json is metadata only.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ def find_mount() -> Path | None:
         except OSError:
             users = []
         for userdir in users:
-            for name in ("OMARCHY-TM", "OMARCHY-BACKUPS"):
+            for name in ("OmaBackups", "OMARCHY-TM", "OMARCHY-BACKUPS"):
                 candidates.append(userdir / name)
     seen: set[str] = set()
     for p in candidates:

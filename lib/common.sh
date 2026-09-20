@@ -487,8 +487,27 @@ current_capsule_uuid() {
   jq -r '.luks_uuid // empty' "$OMA_CURRENT_CAPSULE" 2>/dev/null || true
 }
 
-# LUKS partition of a backup disk (one that also has OMARCHY-EFI /
-# OMARCHY-LIVE): the current one if it's plugged in, else the first found.
+# Disk labels. New disks are made with the first name in each list; the older
+# names are still recognised so disks built before the 1.1 rename keep working
+# untouched. Mirrored in lib/detect.py and lib/restore_tui.py, which run in the
+# rescue environment without this file.
+OMA_LABELS_BACKUPS=(OmaBackups OMARCHY-TM OMARCHY-BACKUPS)
+OMA_LABELS_LIVE=(OmaRescue OMARCHY-LIVE)
+OMA_LABELS_EFI=(OMABOOT OMARCHY-EFI)
+OMA_LABELS_NET_LIVE=(OmaNetRescue OMANET-LIVE)
+OMA_LABELS_NET_EFI=(OMANETBOOT OMANET-EFI)
+OMA_LABELS_NET_KEYS=(OmaNetKeys OMANET-KEYS)
+
+# An awk match expression for a set of labels, e.g. $1=="a" || $1=="b"
+oma_label_match() {
+  local field=$1 lab out=""
+  shift
+  for lab in "$@"; do out+="${out:+ || }$field==\"$lab\""; done
+  printf '%s' "$out"
+}
+
+# LUKS partition of a backup disk (one that also has our EFI / rescue
+# partitions): the current one if it's plugged in, else the first found.
 # On rescue that disk IS the live root — still the backup we need to unlock.
 capsule_luks_partition() {
   local want disk part first=""
@@ -501,7 +520,9 @@ capsule_luks_partition() {
       return 0
     fi
     [[ -n $first ]] || first=$part
-  done < <(lsblk -nr -o PKNAME,LABEL 2>/dev/null | awk '$2=="OMARCHY-EFI" || $2=="OMARCHY-LIVE" {print $1}' | awk 'NF && !seen[$0]++')
+  done < <(lsblk -nr -o PKNAME,LABEL 2>/dev/null |
+    awk "$(oma_label_match '$2' "${OMA_LABELS_EFI[@]}" "${OMA_LABELS_LIVE[@]}") {print \$1}" |
+    awk 'NF && !seen[$0]++')
   [[ -n $first ]] || return 1
   printf '%s\n' "$first"
 }

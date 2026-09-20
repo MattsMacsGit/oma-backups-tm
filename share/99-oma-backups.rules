@@ -1,0 +1,50 @@
+# OmaBackups: keep our own partitions out of the desktop's way.
+#
+# The tool mounts everything it needs itself, at its own mount points, so
+# there is nothing for the file manager to do when one of these disks is
+# plugged in — and a stack of pop-up windows is just clutter.
+#
+#   UDISKS_AUTO=0    don't mount it on its own (still there if you go looking)
+#   UDISKS_IGNORE=1  hide it completely (plumbing nobody should be opening)
+#
+# Matched on the filesystem label and on the GPT partition name, because the
+# backups partition is LUKS: until it's unlocked, the partition name is the
+# only thing that says what it is.
+#
+# Installed by `oma-backups link`, removed by uninstall.sh.
+
+ACTION=="remove", GOTO="oma_backups_end"
+SUBSYSTEM!="block", GOTO="oma_backups_end"
+
+# The disks you might actually want to open by hand.
+ENV{ID_FS_LABEL}=="OmaBackups", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OmaRescue", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OmaNetRescue", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OmaBackups", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OmaRescue", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OmaNetRescue", ENV{UDISKS_AUTO}="0"
+
+# Boot and key partitions: nothing in here is for hand use.
+ENV{ID_FS_LABEL}=="OMABOOT", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="OMANETBOOT", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="OmaNetKeys", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OMABOOT", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OMANETBOOT", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OmaNetKeys", ENV{UDISKS_IGNORE}="1"
+
+# Disks built before the 1.1 rename.
+ENV{ID_FS_LABEL}=="OMARCHY-TM", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OMARCHY-BACKUPS", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OMARCHY-LIVE", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OMANET-LIVE", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OMARCHY-TM", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OMARCHY-LIVE", ENV{UDISKS_AUTO}="0"
+ENV{ID_PART_ENTRY_NAME}=="OMANET-LIVE", ENV{UDISKS_AUTO}="0"
+ENV{ID_FS_LABEL}=="OMARCHY-EFI", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="OMANET-EFI", ENV{UDISKS_IGNORE}="1"
+ENV{ID_FS_LABEL}=="OMANET-KEYS", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OMARCHY-EFI", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OMANET-EFI", ENV{UDISKS_IGNORE}="1"
+ENV{ID_PART_ENTRY_NAME}=="OMANET-KEYS", ENV{UDISKS_IGNORE}="1"
+
+LABEL="oma_backups_end"

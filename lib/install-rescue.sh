@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Populate or refresh the rescue OS on OMARCHY-LIVE + OMARCHY-EFI.
+# Populate or refresh the rescue OS on the rescue + boot partitions.
 #
 # Rescue is the real Omarchy installer ISO — same archiso layout as a
 # plain Arch ISO (arch/x86_64/airootfs.sfs etc.), so extraction/patching
 # work the same way, but it already ships gum, binutils, btrfs-progs,
 # cryptsetup, jq, rsync and everything else our tooling needs, and
 # restoring a machine boots into something that actually looks like
-# Omarchy. Our scripts live next to the ISO files on OMARCHY-LIVE and
+# Omarchy. Our scripts live next to the ISO files on the rescue partition and
 # start via archiso's script= cmdline.
 # Sourced or executed. Expects OMARCHY_TM_ROOT. Root required.
 set -euo pipefail
@@ -193,7 +193,7 @@ install_rescue_files() {
 }
 
 # Official live-CD pattern: tiny launcher inside the squashfs. After login
-# it mounts OMARCHY-LIVE by label and starts the wizard. Does not need
+# it mounts the rescue partition by label and starts the wizard. Does not need
 # /run/archiso/bootmnt to still be there (that is what failed last boot).
 patch_airootfs() {
   local live=$1
@@ -269,7 +269,7 @@ install_rescue_kernel() {
 
 # LABEL/TITLE default to the backup disk's; a network rescue stick passes its own.
 install_rescue_limine() {
-  local disk=$1 efi=$2 live_label=${3:-OMARCHY-LIVE} title=${4:-Rescue Disk}
+  local disk=$1 efi=$2 live_label=${3:-OmaRescue} title=${4:-Rescue Disk}
   rescue_umask
   # Lines, not a single string with an embedded leading newline — the old
   # "\n    module_path: ..." form always left a stray blank line in the

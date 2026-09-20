@@ -24,8 +24,13 @@ CLI = ROOT / "omarchy-backups"
 MNT = Path("/run/omarchy-backups")
 
 # OMANET-*: a network rescue stick (see rescue-stick.sh).
-LIVE_LABELS = {"OMARCHY-EFI", "OMARCHY-LIVE", "OMANET-EFI", "OMANET-LIVE"}
-CAPSULE_LABELS = {"OMARCHY-TM", "OMARCHY-BACKUPS", "OMARCHY-EFI", "OMARCHY-LIVE"}
+# Compared uppercased (see labels_of). The 1.1 names sit alongside the older
+# ones so a disk built before the rename still identifies itself.
+LIVE_LABELS = {"OMABOOT", "OMARESCUE", "OMANETBOOT", "OMANETRESCUE",
+               "OMARCHY-EFI", "OMARCHY-LIVE", "OMANET-EFI", "OMANET-LIVE"}
+BACKUP_LABELS = {"OMABACKUPS", "OMARCHY-TM", "OMARCHY-BACKUPS"}
+CAPSULE_LABELS = BACKUP_LABELS | {"OMABOOT", "OMARESCUE",
+                                  "OMARCHY-EFI", "OMARCHY-LIVE"}
 INSTALLER_LABELS = {"VENTOY", "VTOYEFI", "CLONEZILLA", "CLONEZILLA-LIVE"}
 
 # A network rescue stick restores from the paired Pi (rescue-stick.sh made it).
@@ -33,7 +38,8 @@ NET = (ROOT / "network-rescue.json").is_file()
 # The stick's keys partition carries the name twice: as a LUKS2 label and as
 # the GPT partition name. Boot with only one of them visible and the whole
 # stick is useless, so look for both.
-NET_KEYS_LABEL = "OMANET-KEYS"
+# Looked up as a path under /dev/disk/by-label, so case matters here.
+NET_KEYS_LABELS = ("OmaNetKeys", "OMANET-KEYS")
 NET_KEYS_MAPPER = "oma-netkeys"
 REMOTE_DIR = Path("/etc/omarchy-backups/remote")
 REMOTE_CONF = Path("/etc/omarchy-backups/remote.json")
@@ -233,7 +239,7 @@ def classify_disk(path: str, n: dict, live: str | None) -> dict:
         same_live = bool(live and os.path.realpath(path) == os.path.realpath(live))
     except OSError:
         same_live = False
-    if labs & LIVE_LABELS or labs & {"OMARCHY-TM", "OMARCHY-BACKUPS"}:
+    if labs & LIVE_LABELS or labs & BACKUP_LABELS:
         kind = "backup-usb"
     elif same_live:
         kind = "live-usb"
@@ -326,7 +332,7 @@ def unlock_backup() -> bool:
         gum_style(
             "--foreground",
             "8",
-            "On this rescue USB the backups are the LUKS partition next to OMARCHY-LIVE.",
+            "On this rescue USB the backups are the LUKS partition next to the rescue one.",
         )
         out("Try: oma-backups mount")
         return False
@@ -359,9 +365,10 @@ def net_keys_dev() -> Path | None:
     """The stick's keys partition, by LUKS label or by GPT partition name."""
     for _ in range(2):
         for base in ("by-label", "by-partlabel"):
-            dev = Path("/dev/disk", base, NET_KEYS_LABEL)
-            if dev.exists():
-                return dev
+            for label in NET_KEYS_LABELS:
+                dev = Path("/dev/disk", base, label)
+                if dev.exists():
+                    return dev
         settle_block_devices()
     return None
 

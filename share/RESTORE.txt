@@ -15,12 +15,12 @@ installer environment and starts a text wizard:
 That wipes the destination permanently and copies the snapshot so the
 machine unlocks LUKS and logs in as the same user.
 
-The ESP (OMARCHY-EFI) and live partition (OMARCHY-LIVE) are not encrypted.
-Backups live on LUKS (OMARCHY-TM / OMARCHY-BACKUPS).
+The ESP (OMABOOT) and rescue partition (OmaRescue) are not encrypted.
+Backups live on LUKS (OmaBackups; older disks say OMARCHY-TM).
 
 If the wizard is not running:
 
-  mkdir -p /run/oma-usb && mount -L OMARCHY-LIVE /run/oma-usb
+  mkdir -p /run/oma-usb && mount -L OmaRescue /run/oma-usb
   bash /run/oma-usb/oma-backups/share/rescue-run.sh
 
   oma-backups mount

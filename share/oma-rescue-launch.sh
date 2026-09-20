@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Lives INSIDE the Arch live squashfs (always present after login).
-# Finds OmaBackups on OMARCHY-LIVE / OMARCHY-EFI (or a network rescue stick's
-# OMANET-*) by label — does not
+# Finds OmaBackups on OmaRescue / OMABOOT (or a network rescue stick's
+# OmaNetRescue) by label, new names and old — does not
 # depend on /run/archiso/bootmnt still being mounted.
 set -euo pipefail
 
@@ -21,7 +21,8 @@ find_root() {
       return 0
     fi
   done
-  for dev in /dev/disk/by-label/{OMARCHY,OMANET}-{LIVE,EFI}; do
+  for dev in /dev/disk/by-label/{OmaRescue,OmaNetRescue,OMABOOT,OMANETBOOT} \
+    /dev/disk/by-label/{OMARCHY,OMANET}-{LIVE,EFI}; do
     [[ -e $dev ]] || continue
     mp="$(lsblk -n -o MOUNTPOINT "$dev" 2>/dev/null | awk 'NF{print; exit}')"
     if [[ -n $mp && -e $mp/oma-backups/share/rescue-run.sh ]]; then
@@ -30,7 +31,8 @@ find_root() {
     fi
   done
   mkdir -p /run/oma-usb
-  for dev in /dev/disk/by-label/{OMARCHY,OMANET}-{LIVE,EFI}; do
+  for dev in /dev/disk/by-label/{OmaRescue,OmaNetRescue,OMABOOT,OMANETBOOT} \
+    /dev/disk/by-label/{OMARCHY,OMANET}-{LIVE,EFI}; do
     [[ -e $dev ]] || continue
     umount /run/oma-usb 2>/dev/null || true
     if mount -o ro "$dev" /run/oma-usb 2>/dev/null; then
@@ -50,10 +52,10 @@ sleep 1
 ROOT="$(find_root || true)"
 if [[ -z ${ROOT:-} ]]; then
   echo
-  echo "  Could not find OmaBackups on OMARCHY-LIVE / OMARCHY-EFI."
+  echo "  Could not find OmaBackups on the rescue partition."
   echo "  You are on the Omarchy live prompt (network: iwctl)."
   echo "  Try:"
-  echo "    mkdir -p /run/oma-usb && mount -L OMARCHY-LIVE /run/oma-usb"
+  echo "    mkdir -p /run/oma-usb && mount -L OmaRescue /run/oma-usb"
   echo "    bash /run/oma-usb/oma-backups/share/rescue-run.sh"
   echo
   exit 1

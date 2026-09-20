@@ -23,6 +23,7 @@ source "$OMARCHY_TM_ROOT/lib/remote.sh"
 
 UNIT_DIR=/etc/systemd/system
 POLKIT_RULE=/etc/polkit-1/rules.d/50-oma-backups.rules
+UDEV_RULE=/etc/udev/rules.d/99-oma-backups.rules
 OMA_LINKED=/etc/omarchy-backups/linked.json
 
 REFRESH=0 QUIET=0
@@ -116,6 +117,18 @@ EOF
   systemctl enable --now oma-backups-scheduled.timer >/dev/null 2>&1 || true
 }
 
+# Stops the desktop auto-mounting our own partitions and popping a window for
+# each one. The tool mounts what it needs itself.
+write_udev_rule() {
+  local src=$OMARCHY_TM_ROOT/share/99-oma-backups.rules
+  [[ -f $src ]] || return 0
+  install -d -m 755 "$(dirname "$UDEV_RULE")"
+  install -m 644 "$src" "$UDEV_RULE"
+  udevadm control --reload >/dev/null 2>&1 || true
+  # Existing disks keep the old flags until they're re-probed.
+  udevadm trigger --subsystem-match=block >/dev/null 2>&1 || true
+}
+
 write_polkit_rule() {
   local user=$1
   install -d -m 750 -g polkitd "$(dirname "$POLKIT_RULE")" 2>/dev/null || true
@@ -155,6 +168,7 @@ main() {
     refresh_root_copy
     write_units "$user"
     write_polkit_rule "$user"
+    write_udev_rule
     [[ $QUIET == 1 ]] || echo "Updated the copy automatic and password-free backups run from."
     return 0
   fi
@@ -173,6 +187,7 @@ main() {
   write_units "$user"
   step "Letting $user run them without a password"
   write_polkit_rule "$user"
+  write_udev_rule
   jq -n --arg u "$user" --arg at "$(ts)" '{user: $u, linked_at: $at}' >"$OMA_LINKED.tmp"
   chmod 644 "$OMA_LINKED.tmp"
   mv "$OMA_LINKED.tmp" "$OMA_LINKED"

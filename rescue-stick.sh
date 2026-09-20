@@ -3,9 +3,9 @@
 # restore wizard as the backup disk, but restores from the paired Pi.
 #
 # GPT:
-#   1. 512M FAT32  OMANET-EFI    Limine + Omarchy ISO kernel
-#   2. rest ext4   OMANET-LIVE   Omarchy ISO + restore scripts (+ Tailscale)
-#   3. 64M LUKS2   OMANET-KEYS   the Pi's address + key and this stick's SSH key
+#   1. 512M FAT32  OMANETBOOT    Limine + Omarchy ISO kernel
+#   2. rest ext4   OmaNetRescue  Omarchy ISO + restore scripts (+ Tailscale)
+#   3. 64M LUKS2   OmaNetKeys    the Pi's address + key and this stick's SSH key
 #
 # The keys partition uses the backup disk's password, so one password at boot
 # opens the stick and (sent to the Pi) the backup disk. The stick's key can
@@ -25,9 +25,9 @@ source "$OMARCHY_TM_ROOT/lib/install-rescue.sh"
 # The panel's progress bar is for backups; this has its own narration.
 progress() { :; }
 
-EFI_LABEL=OMANET-EFI
-LIVE_LABEL=OMANET-LIVE
-KEYS_LABEL=OMANET-KEYS
+EFI_LABEL=OMANETBOOT
+LIVE_LABEL=OmaNetRescue
+KEYS_LABEL=OmaNetKeys
 KEYS_MAPPER=oma-netkeys-new
 HOST_ALIAS=oma-pi
 MIN_GATE=5

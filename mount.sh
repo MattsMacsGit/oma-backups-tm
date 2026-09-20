@@ -41,7 +41,7 @@ TM_LABEL="$(cfg '.layout.tm_label')"
 
 find_labeled_mount() {
   local lab mp
-  for lab in "$TM_LABEL" OMARCHY-TM OMARCHY-BACKUPS; do
+  for lab in "$TM_LABEL" "${OMA_LABELS_BACKUPS[@]}"; do
     mp="$(lsblk -n -o LABEL,MOUNTPOINT | awk -v l="$lab" '$1==l && $2!=""{print $2; exit}')"
     if [[ -n $mp && -d $mp ]]; then
       printf '%s\n' "$mp"

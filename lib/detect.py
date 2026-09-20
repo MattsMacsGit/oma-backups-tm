@@ -25,6 +25,13 @@ PROTECTED_LABELS = {
 }
 
 INSTALLER_LABELS = PROTECTED_LABELS
+
+# Our own disk labels, compared uppercased (see labels_on_disk). New disks get
+# the 1.1 names; the older ones stay recognised so disks built before the
+# rename keep working. Mirrored in lib/common.sh and lib/restore_tui.py.
+EFI_LABELS = {"OMABOOT", "OMARCHY-EFI", "OMARCHY-ISO"}
+LIVE_LABELS = {"OMARESCUE", "OMARCHY-LIVE"}
+BACKUP_LABELS = {"OMABACKUPS", "OMARCHY-TM", "OMARCHY-BACKUPS"}
 USB_TRANS = {"usb", "mmc", "sdio"}
 
 
@@ -234,13 +241,13 @@ def capsule_layout(disk: dict) -> dict | None:
         fstype = ch.get("fstype") or ""
         # Exact labels only. A restored Omarchy ESP is named "OMARCHY" + LUKS
         # root — that is the computer, not a backup USB.
-        if label in {"OMARCHY-EFI", "OMARCHY-ISO"}:
+        if label in EFI_LABELS:
             efi = ch
-        if label == "OMARCHY-LIVE":
+        if label in LIVE_LABELS:
             live = ch
         if fstype == "crypto_LUKS":
             tm = ch
-        elif label in {"OMARCHY-TM", "OMARCHY-BACKUPS"}:
+        elif label in BACKUP_LABELS:
             tm = ch
     if tm and (efi or live):
         return {

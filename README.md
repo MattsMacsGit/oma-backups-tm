@@ -338,9 +338,21 @@ oma-backups restore-to-disk /dev/TARGET --snapshot TS --dry-run
 
 | Partition | Size | Filesystem | Role |
 |---|---|---|---|
-| `OMARCHY-EFI` | 1G | FAT32 | Limine + Omarchy ISO kernel |
-| `OMARCHY-LIVE` | 16G | ext4 | Real Omarchy ISO (`arch/`) + restore scripts |
-| LUKS → `OMARCHY-TM` | rest | btrfs zstd | `os/`, `home/`, `esp/`, `meta/` |
+| `OMABOOT` | 1G | FAT32 | Limine + Omarchy ISO kernel |
+| `OmaRescue` | 16G | ext4 | Real Omarchy ISO (`arch/`) + restore scripts |
+| LUKS → `OmaBackups` | rest | btrfs zstd | `os/`, `home/`, `esp/`, `meta/` |
+
+The network rescue stick is `OMANETBOOT` / `OmaNetRescue` / LUKS →
+`OmaNetKeys`.
+
+Disks made before v1.1 are labelled `OMARCHY-EFI` / `OMARCHY-LIVE` /
+`OMARCHY-TM` (and `OMANET-*`). Both sets are recognised, so an older disk
+keeps working exactly as it did — nothing is relabelled behind your back.
+
+None of these partitions are mounted by the desktop when you plug them in: a
+udev rule installed by `oma-backups link` turns off auto-mounting, so no
+windows pop up. The tool mounts what it needs itself. The boot and key
+partitions are hidden from the file manager entirely.
 
 Disk names (`sda` / `nvme0n1` / …) shuffle. Identify by **label** and `lsblk TRAN`.
 
