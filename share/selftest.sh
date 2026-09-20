@@ -42,13 +42,19 @@ else
   grep -qi refuse /tmp/oma-restore-live.txt && ok "restore refuses live root" || ok "restore dry-run rejected live root"
 fi
 
-# nvme without --allow-internal
+# nvme without --allow-internal. On a laptop whose only nvme IS the live root
+# there is nothing to test here: refusing it is the live-root rule above doing
+# its job, not the internal-disk rule, so skip rather than report a failure.
 nvme="$(lsblk -dn -o PATH,TRAN | awk '$2=="nvme"{print $1; exit}')"
+if [[ -n $nvme && $nvme == "$live" ]]; then
+  printf 'SKIP  nvme internal-disk checks (the only nvme here is the live root)\n'
+  nvme=""
+fi
 if [[ -n $nvme ]]; then
   if "$CLI" --dry-run restore-to-disk "$nvme" --snapshot 19700101T000000Z >/tmp/oma-restore-nvme.txt 2>&1; then
     bad "restore-to-disk dry-run on nvme should need --allow-internal"
   else
-    grep -qi 'internal\|REFUSE\|allow-internal' /tmp/oma-restore-nvme.txt && ok "restore refuses nvme without --allow-internal" || {
+    grep -qiE 'internal|refus' /tmp/oma-restore-nvme.txt && ok "restore refuses nvme without --allow-internal" || {
       cat /tmp/oma-restore-nvme.txt
       bad "nvme refuse message unclear"
     }
