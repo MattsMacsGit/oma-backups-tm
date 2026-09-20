@@ -56,6 +56,19 @@ services, the polkit rule and the root-owned copy in `/usr/local/lib/oma-backups
 Then offers to delete the cloned repo folder too. Never touches any backup USB
 disk.
 
+### Removing it from the Pi
+
+If you paired a Raspberry Pi, clean that up separately — run this **on the Pi**:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --uninstall
+```
+
+It locks the backup disk, deletes the `omabackups` account and its home, and
+removes the gatekeeper, its config and its sudoers rule. `btrfs-progs` and
+`cryptsetup` are left installed. The backup disk itself is untouched — it
+keeps its restore points, and you can plug it back into a laptop and use it.
+
 Do **not** run `omarchy refresh shell` — that resets the bar and drops
 third-party plugins. If the icon is missing: `omarchy plugin enable oma.backups`
 then `omarchy-restart-shell` (restart is OK; refresh is not).
