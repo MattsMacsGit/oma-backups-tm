@@ -10,39 +10,66 @@ source "$OMARCHY_TM_ROOT/lib/common.sh"
 OMA_VERSION="$(cat "$OMARCHY_TM_ROOT/VERSION" 2>/dev/null || echo unknown)"
 
 usage() {
-  echo "oma-backups $OMA_VERSION — encrypted Omarchy system+home backups"
-  cat <<'EOF'
-Destructive: format and restore wipe disks. Keep another backup until proven.
+  cat <<EOF
+oma-backups $OMA_VERSION — encrypted backups of this Omarchy system and home
 
-  oma-backups detect [--json]
-  oma-backups disks [--json] [--all]
-  oma-backups init-config
-  oma-backups compile-excludes
-  oma-backups format-disk /dev/sdX [--dry-run] [--yes] [--allow-internal]
-  oma-backups mount [--disk /dev/sdX]
-  oma-backups umount
-  oma-backups backup [--dry-run] [--yes] [--home-only]
-  oma-backups stop
-  oma-backups prune [--dry-run]
-  oma-backups schedule enable | disable | status | run
-  oma-backups snapshots
-  oma-backups files SNAPSHOT [PATH]
-  oma-backups copy SNAPSHOT SRC DEST
-  oma-backups restore-to-disk /dev/TARGET --snapshot TS [--dry-run] [--allow-internal]
-  oma-backups restore-tui
-  oma-backups refresh-rescue [--boot-only]
-  oma-backups rescue-stick /dev/sdX [--iso PATH]
-  oma-backups doctor
-  oma-backups first-run /dev/sdX
-  oma-backups remote pair HOST | status | forget
-  oma-backups link [--refresh]
-  oma-backups browse SNAPSHOT
-  oma-backups status
-  oma-backups root
-  oma-backups version
+Destructive: setting up a disk and restoring both wipe a disk. Keep another
+copy of anything you cannot lose until you have booted a restored disk.
 
-USB disks only by default. Internal disks need --all / --allow-internal.
-Live root disk is always refused for format/restore.
+Every day
+  backup [--yes] [--home-only] [--force-after-restore]
+                          back up now
+  stop                    stop the backup that is running
+  status                  what it is doing, as JSON
+  snapshots [--json]      the restore points on the backup disk
+  open TIMESTAMP          open one restore point read-only in Files
+  browse TIMESTAMP        the same, held open until stopped (the plugin uses this)
+  prune [--dry-run]       thin out old restore points now
+  schedule enable | disable | status | run
+                          automatic backups
+
+Setting up
+  disks [--all] [--json]  disks that could be used
+  first-run /dev/sdX      set up a disk and take the first backup
+  format-disk /dev/sdX [--yes] [--force] [--skip-live] [--iso PATH]
+                          set up a disk and nothing else
+  link [--refresh]        stop everyday actions asking for a password
+  mount [--disk /dev/sdX] unlock and mount the backup disk
+  umount                  unmount it and lock it again
+
+A Raspberry Pi
+  remote pair HOST        keep the backup disk in an always-on Pi
+  remote status | forget
+  rescue-stick /dev/sdX [--iso PATH]
+                          make a USB that restores from the Pi
+
+Restoring
+  restore-to-disk /dev/TARGET --snapshot TIMESTAMP
+      [--level full|settings] [--from-pi] [--yes] [--allow-internal]
+                          put a restore point onto a blank disk
+  restore-tui             the restore wizard the rescue USB boots into
+  refresh-rescue [--boot-only]
+                          update the rescue system on the backup disk
+  files TIMESTAMP [PATH]  list what is inside a restore point
+  copy TIMESTAMP SRC DEST copy one thing out of a restore point
+
+Looking into things
+  detect [--json]         is this machine supported, and what is plugged in
+  doctor                  check the skip list against what was backed up
+  init-config             write the config and skip-list files
+  compile-excludes        rebuild the rsync excludes from the skip list
+  root                    where this copy of OmaBackups lives
+  version
+
+With any of the above
+  --dry-run               say what would happen and change nothing
+  --yes                   do not stop to confirm
+  --allow-internal        allow an internal disk as the target (USB is the default)
+  --force                 go ahead on a disk that already holds backups
+  --home-only             back up your home folder and not the system
+
+USB disks only by default; an internal disk needs --all or --allow-internal.
+The disk this computer is running from is always refused.
 EOF
 }
 
@@ -169,7 +196,7 @@ case "$cmd" in
       # (e.g. a missing dependency) — pause here too, or the plugin's terminal
       # closes before the error above is readable.
       [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
-      exit 130
+      exit 1
     fi
     "$OMARCHY_TM_ROOT/link.sh" --quiet || echo "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
     "$OMARCHY_TM_ROOT/mount.sh" mount --disk "$disk"

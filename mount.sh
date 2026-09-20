@@ -87,9 +87,13 @@ find_tm_partition() {
     printf '%s\n' "$p"
     return
   fi
-  local live_part
-  live_part="$(printf '%s' "$DETECT_JSON" | jq -r '.luks.partition // empty')"
-  lsblk -n -p -o PATH,FSTYPE | awk -v live="$live_part" '$2=="crypto_LUKS" && $1!=live {print $1; exit}'
+  # Deliberately nothing else. This used to fall back to "the first encrypted
+  # partition that isn't the live root's", which needs no OmaBackups label at
+  # all: with no backup disk plugged in it would happily pick an unrelated
+  # encrypted USB — or a restored spare system disk — and mount it as the
+  # backup disk, and the next backup would write into it. Better to find
+  # nothing and say so.
+  return 1
 }
 
 cmd_mount() {
@@ -101,8 +105,12 @@ cmd_mount() {
   # Do NOT bind-mount the Files/udisks mount — it is often read-only.
 
   local part
-  part="$(find_tm_partition)"
-  [[ -n $part && -b $part ]] || die "could not find backup LUKS partition (pass --disk /dev/sdX)"
+  # Without an explicit --disk, never settle for a backup disk that isn't the
+  # one that was set up.
+  [[ -n $DISK ]] || refuse_other_capsule
+  part="$(find_tm_partition || true)"
+  [[ -n $part && -b $part ]] ||
+    die "No backup disk found. Plug in the USB you set up for backups and try again. (To point at one directly: oma-backups mount --disk /dev/sdX)"
 
   local disk
   disk="$(lsblk -n -o PKNAME "$part" | head -1)"
@@ -128,18 +136,17 @@ cmd_mount() {
       die "the backup disk needs its password and nobody is here to type it. Turn automatic backups off and on again in Settings to add this laptop's key to it."
     else
       log "unlocking $part as $LUKS_MAPPER — enter the backup disk password"
-      if [[ -n ${OMARCHY_TM_PASSPHRASE_FD:-} ]]; then
-        cryptsetup open --key-file=- "$part" "$LUKS_MAPPER" <&"${OMARCHY_TM_PASSPHRASE_FD}"
-      elif [[ -r /dev/tty ]]; then
+      if [[ -r /dev/tty ]]; then
         cryptsetup open "$part" "$LUKS_MAPPER" < /dev/tty > /dev/tty 2>&1
       else
         cryptsetup open "$part" "$LUKS_MAPPER"
       fi
     fi
   fi
-  if [[ -e /dev/mapper/omarchy-backups ]]; then
-    mapper=omarchy-backups
-  fi
+  # No "if a volume called omarchy-backups exists anywhere, use that instead"
+  # override here: $mapper already belongs to the partition we chose, and the
+  # override picked the wrong USB whenever a second backup disk happened to be
+  # unlocked under the default name.
   mount_backup_rw "$MNT" "$mapper"
   chmod 755 "$MNT" 2>/dev/null || true
 }

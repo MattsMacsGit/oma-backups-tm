@@ -15,8 +15,8 @@ usage() {
 Usage:
   oma-backups backup [--dry-run] [--yes] [--home-only] [--force-after-restore]
   oma-backups snapshots
-  oma-backups files SNAPSHOT [PATH]
-  oma-backups copy SNAPSHOT SRC DEST
+  oma-backups files TIMESTAMP [PATH]
+  oma-backups copy TIMESTAMP SRC DEST
 
 Engine: btrfs RO snapshot of @/@home → rsync (excludes) → dest RO snapshot.
 EOF
@@ -39,10 +39,8 @@ while [[ $# -gt 0 ]]; do
     --prune) MODE=prune; shift ;;
     --browse) MODE=browse; shift; break ;;
     --json) LIST_JSON=1; shift ;;
-    --check) MODE=check; shift ;;
     --files) MODE=files; shift; break ;;
     --copy) MODE=copy; shift; break ;;
-    --restore-files) MODE=copy; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -68,9 +66,10 @@ require_excludes_visible() {
   if [[ $ok != true && $(id -u) -eq 0 ]]; then
     die "running as root with no SUDO_USER and no /etc/omarchy-backups/excludes-home.txt — refusing (this is how Videos leaked last time). Run: sudo oma-backups init-config"
   fi
-  if [[ ! -f $EX_HOME ]]; then
-    die "missing excludes file $EX_HOME — run: sudo oma-backups init-config"
-  fi
+  local f
+  for f in "$EX_HOME" "$EX_OS"; do
+    [[ -f $f ]] || die "missing skip list $f — run: sudo oma-backups init-config"
+  done
 }
 
 refresh_excludes_from_user() {
@@ -79,8 +78,12 @@ refresh_excludes_from_user() {
   EX_HOME="$(cfg '._excludes_home')"
   EX_OS="$(cfg '._excludes_os')"
   local n_home n_os line
-  n_home=$(grep -v '^#' "$EX_HOME" 2>/dev/null | grep -vc '^$')
-  n_os=$(grep -v '^#' "$EX_OS" 2>/dev/null | grep -vc '^$')
+  # `grep -c` exits 1 when the count is zero, and under `set -e` that used to
+  # end the backup right here — after it had already claimed the
+  # running-backup marker. An empty skip list is a number, not a failure.
+  n_home=$(grep -v '^#' "$EX_HOME" 2>/dev/null | grep -vc '^$' || true)
+  n_os=$(grep -v '^#' "$EX_OS" 2>/dev/null | grep -vc '^$' || true)
+  n_home=${n_home:-0} n_os=${n_os:-0}
   while IFS= read -r line; do log_file "  home $line"; done < <(grep -v '^#' "$EX_HOME" 2>/dev/null | grep -v '^$')
   while IFS= read -r line; do log_file "  os   $line"; done < <(grep -v '^#' "$EX_OS" 2>/dev/null | grep -v '^$')
   step "Skip list: $n_home home, $n_os os entries excluded"
@@ -169,8 +172,12 @@ DEST_REMOTE=0
 RSYNC_RSH=()
 
 pick_destination() {
-  if remote_configured && [[ -z $(capsule_luks_partition 2>/dev/null || true) ]] &&
-    ! findmnt -n "$MNT" >/dev/null 2>&1; then
+  # "No backup disk plugged in here" also covers "a backup disk is plugged in,
+  # but not the one that was set up": that disk is not a destination, and the
+  # Pi is. Plugging an old backup USB in to fetch something off it should not
+  # divert tonight's backup onto it.
+  if remote_configured && ! findmnt -n "$MNT" >/dev/null 2>&1 &&
+    { [[ -z $(capsule_luks_partition 2>/dev/null || true) ]] || capsule_is_not_the_recorded_one; }; then
     DEST_REMOTE=1
     remote_load
     RSYNC_RSH=(-e "$(remote_rsh)")
@@ -402,7 +409,9 @@ fail_backup() {
   else
     progress fail "Backup failed: $*"
   fi
-  exit 130
+  # 1, not 130: by convention 130 means "the user pressed Ctrl-C", which is a
+  # different thing from "this failed". 143 (asked to stop) stays as it is.
+  exit 1
 }
 
 backup_running() {
@@ -494,6 +503,9 @@ open_destination() {
     [[ -f $OMA_CURRENT_CAPSULE || -z $u ]] || set_current_capsule "$u"
     return 0
   fi
+  # Local destination: whatever is plugged in has to be the disk that was set
+  # up. With a Pi paired, pick_destination has already sent us there instead.
+  refuse_other_capsule
   local want mapper
   want="$(capsule_luks_partition 2>/dev/null || true)"
   if [[ -n $want ]] && findmnt -n "$MNT" >/dev/null 2>&1; then
@@ -509,7 +521,7 @@ open_destination() {
     "$OMARCHY_TM_ROOT/mount.sh" mount
   fi
   ensure_rw_mount "$MNT"
-  findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "capsule not mounted at $MNT"
+  findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "The backup disk isn't mounted. Unplug it, plug it back in, and try again."
   { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
     fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
   if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want ]]; then
@@ -855,7 +867,7 @@ cmd_backup() {
   echo
 }
 
-BROWSE_DIR=/run/omarchy-backups-browse
+BROWSE_DIR="$OMA_BROWSE_DIR"
 BROWSE_STATE=""
 
 # The plugin polls $BROWSE_DIR/TS.json: {"state": "ready", "path": ...} or
@@ -876,7 +888,7 @@ browse_state() {
 # stopped (the plugin starts/stops oma-backups-browse@TS.service).
 cmd_browse() {
   local ts=${1:-} user=${SUDO_USER:-${USER:-}}
-  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups browse SNAPSHOT"
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups browse TIMESTAMP"
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose files to open"
   mkdir -p "$BROWSE_DIR"
@@ -956,7 +968,7 @@ cmd_list() {
 cmd_files() {
   local snap=${1:-} rel=${2:-}
   findmnt -n "$MNT" >/dev/null 2>&1 || die "not mounted"
-  [[ -n $snap ]] || die "usage: oma-backups files SNAPSHOT [PATH]"
+  [[ -n $snap ]] || die "usage: oma-backups files TIMESTAMP [PATH]"
   local user_name="${SUDO_USER:-${USER:-}}"
   local base="$MNT/home/$snap"
   [[ -d $base ]] || die "no home snapshot $snap"
@@ -971,7 +983,7 @@ cmd_files() {
 
 cmd_copy() {
   local snap=${1:-} src=${2:-} dest=${3:-}
-  [[ -n $snap && -n $src && -n $dest ]] || die "usage: oma-backups copy SNAPSHOT SRC DEST"
+  [[ -n $snap && -n $src && -n $dest ]] || die "usage: oma-backups copy TIMESTAMP SRC DEST"
   findmnt -n "$MNT" >/dev/null 2>&1 || die "not mounted"
   local from="$MNT/home/$snap/$src"
   [[ -e $from ]] || die "not in snapshot: $src"
@@ -982,7 +994,6 @@ cmd_copy() {
 
 case "$MODE" in
   list) cmd_list ;;
-  check) cmd_list ;;
   files) cmd_files "$@" ;;
   copy) cmd_copy "$@" ;;
   backup) cmd_backup ;;

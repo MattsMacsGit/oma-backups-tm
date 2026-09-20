@@ -113,10 +113,23 @@ cmd_run() {
   ((grace < 600)) && grace=600
   ((now - last >= interval - grace)) || exit 0
 
+  # Only ever back up a system that is at rest. Anything of ours already in
+  # flight means wait for the next tick, never elbow in alongside it.
   local pidf other
   pidf="$(pid_file)"
   other="$(tr -d '[:space:]' <"$pidf" 2>/dev/null || true)"
-  if [[ -n $other ]] && pid_alive "$other"; then
+  # backup_pid_alive, not pid_alive: a recycled process number used to look
+  # like a backup that never ended, and automatic backups then stopped
+  # happening at all until the next reboot.
+  if [[ -n $other ]] && backup_pid_alive "$other"; then
+    exit 0
+  fi
+  # A restore point open for browsing holds the backup disk (or the Pi's)
+  # unlocked, and this backup would lock it again on its way out — from under
+  # the window someone is still reading. It is a deliberate, short-lived
+  # thing, so wait quietly for the next tick rather than nagging about it.
+  if browse_in_progress; then
+    log_file "scheduled backup skipped: a restore point is open"
     exit 0
   fi
 
@@ -135,6 +148,8 @@ cmd_run() {
   local why=""
   if on_low_battery; then
     why="The battery is under 20%."
+  elif capsule_is_not_the_recorded_one; then
+    why="The backup disk plugged in isn't the one you set up."
   elif [[ -n $(capsule_luks_partition 2>/dev/null || true) ]]; then
     :
   elif remote_configured; then

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# GPT Time Capsule: EFI + live rescue OS + LUKS2→btrfs backups.
+# Set up a backup disk: EFI + live rescue OS + LUKS2→btrfs backups.
 set -euo pipefail
 
 OMARCHY_TM_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -76,6 +76,11 @@ MNT="$(cfg '.paths.mountpoint')"
 
 refuse_dangerous_disk "$DISK" "format"
 require_usb_or_allow "$DISK" "format"
+# Which physical disk just passed those checks. Everything below — the YES
+# prompt, then two password fields — waits on a person, and /dev/sdX can be a
+# different disk by the time that is over, so the checks run again against
+# this before the first byte is written.
+DISK_WAS="$(disk_identity "$DISK")"
 
 existing="$(printf '%s' "$DETECT_JSON" | jq -r --arg p "$(real_dev "$DISK")" --arg n "$DISK" '
   .disks[] | select(.path == $p or .path == $n) | .capsule // empty | tostring
@@ -133,8 +138,10 @@ ask_new_luks_pass() {
 }
 
 if ! is_dry_run; then
-  confirm "Wipe $DISK and write a bootable Time Capsule?"
+  # Before confirm, not after: the panel should say it is waiting on you for
+  # the whole time it is waiting on you, including the YES prompt.
   progress phase "waiting-input"
+  confirm "Wipe $DISK and set it up as a backup disk?"
   ask_new_luks_pass
 fi
 
@@ -165,15 +172,35 @@ fail_setup() {
   if [[ -r /dev/tty ]]; then
     read -r -p "Press Enter to close." _ < /dev/tty || true
   fi
-  exit 130
+  SETUP_FAILED=1
+  exit 1
 }
+
+# fail_setup's reassurance and pause were unreachable for anything that ends
+# in a plain die() — close_crypt_on_disk, a missing dependency, a bad disk —
+# because die exits straight away. This catches those too, so no failure ever
+# leaves someone wondering whether their old backups survived.
+SETUP_FAILED=0
+on_setup_exit() {
+  local rc=$?
+  ((rc == 0)) && return 0
+  ((SETUP_FAILED)) && return 0
+  gum style --foreground 8 "  The backup disk was NOT re-encrypted — the old password and the copies already on it are unchanged."
+  [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
+  return 0
+}
+trap on_setup_exit EXIT
 
 # Safety net for a command failure we didn't explicitly check — run_quiet's
 # output only goes to the log file now, so without this the terminal would
 # otherwise just go blank with no clue what happened.
 trap 'fail_setup "unexpected failure — see $OMARCHY_TM_LOG for details"' ERR
 
-close_crypt_on_disk "$DISK" || fail_setup "could not unlock-close the old volume"
+# Last chance to notice the disk changed under us while the password was
+# being typed. Nothing destructive has run yet.
+recheck_disk "$DISK" "format" "$DISK_WAS"
+
+close_crypt_on_disk "$DISK"
 if [[ -b $P3 ]]; then
   wipe_luks_header "$P3"
 fi

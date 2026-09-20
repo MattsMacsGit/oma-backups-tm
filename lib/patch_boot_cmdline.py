@@ -129,7 +129,6 @@ def verify(esp: Path, partuuid: str) -> bool:
 
 
 def apply(esp: Path, partuuid: str, chroot: Path | None) -> None:
-    drop_history(esp)
     conf = find_conf(esp)
     if conf is not None:
         patch_conf(conf, partuuid)
@@ -162,6 +161,12 @@ def main() -> int:
     chroot = Path(args.chroot) if args.chroot else None
     if args.verify_only:
         return 0 if verify(esp, args.partuuid) else 1
+    # Always, not only when the main entry needs repairing: these are the
+    # source machine's own snapshot entries, and every one of them points at
+    # an encrypted partition that does not exist on this disk, so they can
+    # only ever fail to boot. They used to survive whenever the main entry
+    # happened to already be right.
+    drop_history(esp)
     if not verify(esp, args.partuuid):
         apply(esp, args.partuuid, chroot)
     return 0 if verify(esp, args.partuuid) else 1

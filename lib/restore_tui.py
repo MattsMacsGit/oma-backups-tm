@@ -29,8 +29,6 @@ MNT = Path("/run/omarchy-backups")
 LIVE_LABELS = {"OMABOOT", "OMARESCUE", "OMANETBOOT", "OMANETRESCUE",
                "OMARCHY-EFI", "OMARCHY-LIVE", "OMANET-EFI", "OMANET-LIVE"}
 BACKUP_LABELS = {"OMABACKUPS", "OMARCHY-TM", "OMARCHY-BACKUPS"}
-CAPSULE_LABELS = BACKUP_LABELS | {"OMABOOT", "OMARESCUE",
-                                  "OMARCHY-EFI", "OMARCHY-LIVE"}
 INSTALLER_LABELS = {"VENTOY", "VTOYEFI", "CLONEZILLA", "CLONEZILLA-LIVE"}
 
 # A network rescue stick restores from the paired Pi (rescue-stick.sh made it).
@@ -136,6 +134,11 @@ def ask(prompt: str, default: str = "") -> str:
 
 def run(argv: list[str], check: bool = False, capture: bool = True) -> subprocess.CompletedProcess:
     return subprocess.run(argv, check=check, text=True, capture_output=capture)
+
+
+def run_input(argv: list[str], text: str | None) -> subprocess.CompletedProcess:
+    """Same, with something fed to it on stdin (a password, say)."""
+    return subprocess.run(argv, input=text, text=True, capture_output=True, check=False)
 
 
 def lsblk_json() -> list[dict]:
@@ -320,7 +323,8 @@ def unlock_backup() -> bool:
     if (MNT / "meta" / "machine.json").is_file():
         gum_style("--foreground", "8", f"Backup disk already mounted at {MNT}")
         return True
-    gum_style("--foreground", "8", "Unlocking the backup disk (LUKS password from when you set it up).")
+    gum_style("--foreground", "8", "Unlocking the backup disk. Type the backup disk's password — the one you")
+    gum_style("--foreground", "8", "chose when you set the disk up, not your login password.")
     env = os.environ.copy()
     env["OMARCHY_TM_ROOT"] = str(ROOT)
     env["OMARCHY_TM_YES"] = "1"
@@ -329,12 +333,9 @@ def unlock_backup() -> bool:
     proc = subprocess.run([str(CLI), "mount"], env=env)
     if proc.returncode != 0:
         gum_style("--foreground", "1", "Could not unlock the backup disk.")
-        gum_style(
-            "--foreground",
-            "8",
-            "On this rescue USB the backups are the LUKS partition next to the rescue one.",
-        )
-        out("Try: oma-backups mount")
+        gum_style("--foreground", "8", "Check the password and try again. If this USB has just been plugged in,")
+        gum_style("--foreground", "8", "give it a few seconds and choose Retry.")
+        out("To try again from the shell: oma-backups mount")
         return False
     return True
 
@@ -487,13 +488,17 @@ def wifi_setup() -> bool:
             pause("Plug in the cable, then press Enter.")
             return wait_online(15)
         security = dict(nets).get(choice, "psk")
-        argv = ["iwctl"]
+        pw = None
         if security != "open":
             pw = gum_input(header=f"Wi-Fi password for {choice}", password=True)
             if pw is None:
                 continue
-            argv += ["--passphrase", pw]
-        run(argv + ["station", dev, "connect", choice])
+        # Passed on stdin, not as --passphrase: an argument is visible to
+        # anything that lists running processes.
+        run_input(
+            ["iwctl", "station", dev, "connect", choice],
+            (pw + "\n") if pw is not None else None,
+        )
         gum_style("--foreground", "8", f"Connecting to {choice}...")
         if wait_online(30):
             return True

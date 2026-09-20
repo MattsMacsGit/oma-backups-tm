@@ -57,41 +57,19 @@ BAR_STEPS = {"os", "home", "esp", "setup"}
 WRITE_EVERY = 0.5
 
 
-def _user_status_path() -> Path | None:
-    sudo = os.environ.get("SUDO_USER")
-    if not sudo:
-        return None
-    try:
-        import pwd
-
-        home = Path(pwd.getpwnam(sudo).pw_dir)
-    except KeyError:
-        return None
-    return home / ".local" / "state" / "omarchy-backups" / "status.json"
-
-
 def write(data: dict) -> None:
     # "at" lets the plugin tell this attempt's error from a leftover one.
     data = dict(data, at=int(time.time()))
     payload = json.dumps(data) + "\n"
     STATUS.parent.mkdir(parents=True, exist_ok=True)
+    # One file, read by the plugin and by `oma-backups status`. There used to
+    # be a second copy written into the user's own state folder on every
+    # update — twice a second for the length of a backup, with a stat and a
+    # chown each time — which nothing anywhere ever read.
     tmp = Path(str(STATUS) + ".tmp")
     tmp.write_text(payload, encoding="utf-8")
     os.chmod(tmp, 0o644)
     tmp.replace(STATUS)
-    user_path = _user_status_path()
-    if user_path is None:
-        return
-    try:
-        user_path.parent.mkdir(parents=True, exist_ok=True)
-        utmp = user_path.with_suffix(".tmp")
-        utmp.write_text(payload, encoding="utf-8")
-        os.chmod(utmp, 0o644)
-        st = os.stat(user_path.parent)
-        os.chown(utmp, st.st_uid, st.st_gid)
-        utmp.replace(user_path)
-    except OSError:
-        pass
 
 
 def label(step: str) -> str:

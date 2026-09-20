@@ -51,7 +51,11 @@ MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarc
 # each request is its own process. Without this, a lock arriving mid-unlock
 # saw nothing open yet, locked nothing, and the unlock landed behind it and
 # left the disk open -- which is what a Stop pressed while unlocking did.
-CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK", "")) if TEST else Path("/run/oma-gate.capsule.lock")
+# The fallback matters: an empty path here made `with_name` below raise on
+# import, so a test run that set the other three variables but not this one
+# died before it could answer anything. Production never reaches it (root is
+# not TEST) — it is only the test harness that could trip over it.
+CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK") or "/tmp/oma-gate-test.capsule.lock") if TEST else Path("/run/oma-gate.capsule.lock")
 # A lock request leaves this behind while it queues. If the laptop is killed
 # before its turn comes (a Stop cut short by a short service timeout), the
 # unlock it was chasing finishes, sees the note, and locks up after itself.
@@ -244,14 +248,6 @@ def v_set_writable(args: list[str]) -> None:
     require_mounted()
     (p,) = map(target, args)
     run("btrfs", "property", "set", "-ts", str(p), "ro", "false")
-
-
-def v_du(args: list[str]) -> None:
-    require_mounted()
-    (p,) = map(target, args)
-    r = subprocess.run(["btrfs", "filesystem", "du", "-s", "--raw", str(p)], capture_output=True, text=True)
-    line = r.stdout.splitlines()[1].split() if r.returncode == 0 and len(r.stdout.splitlines()) > 1 else []
-    print(f"{line[0]} {line[1]}" if len(line) >= 2 else "0 0")
 
 
 def v_mkdir(args: list[str]) -> None:
@@ -463,7 +459,6 @@ VERBS = {
     "subvol-create": (v_subvol_create, 1),
     "snapshot": (v_snapshot, 2),
     "set-writable": (v_set_writable, 1),
-    "du": (v_du, 1),
     "mkdir": (v_mkdir, 1),
     "exists": (v_exists, 1),
     "chmod755": (v_chmod755, None),

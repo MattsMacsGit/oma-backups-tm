@@ -17,15 +17,29 @@ fi
 
 umask 077
 
+# Whose settings and state these are: the user who ran sudo, or whoever is
+# running this. A SUDO_USER that is not a real account used to take the whole
+# command down without printing anything at all (the lookup fails, and
+# `set -e` does the rest), so say what is wrong instead of vanishing.
 _tm_user_home() {
+  local dir
   if [[ ${EUID:-$(id -u)} -eq 0 && -n ${SUDO_USER:-} ]]; then
-    getent passwd "$SUDO_USER" | cut -d: -f6
-  else
-    printf '%s\n' "${HOME:-/tmp}"
+    dir="$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)" || dir=""
+    if [[ -z $dir ]]; then
+      {
+        printf 'oma-backups: there is no account called "%s" on this system, so\n' "$SUDO_USER"
+        printf '             there is no home folder to keep your settings in.\n'
+        printf '             Run this as your normal user and let it ask for sudo itself.\n'
+      } >&2
+      return 1
+    fi
+    printf '%s\n' "$dir"
+    return 0
   fi
+  printf '%s\n' "${HOME:-/tmp}"
 }
 
-OMARCHY_TM_USER_HOME="$(_tm_user_home)"
+OMARCHY_TM_USER_HOME="$(_tm_user_home)" || exit 1
 OMARCHY_TM_STATE="${OMARCHY_TM_STATE:-$OMARCHY_TM_USER_HOME/.local/state/omarchy-backups}"
 mkdir -p "$OMARCHY_TM_STATE"
 
@@ -159,6 +173,22 @@ close_stale_mapper() {
   fi
 }
 
+# Is this unlocked volume really a backup disk? Its own filesystem label says
+# so (OmaBackups, or the pre-1.1 names). The guess below used to be "any
+# unlocked volume not literally called root", which on a system whose root
+# volume is named luks-<id> — a common Omarchy layout — could hand back the
+# live root and have it mounted as the backup disk.
+is_capsule_mapper() {
+  local name=${1:-} lab want
+  [[ -n $name && -e /dev/mapper/$name ]] || return 1
+  lab="$(lsblk -n -o LABEL "/dev/mapper/$name" 2>/dev/null | awk 'NF{print; exit}')"
+  [[ -n $lab ]] || return 1
+  for want in "${OMA_LABELS_BACKUPS[@]}"; do
+    [[ $lab == "$want" ]] && return 0
+  done
+  return 1
+}
+
 backup_mapper() {
   local src mapper
   src="$(findmnt -n -o SOURCE "${1:-}" 2>/dev/null | awk '{print $1; exit}' || true)"
@@ -168,11 +198,18 @@ backup_mapper() {
     printf '%s\n' "$mapper"
     return 0
   fi
-  if [[ -e /dev/mapper/omarchy-backups ]]; then
+  if is_capsule_mapper omarchy-backups; then
     printf '%s\n' omarchy-backups
     return 0
   fi
-  lsblk -nr -o NAME,TYPE 2>/dev/null | awk '$2=="crypt" && $1!="root"{print $1; exit}'
+  local cand
+  while read -r cand; do
+    if is_capsule_mapper "$cand"; then
+      printf '%s\n' "$cand"
+      return 0
+    fi
+  done < <(lsblk -nr -o NAME,TYPE 2>/dev/null | awk '$2=="crypt"{print $1}')
+  return 1
 }
 
 mount_backup_rw() {
@@ -195,7 +232,7 @@ mount_backup_rw() {
 ensure_rw_mount() {
   local mnt=$1
   local mapper
-  mapper="$(backup_mapper "$mnt")"
+  mapper="$(backup_mapper "$mnt" || true)"
   if findmnt -n "$mnt" >/dev/null 2>&1; then
     if ! mnt_is_ro "$mnt"; then
       return 0
@@ -287,7 +324,7 @@ require_root() {
   fi
   if [[ -t 0 && -t 1 ]]; then
     log "re-executing with sudo"
-    exec sudo --preserve-env=OMARCHY_TM_ROOT,OMARCHY_BACKUPS_ROOT,OMARCHY_TM_DRY_RUN,OMARCHY_TM_YES,OMARCHY_TM_FORCE,OMARCHY_TM_PYTHON,OMARCHY_TM_ALLOW_INTERNAL,OMARCHY_TM_HOME_ONLY,OMARCHY_TM_PASSPHRASE_FD \
+    exec sudo --preserve-env=OMARCHY_TM_ROOT,OMARCHY_BACKUPS_ROOT,OMARCHY_TM_DRY_RUN,OMARCHY_TM_YES,OMARCHY_TM_FORCE,OMARCHY_TM_PYTHON,OMARCHY_TM_ALLOW_INTERNAL,OMARCHY_TM_HOME_ONLY \
       "$0" "$@"
   fi
   die "this command needs root; run it in a terminal so sudo can prompt"
@@ -463,8 +500,34 @@ refuse_dangerous_disk() {
   fi
 }
 
-status_write() {
-  log "$*"
+# The stable identity of a whole disk. A name like /dev/sdb is only a label
+# the kernel hands out: unplug a disk during a password prompt and the next
+# one along can be given the same name. So anything destructive records this
+# when the safety checks pass, and compares it again just before it writes.
+# A USB with no serial of its own falls back to size alone — better than
+# nothing, though it cannot spot a same-size swap.
+disk_identity() {
+  local disk=$1 serial wwn size
+  serial="$(lsblk -n -d -o SERIAL "$disk" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  wwn="$(lsblk -n -d -o WWN "$disk" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  size="$(lsblk -n -d -b -o SIZE "$disk" 2>/dev/null | head -1 | tr -d '[:space:]')"
+  printf '%s|%s|%s\n' "${serial:-?}" "${wwn:-?}" "${size:-?}"
+}
+
+# Run the safety checks again, on fresh information, immediately before the
+# first destructive command — and confirm the disk under that name is still
+# the same physical disk that passed them. WAS is what disk_identity said
+# back then.
+recheck_disk() {
+  local disk=$1 action=$2 was=$3 now fresh
+  now="$(disk_identity "$disk")"
+  if [[ $now != "$was" ]]; then
+    die "REFUSING to $action $disk — this is not the same disk any more. It was unplugged, or another disk was given its name. Nothing has been changed. Unplug everything except the disk you mean, then try again."
+  fi
+  fresh="$(detect_json 2>/dev/null || true)"
+  [[ -n $fresh ]] && DETECT_JSON="$fresh"
+  refuse_dangerous_disk "$disk" "$action"
+  require_usb_or_allow "$disk" "$action"
 }
 
 progress() {
@@ -525,6 +588,25 @@ capsule_luks_partition() {
     awk 'NF && !seen[$0]++')
   [[ -n $first ]] || return 1
   printf '%s\n' "$first"
+}
+
+# A backup disk is plugged in, but not the one that was set up. Which disk
+# your backups go to is not something to guess at, so the paths that would
+# write to it say so and stop instead (README: "two backup USBs plugged in
+# at once never get mixed up").
+capsule_is_not_the_recorded_one() {
+  local want part uuid
+  want="$(current_capsule_uuid)"
+  [[ -n $want ]] || return 1
+  part="$(capsule_luks_partition 2>/dev/null || true)"
+  [[ -n $part ]] || return 1
+  uuid="$(luks_uuid_of "$part")"
+  [[ -n $uuid && $uuid != "$want" ]]
+}
+
+refuse_other_capsule() {
+  capsule_is_not_the_recorded_one || return 0
+  die "That is not the backup disk you set up — its restore points belong to a different disk, and nothing has been written to it. Plug in your usual backup disk. To switch to this one, use Settings → \"Use a different disk\"."
 }
 
 set_current_capsule() {
@@ -614,6 +696,18 @@ pid_file() {
   printf '%s\n' "${OMARCHY_TM_PID_FILE:-/run/omarchy-backups.pid}"
 }
 
+# A restore point is open for browsing — the plugin's "open a date", or
+# "Restore my files" copying out of one. The state file lives exactly as long
+# as the session does: oma-backups-browse@TS writes it when the folder is
+# ready and removes it on the way out.
+OMA_BROWSE_DIR=/run/omarchy-backups-browse
+
+browse_in_progress() {
+  compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1
+}
+
+# "Does a process with this number exist?" — nothing more. For the question
+# that actually matters, "is our backup still going?", use backup_pid_alive.
 pid_alive() {
   local pid=${1:-}
   [[ -n $pid && $pid =~ ^[0-9]+$ ]] || return 1
@@ -623,6 +717,17 @@ pid_alive() {
   # when the process is alive, which made status_json report "stale" for
   # the entire duration of every real backup.
   [[ -d /proc/$pid ]]
+}
+
+# Is this pid our backup, and not something else that inherited the number?
+# Linux recycles pids, so "a process with that number exists" is not enough:
+# Stop would kill whatever now owns it (as root, with all its children),
+# status would report a backup running forever, and the hourly check would
+# skip every backup until the next reboot.
+backup_pid_alive() {
+  local pid=${1:-}
+  pid_alive "$pid" || return 1
+  grep -qa backup.sh "/proc/$pid/cmdline" 2>/dev/null
 }
 
 write_pid() {
@@ -674,18 +779,24 @@ stop_backup() {
     return 0
   fi
   pid="$(tr -d '[:space:]' <"$f")"
-  if pid_alive "$pid"; then
+  if backup_pid_alive "$pid"; then
     log "stopping backup pid $pid"
     kill_tree "$pid"
     sleep 1
-    if pid_alive "$pid"; then
+    if backup_pid_alive "$pid"; then
       kill -KILL "$pid" 2>/dev/null || true
       kill_tree "$pid"
     fi
+    clear_pid
+    progress idle
+    log "stopped"
+    return 0
   fi
+  # The marker is stale: that process has gone, or its number has been reused
+  # by something unrelated. Never kill it.
   clear_pid
   progress idle
-  log "stopped"
+  log "no backup running (cleared a leftover marker)"
 }
 
 status_json() {
@@ -702,7 +813,7 @@ status_json() {
     raw='{"running":false,"phase":"idle","percent":0,"speed":"","eta":"","line":""}'
   fi
   if printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
-    if [[ -n $pid ]] && pid_alive "$pid"; then
+    if [[ -n $pid ]] && backup_pid_alive "$pid"; then
       printf '%s\n' "$raw" | jq -c --arg pid "$pid" --argjson incomplete "$incomplete" \
         '.pid=$pid | .stale=false | .incomplete=$incomplete'
       return 0
@@ -711,7 +822,7 @@ status_json() {
       '.running=false | .stale=true | .pid=null | .incomplete=$incomplete'
     return 0
   fi
-  if [[ -n $pid ]] && pid_alive "$pid"; then
+  if [[ -n $pid ]] && backup_pid_alive "$pid"; then
     jq -n -c --arg line "$raw" --arg pid "$pid" --argjson incomplete "$incomplete" \
       '{running:true, phase:"unknown", percent:0, speed:"", eta:"", line:$line, pid:$pid, stale:false, incomplete:$incomplete}'
   else

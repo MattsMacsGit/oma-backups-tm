@@ -8,8 +8,13 @@ function diskLabel(d) {
   if (labels.length) bits.push(labels.join(","))
   if (d.protected) bits.push("live system — cannot use")
   else if (d.kind === "installer") bits.push("installer disk")
-  else if (d.kind === "capsule") bits.push("backup disk")
-  else if (d.kind === "internal") bits.push("internal")
+  else {
+    if (d.kind === "internal") bits.push("internal")
+    // What is already on it (backup disk, rescue stick, a system). Advisory:
+    // the disk is still offered, it just stops looking blank.
+    if (d.content) bits.push(d.content)
+    else if (d.kind === "capsule") bits.push("backup disk")
+  }
   return bits.join("  ")
 }
 

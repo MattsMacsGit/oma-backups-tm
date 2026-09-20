@@ -3,14 +3,17 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
 CLI="$ROOT/omarchy-backups"
+# Its own scratch directory, not fixed names in a shared /tmp.
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
 fail=0
 ok() { printf 'OK    %s\n' "$*"; }
 bad() { printf 'FAIL  %s\n' "$*"; fail=1; }
 
 echo "== OmaBackups selftest =="
 
-"$CLI" detect >/tmp/oma-detect.txt 2>&1 || true
-if grep -q SUPPORTED /tmp/oma-detect.txt; then ok "detect SUPPORTED"; else bad "detect not SUPPORTED"; cat /tmp/oma-detect.txt; fi
+"$CLI" detect >"$WORK/detect.txt" 2>&1 || true
+if grep -q SUPPORTED "$WORK/detect.txt"; then ok "detect SUPPORTED"; else bad "detect not SUPPORTED"; cat "$WORK/detect.txt"; fi
 
 usb="$("$CLI" disks | awk '{print $1}' | tr '\n' ' ')"
 echo "USB disks: $usb"
@@ -18,7 +21,6 @@ echo "$usb" | grep -q nvme && bad "nvme shown without --all" || ok "disks USB-on
 echo "$usb" | grep -qi ventoy && bad "Ventoy shown without --all" || ok "Ventoy hidden by default"
 
 all="$("$CLI" disks --all)"
-echo "$all" | grep -q nvme || echo "$all" | grep -q nvme0 || true
 echo "$all" | grep -E 'nvme|internal' >/dev/null && ok "disks --all lists internal" || bad "disks --all missing internal"
 if echo "$all" | grep -qi ventoy; then
   if echo "$all" | grep -i ventoy | grep -qiE 'REFUSE|installer'; then
@@ -28,18 +30,18 @@ if echo "$all" | grep -qi ventoy; then
   fi
 fi
 
-"$CLI" compile-excludes >/tmp/oma-ex.txt
-grep -q Videos /tmp/oma-ex.txt && ok "compile-excludes has Videos skip" || echo "(no Videos in skip list — ok if user did not add it)"
-grep -q '.cache' /tmp/oma-ex.txt && ok "defaults include .cache" || bad "defaults missing .cache"
+"$CLI" compile-excludes >"$WORK/ex.txt"
+grep -q Videos "$WORK/ex.txt" && ok "compile-excludes has Videos skip" || echo "(no Videos in skip list — ok if user did not add it)"
+grep -q '.cache' "$WORK/ex.txt" && ok "defaults include .cache" || bad "defaults missing .cache"
 
 "$CLI" status | jq -e 'has("running")' >/dev/null && ok "status JSON" || bad "status JSON"
 
 # restore dry-run must refuse live root
 live="$("$CLI" detect --json | jq -r .live_root_disk)"
-if "$CLI" --dry-run restore-to-disk "$live" --snapshot 19700101T000000Z >/tmp/oma-restore-live.txt 2>&1; then
+if "$CLI" --dry-run restore-to-disk "$live" --snapshot 19700101T000000Z >"$WORK/restore-live.txt" 2>&1; then
   bad "restore-to-disk dry-run on live root should fail"
 else
-  grep -qi refuse /tmp/oma-restore-live.txt && ok "restore refuses live root" || ok "restore dry-run rejected live root"
+  grep -qi refuse "$WORK/restore-live.txt" && ok "restore refuses live root" || ok "restore dry-run rejected live root"
 fi
 
 # nvme without --allow-internal. On a laptop whose only nvme IS the live root
@@ -51,28 +53,34 @@ if [[ -n $nvme && $nvme == "$live" ]]; then
   nvme=""
 fi
 if [[ -n $nvme ]]; then
-  if "$CLI" --dry-run restore-to-disk "$nvme" --snapshot 19700101T000000Z >/tmp/oma-restore-nvme.txt 2>&1; then
+  if "$CLI" --dry-run restore-to-disk "$nvme" --snapshot 19700101T000000Z >"$WORK/restore-nvme.txt" 2>&1; then
     bad "restore-to-disk dry-run on nvme should need --allow-internal"
   else
-    grep -qiE 'internal|refus' /tmp/oma-restore-nvme.txt && ok "restore refuses nvme without --allow-internal" || {
-      cat /tmp/oma-restore-nvme.txt
+    grep -qiE 'internal|refus' "$WORK/restore-nvme.txt" && ok "restore refuses nvme without --allow-internal" || {
+      cat "$WORK/restore-nvme.txt"
       bad "nvme refuse message unclear"
     }
   fi
-  if "$CLI" --dry-run restore-to-disk "$nvme" --snapshot 19700101T000000Z --allow-internal >/tmp/oma-restore-nvme-allow.txt 2>&1; then
-    grep -qi 'ERASES\|Dry-run' /tmp/oma-restore-nvme-allow.txt && ok "restore --allow-internal dry-run prints plan" || ok "restore --allow-internal dry-run exited 0"
+  if "$CLI" --dry-run restore-to-disk "$nvme" --snapshot 19700101T000000Z --allow-internal >"$WORK/restore-nvme-allow.txt" 2>&1; then
+    grep -qi 'ERASES\|Dry-run' "$WORK/restore-nvme-allow.txt" && ok "restore --allow-internal dry-run prints plan" || ok "restore --allow-internal dry-run exited 0"
   else
-    grep -qi 'ERASES\|Dry-run\|not mounted\|VALID' /tmp/oma-restore-nvme-allow.txt && ok "restore --allow-internal dry-run did not write" || {
-      cat /tmp/oma-restore-nvme-allow.txt
+    grep -qi 'ERASES\|Dry-run\|not mounted\|VALID' "$WORK/restore-nvme-allow.txt" && ok "restore --allow-internal dry-run did not write" || {
+      cat "$WORK/restore-nvme-allow.txt"
       bad "unexpected nvme --allow-internal dry-run failure"
     }
   fi
 fi
 
-"$CLI" doctor >/tmp/oma-doctor.txt 2>&1 || true
-cat /tmp/oma-doctor.txt
+"$CLI" doctor >"$WORK/doctor.txt" 2>&1 || true
+cat "$WORK/doctor.txt"
 
-python3 -m py_compile "$ROOT/lib/"*.py && ok "python compiles" || bad "python compile"
+# -o keeps the byte-code out of the repo (this is what used to leave
+# lib/__pycache__ behind after every run).
+compiled=1
+for py in "$ROOT/lib/"*.py "$ROOT/pi/oma-gate"; do
+  python3 -m py_compile -o "$WORK/$(basename "$py").pyc" "$py" || compiled=0
+done
+((compiled)) && ok "python compiles" || bad "python compile"
 python3 - "$ROOT" <<'PY' && ok "UKI cmdline rewriter maps PARTUUID" || bad "UKI cmdline rewriter"
 import sys
 sys.path.insert(0, sys.argv[1] + "/lib")

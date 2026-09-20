@@ -28,12 +28,22 @@ require_root "${ORIG_ARGS[@]}"
 
 EFI_DEV="$(lsblk -n -p -o PATH,LABEL |
   awk "$(oma_label_match '$2' "${OMA_LABELS_EFI[@]}"){print \$1; exit}")"
-LIVE_DEV="$(lsblk -n -p -o PATH,LABEL |
-  awk "$(oma_label_match '$2' "${OMA_LABELS_LIVE[@]}"){print \$1; exit}")"
 [[ -n $EFI_DEV ]] || die "The backup USB's boot partition wasn't found — plug the backup USB in"
-[[ -n $LIVE_DEV ]] || die "The backup USB's rescue partition wasn't found — plug the backup USB in"
 
-DISK="/dev/$(lsblk -n -o PKNAME "$EFI_DEV" | head -1)"
+PK="$(lsblk -n -o PKNAME "$EFI_DEV" 2>/dev/null | head -1)"
+[[ -n $PK ]] ||
+  die "Couldn't work out which disk $EFI_DEV is on. Unplug the backup USB, plug it back in, and try again."
+DISK="/dev/$PK"
+
+# Both partitions have to come off the SAME disk. Looking each one up on its
+# own meant that with two backup USBs plugged in, the boot partition could
+# come from one and the rescue partition from the other — and the bootloader
+# then went onto whichever disk owned the boot one, leaving two half-updated
+# rescue USBs and no error.
+LIVE_DEV="$(lsblk -n -p -o PATH,LABEL "$DISK" |
+  awk "$(oma_label_match '$2' "${OMA_LABELS_LIVE[@]}"){print \$1; exit}")"
+[[ -n $LIVE_DEV ]] ||
+  die "$DISK has a boot partition but no rescue partition. Is this really the backup USB?"
 
 LIVE_MNT=/run/oma-backups-live
 EFI_MNT=/run/omarchy-backups-efi
