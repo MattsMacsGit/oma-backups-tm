@@ -226,7 +226,7 @@ Panel {
                 title: "OmaBackups"
                 meta: svc.backupRunning
                   ? svc.progressText
-                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.0.1 RC") : "1.0.1 RC  ·  no backup disk yet")
+                  : (svc.hasCapsule ? (svc.lastSnapshot ? ("Last copy  " + svc.lastSnapshot) : "Ready  ·  1.1.0") : "1.1.0  ·  no backup disk yet")
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
@@ -719,7 +719,7 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: "1.0.1 RC  ·  skip folders, disks, Pi, erase disk"
+              meta: "1.1.0  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }

@@ -1,6 +1,7 @@
 # OmaBackups
 
-**v1.0.1 RC** — release candidate: nearly stable, still being tested.
+**v1.1.0** — restore levels, "Restore my files", and a network rescue stick
+that restores from the Pi without the backup disk.
 
 Time Machine-style **encrypted USB backups** for [Omarchy](https://omarchy.org/).
 A USB disk holds system + home copies. The same USB can boot a restore wizard.
