@@ -10,8 +10,18 @@ OMA_REMOTE_KNOWN=$OMA_REMOTE_DIR/known_hosts
 OMA_REMOTE_ACCOUNT=omabackups
 OMA_REPO_RAW="${OMA_REPO_RAW:-https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main}"
 
-REMOTE_HOST=""
+REMOTE_HOST=""      # the name it was paired under: what the user sees
+REMOTE_ADDR=""      # what we actually connect to, LAN address when it answers
 REMOTE_SSH=()
+
+# A LAN address the Pi answers on is worth preferring over the Tailscale name:
+# the tunnel is slower and, on a Pi 4, tailscaled can peg a core during a big
+# backup. The addresses come from the Pi itself (gatekeeper "addresses") at
+# pairing time and are refreshed after each backup, so a new DHCP lease is
+# picked up on its own. The pick is cached in /run for a few minutes, since
+# remote_load runs many times per backup.
+OMA_REMOTE_PICK=/run/omarchy-backups-remote-host
+OMA_REMOTE_PICK_TTL=300
 
 remote_configured() {
   [[ -f $OMA_REMOTE_CONF && -f $OMA_REMOTE_KEY ]] && capsule_key_present
@@ -24,9 +34,16 @@ remote_load() {
   [[ -n $REMOTE_HOST ]] || die "$OMA_REMOTE_CONF has no host"
   # A rescue stick reaches the Pi by whichever address works, so it checks
   # the Pi's key under a fixed name and never accepts a different one.
-  local alias hostkey=(-o StrictHostKeyChecking=accept-new)
+  local alias hostkey
   alias="$(jq -r '.host_key_alias // empty' "$OMA_REMOTE_CONF")"
-  [[ -n $alias ]] && hostkey=(-o StrictHostKeyChecking=yes -o HostKeyAlias="$alias")
+  if [[ -n $alias ]]; then
+    hostkey=(-o StrictHostKeyChecking=yes -o HostKeyAlias="$alias")
+  else
+    # Whichever address we end up on, check the Pi's key under the one name
+    # it was paired as: moving between the LAN and Tailscale then doesn't
+    # mean a second known_hosts entry (or a scary mismatch).
+    hostkey=(-o StrictHostKeyChecking=accept-new -o HostKeyAlias="$REMOTE_HOST")
+  fi
   REMOTE_SSH=(ssh -i "$OMA_REMOTE_KEY" -p "$port" -l "$OMA_REMOTE_ACCOUNT"
     -o IdentitiesOnly=yes -o BatchMode=yes -o ConnectTimeout=10 -o LogLevel=ERROR
     -o ServerAliveInterval=15 -o ServerAliveCountMax=4
@@ -35,11 +52,67 @@ remote_load() {
     # each of the dozen small gatekeeper calls (slow over a network). Every
     # command still goes through the gatekeeper on the Pi. Root-only socket.
     -o ControlMaster=auto -o ControlPath=/run/omarchy-backups-ssh-%C -o ControlPersist=60)
+  REMOTE_ADDR="$(remote_pick_addr)"
+}
+
+# LAN addresses the Pi reported about itself. Tailscale's own 100.64/10
+# addresses are skipped: taking the tunnel is the thing we're avoiding.
+remote_lan_addresses() {
+  jq -r '(.lan // [])[]? | select(test("^100\\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\\.") | not)' \
+    "$OMA_REMOTE_CONF" 2>/dev/null || true
+}
+
+# ssh's first value for an option wins, so the short timeout has to go in
+# front of the defaults rather than after them.
+remote_probe() {
+  local out
+  out="$("${REMOTE_SSH[@]:0:1}" -o ConnectTimeout=2 -o ControlPath=none \
+    "${REMOTE_SSH[@]:1}" "$1" version 2>/dev/null)" || return 1
+  [[ $out =~ ^[0-9]+$ ]]
+}
+
+remote_pick_addr() {
+  local now cached_at cached a
+  now=$(date +%s)
+  if [[ -r $OMA_REMOTE_PICK ]]; then
+    read -r cached_at cached <"$OMA_REMOTE_PICK" 2>/dev/null || true
+    if [[ -n ${cached:-} && ${cached_at:-0} =~ ^[0-9]+$ ]] &&
+      ((now - cached_at < OMA_REMOTE_PICK_TTL)); then
+      printf '%s' "$cached"
+      return 0
+    fi
+  fi
+  for a in $(remote_lan_addresses); do
+    [[ $a == "$REMOTE_HOST" ]] && continue
+    if remote_probe "$a"; then
+      printf '%s %s\n' "$now" "$a" >"$OMA_REMOTE_PICK" 2>/dev/null || true
+      printf '%s' "$a"
+      return 0
+    fi
+  done
+  printf '%s %s\n' "$now" "$REMOTE_HOST" >"$OMA_REMOTE_PICK" 2>/dev/null || true
+  printf '%s' "$REMOTE_HOST"
+}
+
+# Ask the Pi where it is now and remember it, so a changed lease doesn't
+# quietly send every future backup back down the tunnel.
+remote_refresh_addresses() {
+  local addrs tmp
+  addrs="$(rgate addresses 2>/dev/null || true)"
+  jq -e 'type == "array"' <<<"$addrs" >/dev/null 2>&1 || return 0
+  tmp="$OMA_REMOTE_CONF.tmp"
+  jq --argjson lan "$addrs" '.lan = $lan' "$OMA_REMOTE_CONF" >"$tmp" 2>/dev/null || return 0
+  chmod 644 "$tmp" && mv "$tmp" "$OMA_REMOTE_CONF"
 }
 
 # Run one gatekeeper verb on the Pi, e.g. `rgate snapshot home/current home/TS`.
 rgate() {
-  "${REMOTE_SSH[@]}" "$REMOTE_HOST" "$@"
+  "${REMOTE_SSH[@]}" "${REMOTE_ADDR:-$REMOTE_HOST}" "$@"
+}
+
+# The address to put in front of a remote path, for rsync and sshfs.
+remote_target() {
+  printf '%s' "${REMOTE_ADDR:-$REMOTE_HOST}"
 }
 
 # The same ssh command as one string, for rsync -e (no paths contain spaces).

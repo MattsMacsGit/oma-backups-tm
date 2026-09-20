@@ -203,7 +203,7 @@ remote_close() {
 }
 
 d_target() {
-  if [[ $DEST_REMOTE == 1 ]]; then printf '%s:%s\n' "$REMOTE_HOST" "$1"; else printf '%s\n' "$MNT/$1"; fi
+  if [[ $DEST_REMOTE == 1 ]]; then printf '%s:%s\n' "$(remote_target)" "$1"; else printf '%s\n' "$MNT/$1"; fi
 }
 
 d_exists() {
@@ -835,6 +835,7 @@ cmd_backup() {
     fi
   fi
   cache_remote_df
+  [[ $DEST_REMOTE == 1 ]] && remote_refresh_addresses || true
   progress done "valid=$valid ts=$ts"
   log_file "backup $ts valid=$valid omarchy=$OS_VER kernel=$KERNEL"
   local listing
@@ -909,7 +910,7 @@ cmd_browse() {
   # exactly as far as each file's own owner/permissions allow.
   sshfs -f -o ro,allow_other,default_permissions,reconnect \
     -o ssh_command="$(remote_rsh)" -o sftp_server="/browse $ts $user" \
-    "$REMOTE_HOST:/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
+    "$(remote_target):/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
   pid=$!
   local i
   for i in $(seq 1 60); do

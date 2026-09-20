@@ -88,6 +88,9 @@ cmd_pair() {
   remote_load
   local st
   st="$(rgate status 2>&1)" || fail "Couldn't reach the Pi as $OMA_REMOTE_ACCOUNT@$host: $st"
+  # Remember where the Pi lives on the local network, so backups at home can
+  # go straight there instead of round through Tailscale.
+  remote_refresh_addresses || true
   "$OMARCHY_TM_ROOT/link.sh" --quiet || warn "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
   # It's about to be unplugged; pulling it while mounted leaves a dead mount.
   "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
@@ -116,7 +119,8 @@ cmd_status() {
   remote_load
   local st
   if st="$(rgate status 2>/dev/null)"; then
-    jq -c --arg host "$REMOTE_HOST" '{paired: true, host: $host, reachable: true} + .' <<<"$st"
+    jq -c --arg host "$REMOTE_HOST" --arg addr "$REMOTE_ADDR" \
+      '{paired: true, host: $host, address: $addr, reachable: true} + .' <<<"$st"
   else
     jq -n -c --arg host "$REMOTE_HOST" '{paired: true, host: $host, reachable: false}'
   fi

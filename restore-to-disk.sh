@@ -90,7 +90,7 @@ if [[ $FROM_PI == 1 ]]; then
   RSYNC_RSH=(-e "$(remote_rsh)")
 fi
 src() {
-  if [[ $FROM_PI == 1 ]]; then printf '%s:%s\n' "$REMOTE_HOST" "$1"; else printf '%s\n' "$MNT/$1"; fi
+  if [[ $FROM_PI == 1 ]]; then printf '%s:%s\n' "$(remote_target)" "$1"; else printf '%s\n' "$MNT/$1"; fi
 }
 src_exists() {
   if [[ $FROM_PI == 1 ]]; then rgate exists "$1" 2>/dev/null; else [[ -d $MNT/$1 ]]; fi
