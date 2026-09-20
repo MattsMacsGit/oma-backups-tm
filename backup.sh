@@ -13,7 +13,7 @@ source "$OMARCHY_TM_ROOT/lib/remote.sh"
 usage() {
   cat <<'EOF'
 Usage:
-  oma-backups backup [--dry-run] [--yes] [--home-only]
+  oma-backups backup [--dry-run] [--yes] [--home-only] [--force-after-restore]
   oma-backups snapshots
   oma-backups files SNAPSHOT [PATH]
   oma-backups copy SNAPSHOT SRC DEST
@@ -24,6 +24,7 @@ EOF
 
 MODE=backup
 HOME_ONLY=0
+FORCE_AFTER_RESTORE=0
 LIST_JSON=0
 ORIG_ARGS=("$@")
 
@@ -33,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run) export OMARCHY_TM_DRY_RUN=1; shift ;;
     --yes) export OMARCHY_TM_YES=1; shift ;;
     --home-only) HOME_ONLY=1; export OMARCHY_TM_HOME_ONLY=1; shift ;;
+    --force-after-restore) FORCE_AFTER_RESTORE=1; shift ;;
     --list) MODE=list; shift ;;
     --prune) MODE=prune; shift ;;
     --browse) MODE=browse; shift; break ;;
@@ -409,6 +411,56 @@ backup_running() {
   [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
+# After a "system + settings" restore this system isn't whole yet: the files
+# that haven't been brought back are on the backup and not here. Backing up
+# now would push that gap over the top of the real backup (rsync --delete)
+# and make a restore point out of it -- which is exactly what happens when a
+# restored spare disk is booted to check it. So every backup is refused
+# until the files are back, unless someone deliberately forces one, meaning
+# "this is my system now; keep only what's on it".
+partial_restore_snapshot() {
+  jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true
+}
+
+OMA_FORCE_NOTE() { printf '%s' "$OMARCHY_TM_STATE/force-after-restore"; }
+
+# A systemd unit takes no arguments, so the plugin leaves a note instead of
+# passing a flag. Only a hand-started backup may use it; an automatic one
+# never does, and never eats the note either.
+take_force_note() {
+  [[ ${OMARCHY_TM_SCHEDULED:-0} == 1 ]] && return 1
+  [[ -f $(OMA_FORCE_NOTE) ]] || return 1
+  [[ ${1:-} == peek ]] || rm -f "$(OMA_FORCE_NOTE)"
+  return 0
+}
+
+# Called twice: once before the sudo re-exec so a refusal costs no password
+# prompt ("peek", consumes nothing), then again as root for real.
+refuse_if_partial_restore() {
+  local peek=${1:-} snap
+  snap="$(partial_restore_snapshot)"
+  [[ -n $snap ]] || return 0
+  if [[ $FORCE_AFTER_RESTORE == 1 ]] || take_force_note "$peek"; then
+    FORCE_AFTER_RESTORE=1
+    [[ $peek == peek ]] && return 0
+    warn "Backing up anyway. From here on the backup keeps only what's on this system."
+    log_file "forced backup after a partial restore from $snap"
+    return 0
+  fi
+  echo
+  gum style --bold "This system isn't whole yet, so backups are paused."
+  gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
+  gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
+  gum style --foreground 8 "  up now would delete them from the backup's current copy."
+  echo
+  gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  gum style --foreground 8 "  To back up anyway and keep only what's here, hold Ctrl and press"
+  gum style --foreground 8 "  \"Backup now\" in the plugin, or run:"
+  gum style --foreground 8 "    oma-backups backup --force-after-restore"
+  echo
+  exit 0
+}
+
 # Checks for another backup and claims the pid file in one step, under a
 # short lock. The pid file used to be written only after the disk was
 # unlocked (several seconds on a Pi), so an automatic backup and a Resume
@@ -594,7 +646,9 @@ cmd_backup() {
     echo "Dry-run only."
     exit 0
   fi
+  refuse_if_partial_restore peek
   require_root "${ORIG_ARGS[@]}"
+  refuse_if_partial_restore
   refuse_if_running
   # From here on this run owns the pid file, and the next steps can unlock
   # the disk, so Stop must already be handled: without these traps a Stop
@@ -770,6 +824,15 @@ cmd_backup() {
     chmod 644 "$OMARCHY_TM_STATE/last-success" 2>/dev/null || true
     progress phase "tidy"
     prune_restore_points || warn "Couldn't tidy up old restore points (this backup is still saved)."
+    # A forced backup settles the question: this system is the real one now,
+    # so the plugin stops offering "Restore my files" and automatic backups
+    # start again. Cleared after the prune above, so the restore point the
+    # files are still in survives this run rather than being thinned on the
+    # way out.
+    if [[ $FORCE_AFTER_RESTORE == 1 && -f $OMARCHY_TM_STATE/partial-restore.json ]]; then
+      rm -f "$OMARCHY_TM_STATE/partial-restore.json"
+      log_file "partial-restore marker cleared by a forced backup"
+    fi
   fi
   cache_remote_df
   progress done "valid=$valid ts=$ts"

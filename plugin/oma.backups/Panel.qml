@@ -19,6 +19,14 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
+  // A system restored without its files: backups are paused so this machine
+  // can't overwrite the real backup with the gap. Holding Ctrl wakes the
+  // Backup now button for a one-off forced backup; automatic backups stay
+  // off until the files are back or a forced backup settles it.
+  readonly property bool blockedByRestore: svc.partialSnapshot !== ""
+  property bool ctrlHeld: false
+  property bool forceAsked: false
+  property bool forceConfirmed: false
   readonly property var quickSkips: [
     { label: "Downloads", paths: [svc.home + "/Downloads"], note: "" },
     { label: "Trash", paths: ["**/.local/share/Trash", ".Trash"], note: "Recommended" },
@@ -76,6 +84,9 @@ Panel {
       showAllSnaps = false
       newDisk = ""
       newDiskConfirmed = false
+      ctrlHeld = false
+      forceAsked = false
+      forceConfirmed = false
       stickDisk = ""
       stickConfirmed = false
     }
@@ -175,7 +186,7 @@ Panel {
       onActivateRequested: {}
       onTextKey: function (t) {
         if (t === "b" || t === "B") {
-          if (svc.hasCapsule && !svc.backupRunning) svc.startBackup()
+          if (svc.hasCapsule && !svc.backupRunning && !root.blockedByRestore) svc.startBackup()
         } else if (t === "s" || t === "S") {
           if (svc.backupRunning) svc.stopBackup()
         } else if (t === "r" || t === "R") {
@@ -342,15 +353,102 @@ Panel {
               }
             }
 
-            Button {
+            Item {
               width: parent.width
+              height: backupBtn.implicitHeight
               visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
-              text: svc.backupIncomplete ? "Resume backup" : "Backup now"
-              foreground: Color.background
-              background: Color.accent
-              accent: Color.accent
-              fontFamily: root.fontFamily
-              onClicked: svc.startBackup()
+              Button {
+                id: backupBtn
+                width: parent.width
+                text: svc.backupIncomplete ? "Resume backup" : "Backup now"
+                // Greyed out while this system is missing its files, and lit
+                // again for as long as Ctrl is held.
+                foreground: root.blockedByRestore && !root.ctrlHeld ? root.dim : Color.background
+                background: root.blockedByRestore && !root.ctrlHeld ? "transparent" : Color.accent
+                bordered: root.blockedByRestore && !root.ctrlHeld
+                accent: Color.accent
+                enabled: !root.blockedByRestore
+                fontFamily: root.fontFamily
+                onClicked: svc.startBackup()
+              }
+              // The shared Button's clicked() carries no modifiers, so the
+              // blocked case gets its own layer on top: it reads Ctrl at
+              // click time and only ever opens the warning below.
+              MouseArea {
+                anchors.fill: parent
+                visible: root.blockedByRestore
+                enabled: root.blockedByRestore
+                hoverEnabled: true
+                acceptedButtons: Qt.LeftButton
+                cursorShape: root.ctrlHeld ? Qt.PointingHandCursor : Qt.ArrowCursor
+                onPositionChanged: function (mouse) {
+                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
+                }
+                onExited: root.ctrlHeld = false
+                onPressed: function (mouse) {
+                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
+                  if (root.ctrlHeld) root.forceAsked = true
+                }
+              }
+            }
+            Text {
+              visible: root.blockedByRestore && !root.forceAsked
+              width: parent.width
+              horizontalAlignment: Text.AlignHCenter
+              text: "Paused until your files are back. Hold Ctrl to back up anyway."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Column {
+              visible: root.blockedByRestore && root.forceAsked
+              width: parent.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                text: "Backing up now keeps only what's on this system. Everything that "
+                  + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
+                  + " — your documents, photos and other files — is dropped from the "
+                  + "backup's current copy and won't be in any new restore point. "
+                  + "Older restore points still have it."
+                color: root.urgent
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Toggle {
+                width: parent.width
+                label: "I understand: keep only what's on this system"
+                checked: root.forceConfirmed
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.forceConfirmed = !root.forceConfirmed
+              }
+              Button {
+                width: parent.width
+                text: "Back up anyway"
+                foreground: root.urgent
+                bordered: true
+                enabled: root.forceConfirmed && !svc.backupRunning
+                fontFamily: root.fontFamily
+                onClicked: {
+                  root.forceAsked = false
+                  root.forceConfirmed = false
+                  svc.startBackup(true)
+                }
+              }
+              Button {
+                width: parent.width
+                text: "Cancel"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  root.forceAsked = false
+                  root.forceConfirmed = false
+                }
+              }
             }
             Text {
               visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup

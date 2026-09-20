@@ -120,6 +120,18 @@ cmd_run() {
     exit 0
   fi
 
+  # A system restored without its files must never back up on its own: it
+  # would push that gap over the real backup. Only bringing the files back,
+  # or a deliberate forced backup, starts automatic backups again. Ctrl-
+  # forcing is a manual act by design, so it never reaches this path.
+  if [[ -s $OMARCHY_TM_STATE/partial-restore.json ]]; then
+    log_file "scheduled backup skipped: this system was restored without its files"
+    notify_user "Automatic backups are paused" \
+      "This system was restored without your files. Open OmaBackups and press \"Restore my files\"." \
+      partial-restore
+    exit 0
+  fi
+
   local why=""
   if on_low_battery; then
     why="The battery is under 20%."
@@ -140,7 +152,8 @@ cmd_run() {
   fi
 
   log_file "scheduled backup starting"
-  if ! "$OMARCHY_TM_ROOT/backup.sh" --yes; then
+  # Marks this run as automatic: backup.sh must not honour a force note here.
+  if ! OMARCHY_TM_SCHEDULED=1 "$OMARCHY_TM_ROOT/backup.sh" --yes; then
     log_file "scheduled backup failed"
     nag_if_overdue "The last automatic backup failed." "$interval" "$since"
     exit 1

@@ -148,9 +148,17 @@ Item {
     privileged(["link"])
   }
 
-  function startBackupService() {
+  function startBackupService(force) {
     root.launchedAt = Date.now() / 1000
-    startUnitProc.command = ["systemctl", "start", "--no-block", "oma-backups-backup.service"]
+    // A systemd unit takes no arguments, so a forced backup leaves a note in
+    // the state folder and backup.sh picks it up and deletes it. $1 keeps a
+    // home folder with spaces in it safe.
+    startUnitProc.command = force
+      ? ["sh", "-c",
+         "touch \"$1/.local/state/omarchy-backups/force-after-restore\"; "
+         + "exec systemctl start --no-block oma-backups-backup.service",
+         "sh", root.home]
+      : ["systemctl", "start", "--no-block", "oma-backups-backup.service"]
     startUnitProc.running = true
   }
 
@@ -357,9 +365,15 @@ Item {
     compileThen("first")
   }
 
-  function startBackup() {
+  // force: this system came back from a partial restore and the user has
+  // deliberately chosen to back it up anyway (Ctrl + Backup now), keeping
+  // only what's on it. Automatic backups never take this path.
+  function startBackup(force) {
+    root.pendingForce = force === true
     compileThen("backup")
   }
+
+  property bool pendingForce: false
 
   // Stopping takes a moment (a Pi has to lock its disk over the network).
   // Until the backup has really exited, say so instead of flipping between
@@ -370,6 +384,7 @@ Item {
   function stopBackup() {
     pendingStop = true
     pendingBackup = false
+    pendingForce = false
     pendingFirstRunDisk = ""
     launchedBackup = false
     sawBackupStatus = false
@@ -589,12 +604,15 @@ Item {
         root.privileged(["first-run", disk])
       } else if (root.pendingBackup) {
         root.pendingBackup = false
+        var forced = root.pendingForce
+        root.pendingForce = false
         root.lastError = root.backupError = ""
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        if (root.linked) root.startBackupService()
-        else root.privileged(["backup", "--yes"])
+        if (root.linked) root.startBackupService(forced)
+        else root.privileged(forced ? ["backup", "--yes", "--force-after-restore"]
+                                    : ["backup", "--yes"])
       }
     }
   }
