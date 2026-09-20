@@ -74,11 +74,14 @@ fi
 "$CLI" doctor >"$WORK/doctor.txt" 2>&1 || true
 cat "$WORK/doctor.txt"
 
-# -o keeps the byte-code out of the repo (this is what used to leave
-# lib/__pycache__ behind after every run).
+# Byte-code goes to the scratch directory, not next to the source (this is
+# what used to leave lib/__pycache__ behind after every run). `python3 -m
+# py_compile` has no way to say where to put it — that is the py_compile
+# module's own `cfile`, so call it directly rather than through -m.
 compiled=1
 for py in "$ROOT/lib/"*.py "$ROOT/pi/oma-gate"; do
-  python3 -m py_compile -o "$WORK/$(basename "$py").pyc" "$py" || compiled=0
+  python3 -c 'import py_compile, sys; py_compile.compile(sys.argv[1], cfile=sys.argv[2], doraise=True)' \
+    "$py" "$WORK/$(basename "$py").pyc" || compiled=0
 done
 ((compiled)) && ok "python compiles" || bad "python compile"
 python3 - "$ROOT" <<'PY' && ok "UKI cmdline rewriter maps PARTUUID" || bad "UKI cmdline rewriter"
