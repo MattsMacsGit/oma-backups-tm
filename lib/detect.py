@@ -32,6 +32,14 @@ INSTALLER_LABELS = PROTECTED_LABELS
 EFI_LABELS = {"OMABOOT", "OMARCHY-EFI", "OMARCHY-ISO"}
 LIVE_LABELS = {"OMARESCUE", "OMARCHY-LIVE"}
 BACKUP_LABELS = {"OMABACKUPS", "OMARCHY-TM", "OMARCHY-BACKUPS"}
+# A network rescue stick (see rescue-stick.sh). Nothing here knew these
+# existed, so a rescue stick came back looking like a blank USB and was
+# offered in every "pick a disk to erase" list with nothing to say what it
+# was. It is still offered — it is the owner's USB — but now it says so.
+NET_LABELS = {
+    "OMANETBOOT", "OMANETRESCUE", "OMANETKEYS",
+    "OMANET-EFI", "OMANET-LIVE", "OMANET-KEYS",
+}
 USB_TRANS = {"usb", "mmc", "sdio"}
 
 
@@ -230,6 +238,33 @@ def protected_reason(disk: dict, live_root_disk: str | None) -> str | None:
     return None
 
 
+def partition_fstypes(disk: dict) -> set[str]:
+    out = set()
+    for ch in disk.get("children") or []:
+        if ch.get("fstype"):
+            out.add(str(ch["fstype"]))
+        out |= partition_fstypes(ch)
+    return out
+
+
+def content_note(disk: dict, cap: dict | None) -> str | None:
+    """What is already on this disk, in words, for a "pick a disk" list.
+
+    Never hides anything and never refuses anything — whose disk it is, is the
+    owner's business. It just means nobody erases their own rescue stick, or a
+    spare drive they restored a working system onto, thinking it was blank.
+    """
+    labels = {str(x).upper() for x in labels_on_disk(disk)}
+    if labels & NET_LABELS:
+        return "network rescue stick"
+    if cap:
+        return "backup disk"
+    fstypes = partition_fstypes(disk)
+    if "crypto_LUKS" in fstypes and fstypes & {"vfat", "msdos"}:
+        return "has an encrypted system on it"
+    return None
+
+
 def capsule_layout(disk: dict) -> dict | None:
     """Return capsule info for 2-part (legacy ISO+LUKS) or 3-part (EFI+live+LUKS)."""
     children = disk.get("children") or []
@@ -378,7 +413,12 @@ def cached_capsule_disk(path: Path) -> dict | None:
     return {"total": total, "used": total - free, "free": free}
 
 
-def detect() -> dict:
+def detect(diagnostics: bool = True) -> dict:
+    """diagnostics=False leaves out the fields only `oma-backups detect`'s own
+    printout uses: the tool inventory and `btrfs subvolume list`. The plugin
+    polls the --json form and has never read either of them, so collecting
+    them there meant scanning for 19 tools three times over and forking btrfs,
+    every time, for nothing."""
     osrel = parse_os_release()
     mounts = parse_mountinfo()
     fstab = parse_fstab()
@@ -479,6 +519,9 @@ def detect() -> dict:
                 "capsule": cap,
                 "labels": labels_on_disk(n),
                 "mountpoints": mountpoints_on_disk(n),
+                # Shown next to the disk wherever one gets picked. Advisory
+                # only: it changes no decision this script makes.
+                "content": content_note(n, cap),
                 "candidate": reason is None and not installer,
             }
         )
@@ -521,14 +564,15 @@ def detect() -> dict:
     # default (non---skip-live) path — see lib/install-rescue.sh need_cmd calls
     # and format-disk.sh's own `command -v sgdisk` check. Not installed by a
     # base Omarchy system, so this must be required, not merely recommended.
+    tool_status = tools() if diagnostics else {}
     missing_tools = [
         k
-        for k, v in tools().items()
+        for k, v in tool_status.items()
         if not v
         and k in {"btrfs", "cryptsetup", "mkfs.btrfs", "mkfs.fat", "rsync", "sfdisk", "sgdisk", "curl", "unsquashfs", "mksquashfs"}
     ]
     # pv is cosmetic (progress bar); arch-chroot is only used by restore-to-disk.sh.
-    optional_missing = [k for k, v in tools().items() if not v and k in {"pv", "arch-chroot"}]
+    optional_missing = [k for k, v in tool_status.items() if not v and k in {"pv", "arch-chroot"}]
 
     snapshots = []
     backup_mounted = False
@@ -608,13 +652,14 @@ def detect() -> dict:
         "current_capsule_uuid": current_capsule_uuid(),
         "limine": limine_info(),
         "snapper": snapper_info(),
-        "subvolume_list": try_subvolume_list(),
-        "tools": tools(),
-        "missing_required_tools": missing_tools,
-        "missing_optional_tools": optional_missing,
         "unsupported_reasons": reasons,
         "warnings": warnings,
     }
+    if diagnostics:
+        result["subvolume_list"] = try_subvolume_list()
+        result["tools"] = tool_status
+        result["missing_required_tools"] = missing_tools
+        result["missing_optional_tools"] = optional_missing
     return result
 
 
@@ -638,7 +683,7 @@ def _human(num) -> str | None:
 
 def print_human(d: dict) -> None:
     ok = "SUPPORTED" if d["supported"] else "UNSUPPORTED"
-    print(f"== Omarchy Time Capsule: detect ({ok}) ==")
+    print(f"== OmaBackups: detect ({ok}) ==")
     osinfo = d["os"]
     print(f"OS:          {osinfo.get('name')}  ID={osinfo.get('id')} version={osinfo.get('version')}")
     print(f"Hostname:    {d.get('hostname')}")
@@ -665,7 +710,7 @@ def print_human(d: dict) -> None:
     print(f"Limine:      ESP={lim.get('esp_path')} UKI={lim.get('uki')} mkinitcpio={lim.get('has_limine_mkinitcpio')}")
     snap = d["snapper"]
     print(f"Snapper:     configs={snap.get('configs') or ['(none)']}  (local rollback — we export, we do not replace)")
-    svl = d["subvolume_list"]
+    svl = d.get("subvolume_list") or {}
     if svl.get("readable"):
         print(f"Subvolumes:  {', '.join(svl.get('paths') or [])}")
     else:
@@ -681,8 +726,8 @@ def print_human(d: dict) -> None:
             flags.append(f"REFUSE: {disk['protected_reason']}")
         elif disk.get("installer"):
             flags.append(f"hidden: {disk['installer']}")
-        elif disk.get("capsule"):
-            flags.append("backup disk")
+        elif disk.get("content"):
+            flags.append(disk["content"])
         elif disk.get("hidden_by_default"):
             flags.append("internal — hidden unless --all")
         elif disk["candidate"]:
@@ -694,7 +739,7 @@ def print_human(d: dict) -> None:
             f"labels={label}  {' | '.join(flags)}"
         )
     print()
-    if d["missing_required_tools"]:
+    if d.get("missing_required_tools"):
         pkg_of = {
             "sgdisk": "gptfdisk",
             "unsquashfs": "squashfs-tools",
@@ -703,7 +748,7 @@ def print_human(d: dict) -> None:
         pkgs = sorted({pkg_of.get(t, t) for t in d["missing_required_tools"]})
         print("Missing required tools:", ", ".join(d["missing_required_tools"]))
         print("  install with: sudo pacman -S", " ".join(pkgs))
-    if d["missing_optional_tools"]:
+    if d.get("missing_optional_tools"):
         print(
             "Missing optional tools:",
             ", ".join(d["missing_optional_tools"]),
@@ -726,7 +771,7 @@ def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="Detect Omarchy-like btrfs layout")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
-    data = detect()
+    data = detect(diagnostics=not args.json)
     if args.json:
         json.dump(data, sys.stdout, indent=2)
         sys.stdout.write("\n")
