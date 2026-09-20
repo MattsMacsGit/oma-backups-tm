@@ -45,6 +45,11 @@ TOCHK_RE = re.compile(r"to-chk=(?P<left>\d+)/(?P<total>\d+)")
 # total keeps growing, so no honest percentage yet); "to-chk" once it knows.
 # backup.sh asks rsync for the whole list up front, so this is a fallback now.
 IRCHK_RE = re.compile(r"ir-chk=(?P<left>\d+)/(?P<total>\d+)")
+# "(xfr#1234, to-chk=...)" — how many files rsync has actually sent, as
+# against how many it has looked at. That ratio, not the byte count, is what
+# says whether a step is copying or just checking: it holds however the file
+# sizes fall.
+XFR_RE = re.compile(r"xfr#(?P<n>\d+)")
 TOTAL_RE = re.compile(r"^Total file size:\s*(?P<n>\d+)")
 # rsync --info=flist2 while it lists everything before copying anything
 # (minutes for a big home on a resume or a slow Pi): "12300 files...".
@@ -68,6 +73,14 @@ LABEL = {
     "tidy": "Tidying up old restore points",
     "setup": "Setting up the backup disk",
     "waiting-input": "Waiting for you — enter the new disk password",
+}
+# Most of a backup is rsync working out what changed, not sending anything.
+# Saying "Copying your files" through all of that is simply wrong, so a step
+# says which of the two it is actually doing.
+CHECK_LABEL = {
+    "os": "Checking system files",
+    "home": "Checking your files",
+    "esp": "Checking boot files",
 }
 # Steps with a real percentage; every other step is shown as "working".
 BAR_STEPS = {"os", "home", "esp", "setup"}
@@ -112,17 +125,6 @@ def human(n: float) -> str:
             return f"{size:.0f} {unit}" if unit in ("B", "KB") else f"{size:.1f} {unit}"
         size /= 1024
     return f"{n:.0f} B"
-
-
-def hms(text: str) -> float:
-    """rsync's "0:04:31" as seconds."""
-    total = 0.0
-    for part in text.split(":"):
-        try:
-            total = total * 60 + int(part)
-        except ValueError:
-            return 0.0
-    return total
 
 
 def clock(seconds: float) -> str:
@@ -282,19 +284,21 @@ def status(
     eta: str = "",
     plan: Plan | None = None,
     extra: dict | None = None,
+    label_text: str = "",
 ) -> dict:
     busy = pct is None
     shown = 0 if busy else max(0, min(100, pct))
+    shown_label = label_text or label(step)
     data = {
         "running": True,
         "phase": step,
-        "label": label(step),
+        "label": shown_label,
         "busy": busy,
         "percent": shown,
         "detail": detail,
         "speed": speed,
         "eta": eta,
-        "line": label(step) if busy else f"{label(step)}  {shown}%",
+        "line": shown_label if busy else f"{shown_label}  {shown}%",
     }
     if extra:
         data.update(extra)
@@ -360,53 +364,92 @@ class RsyncProgress:
         self.started = time.monotonic()
         self.copied = 0
         self.files_done = 0
+        # Once sending data is what's driving the bar, the step keeps saying
+        # so. Near the end of a copy the file count can edge past the byte
+        # count for a moment, and without this the heading flipped back to
+        # "Checking your files" at 87% — after twenty minutes of copying.
+        self.copying_latched = False
+
+    def note_mode(self, sent_files: int, seen_files: int) -> None:
+        """Decide whether this step is copying or checking, and remember it.
+
+        A first backup sends nearly every file it looks at; every backup
+        after that looks at hundreds of thousands and sends a handful. Wait
+        for a sample worth judging — on the first line, nothing has happened
+        either way — then latch, so the heading can go from checking to
+        copying but never flaps back.
+        """
+        if self.copying_latched or seen_files < 100:
+            return
+        if sent_files and sent_files / seen_files >= 0.3:
+            self.copying_latched = True
 
     def numbers(self, copied: int, files_done: int, files_total: int) -> dict:
-        """The figures under the bar: data copied, files done, of how many."""
+        """The figures under the bar, both ways of reading them.
+
+        A first backup copies nearly every byte it looks at, so "43 GB of
+        544 GB" is the useful line. Every backup after that mostly *checks*
+        files and copies a handful, and the same line would read as 2 GB of
+        544 GB while the bar said 40% — so the checking case leads with the
+        file count and says plainly how little had to be copied.
+        """
         out: dict = {}
         if copied:
             self.copied = copied
         if files_done:
             self.files_done = files_done
         total_bytes = self.known_bytes or self.total_size or 0
+        out["copied_bytes"] = self.copied
         if total_bytes:
-            out["copied_bytes"] = self.copied
             out["total_bytes"] = total_bytes
             out["data_text"] = f"{human(self.copied)} of {human(total_bytes)}"
         elif self.copied:
-            out["copied_bytes"] = self.copied
             out["data_text"] = f"{human(self.copied)} copied"
+        out["copied_text"] = f"{human(self.copied)} copied" if self.copied else "nothing to copy so far"
         total_files = files_total or self.known_files or 0
         if total_files:
             out["files_done"] = self.files_done
             out["files_total"] = total_files
             out["files_text"] = f"{self.files_done:,} of {total_files:,} files"
+            out["checked_text"] = f"{self.files_done:,} of {total_files:,} files checked"
         elif self.files_done:
             out["files_done"] = self.files_done
             out["files_text"] = f"{self.files_done:,} files"
+            out["checked_text"] = f"{self.files_done:,} files checked"
         return out
 
-    def detail(self, nums: dict, left_text: str) -> str:
-        parts = [nums.get("data_text", ""), nums.get("files_text", "")]
+    def detail(self, nums: dict, left_text: str, copying: bool = True) -> str:
+        if copying:
+            parts = [nums.get("data_text", ""), nums.get("files_text", "")]
+        else:
+            parts = [nums.get("checked_text", ""), nums.get("copied_text", "")]
         if left_text:
             parts.append(f"{left_text} left")
         return "  ·  ".join(p for p in parts if p)
 
-    def time_left(self, copied: int, total_bytes: int, rsync_eta: str) -> str:
-        """What's left, from the speed this step has actually managed.
+    def time_left(self, fraction: float) -> str:
+        """What's left, from how fast the bar itself has been moving.
 
-        rsync's own ETA only looks at the file it is on, so it swings wildly
-        on a tree of mixed sizes. With a real total, measured speed is better.
+        Whatever is driving the bar has to be what the estimate follows:
+        bytes on a first backup, files checked on every one after it. Working
+        it out from bytes alone said "1000 h" on a backup that was mostly
+        checking files it had no need to copy — a couple of GB moved, divided
+        by a transfer rate near zero, against a 544 GB tree.
+
+        rsync's own ETA is no better: it only looks at the file it is on.
         """
-        if total_bytes and copied >= total_bytes:
+        if fraction <= 0.005 or fraction >= 1.0:
             return ""
-        if total_bytes and copied:
-            ran = time.monotonic() - self.started
-            if ran > 10:
-                rate = copied / ran
-                if rate > 0:
-                    return clock((total_bytes - copied) / rate)
-        return clock(hms(rsync_eta)) if rsync_eta else ""
+        ran = time.monotonic() - self.started
+        # Early on, the rate says more about the first few folders than about
+        # the run, and a wild guess is worse than none.
+        if ran < 15:
+            return ""
+        left = ran / fraction - ran
+        # Anything past this is a number nobody can act on; say nothing.
+        if left > 48 * 3600:
+            return ""
+        return clock(left)
 
     def feed(self, line: str) -> dict | None:
         compact = line.replace(",", "")
@@ -430,15 +473,17 @@ class RsyncProgress:
             # told us how big this step really is.
             checked = int(ir.group("total")) - int(ir.group("left"))
             nums = self.numbers(copied, checked, 0)
+            check_label = CHECK_LABEL.get(self.step, "")
             if self.known_bytes:
                 self.best = max(self.best, min(99, int(100 * copied / self.known_bytes)))
                 self.plan.advance(self.step, self.best / 100, copied, checked)
-                left = self.time_left(copied, self.known_bytes, "")
-                return status(self.step, self.best, self.detail(nums, left), speed,
-                              plan=self.plan, extra=nums)
+                left = self.time_left(self.best / 100)
+                return status(self.step, self.best, self.detail(nums, left, False), speed,
+                              plan=self.plan, extra=nums, label_text=check_label)
             self.plan.begin(self.step)
-            detail = self.detail(nums, "") or f"Checking for changes: {checked:,} files checked"
-            return status(self.step, None, detail, speed, plan=self.plan, extra=nums)
+            detail = self.detail(nums, "", False)
+            return status(self.step, None, detail, speed, plan=self.plan, extra=nums,
+                          label_text=check_label)
         if not m and not c:
             return None
         byte_pct = int(m.group("pct")) if m else 0
@@ -456,15 +501,19 @@ class RsyncProgress:
             pct = 99
         self.best = max(self.best, pct)
         nums = self.numbers(copied, files_done, files_total)
-        # rsync's ETA assumes every byte must be copied; it only means
-        # something when copying (not checking) is what's moving the bar.
-        eta = m.group("eta") if m and byte_pct >= file_pct and m.group("eta") else ""
+        # Which of the two is moving the bar: sending files, or working out
+        # which ones need sending. That decides the wording and the label.
+        x = XFR_RE.search(compact)
+        self.note_mode(int(x.group("n")) if x else 0, files_done)
+        copying = self.copying_latched
+        eta = m.group("eta") if m and copying and m.group("eta") else ""
         if eta.strip("0:") == "":
             eta = ""
-        left_text = self.time_left(copied, self.known_bytes or self.total_size or 0, eta)
+        left_text = self.time_left(self.best / 100)
         self.plan.advance(self.step, self.best / 100, copied, files_done)
-        return status(self.step, self.best, self.detail(nums, left_text), speed, eta,
-                      plan=self.plan, extra=nums)
+        label_text = "" if copying else CHECK_LABEL.get(self.step, "")
+        return status(self.step, self.best, self.detail(nums, left_text, copying), speed, eta,
+                      plan=self.plan, extra=nums, label_text=label_text)
 
     def maybe_write(self, data: dict, force: bool = False) -> None:
         now = time.monotonic()
