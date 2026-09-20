@@ -136,11 +136,6 @@ def run(argv: list[str], check: bool = False, capture: bool = True) -> subproces
     return subprocess.run(argv, check=check, text=True, capture_output=capture)
 
 
-def run_input(argv: list[str], text: str | None) -> subprocess.CompletedProcess:
-    """Same, with something fed to it on stdin (a password, say)."""
-    return subprocess.run(argv, input=text, text=True, capture_output=True, check=False)
-
-
 def lsblk_json() -> list[dict]:
     proc = run(
         [
@@ -446,6 +441,96 @@ def wifi_devices() -> list[str]:
         return []
 
 
+# iwd keeps one file per saved network here (the rescue ISO ships iwd, no
+# NetworkManager — checked against its package list).
+IWD_DIR = Path("/var/lib/iwd")
+
+
+def wifi_power_on(dev: str) -> None:
+    '''A soft-blocked radio looks exactly like "there are no networks here".'''
+    if shutil.which("rfkill"):
+        run(["rfkill", "unblock", "wlan"])
+    run(["iwctl", "device", dev, "set-property", "Powered", "on"])
+
+
+def iwd_network_files(ssid: str) -> list[Path]:
+    """Where iwd would keep this network, best spelling first.
+
+    iwd names a saved network after its SSID. A plain one is used as the file
+    name as it stands; anything that can't go in a file name is stored
+    hex-encoded behind an '='. Both spellings come back so the one we don't
+    write can be deleted — two files for one network is how iwd ends up
+    reconnecting with the old, wrong password.
+    """
+    hexed = IWD_DIR / ("=" + ssid.encode().hex() + ".psk")
+    if ssid and not ssid.startswith("=") and re.fullmatch(r"[A-Za-z0-9 ._-]+", ssid):
+        return [IWD_DIR / (ssid + ".psk"), hexed]
+    return [hexed]
+
+
+def wifi_save_password(ssid: str, pw: str) -> bool:
+    """Give the password to iwd directly instead of typing it at iwctl.
+
+    iwctl only accepts a passphrase through an interactive agent that wants a
+    real terminal, so feeding it one down a pipe does not reliably work — and
+    --passphrase would put the password in the process list for anything on
+    the machine to read. Neither is needed: iwd picks a saved network up from
+    this directory by itself and connects with it.
+    """
+    files = iwd_network_files(ssid)
+    try:
+        IWD_DIR.mkdir(parents=True, exist_ok=True)
+        for stale in files[1:]:
+            stale.unlink(missing_ok=True)
+        files[0].write_text("[Security]\nPassphrase=" + pw + "\n")
+        files[0].chmod(0o600)
+    except OSError as exc:
+        gum_style("--foreground", "1", f"  Couldn't save the Wi-Fi password: {exc}")
+        return False
+    time.sleep(1)  # iwd watches the directory; give it a moment to notice
+    return True
+
+
+def wifi_state(dev: str) -> str:
+    text = ANSI.sub("", run(["iwctl", "station", dev, "show"]).stdout)
+    found = re.search(r"^\s*State\s+(\S+)", text, re.M)
+    return found.group(1) if found else ""
+
+
+def wifi_connect(dev: str, ssid: str) -> tuple[bool, str]:
+    """Connect and get an address. Returns (online, what to tell them).
+
+    Three different failures used to come out as one guess — "check the
+    password" — whether the password was wrong, the radio was off, or the
+    router simply never handed out an address. Each says its own piece now,
+    and if iwctl itself refuses, it gets to say why in its own words.
+    """
+    # stdin stays attached to the terminal on purpose: if iwd somehow hasn't
+    # picked up the saved password, iwctl asks for it here and they can just
+    # type it, rather than the wizard failing for a reason nobody can see.
+    # The timeout is only so that can never become a wait with no end to it.
+    try:
+        proc = subprocess.run(
+            ["iwctl", "station", dev, "connect", ssid],
+            capture_output=True, text=True, check=False, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        return False, f"Gave up waiting for {ssid} to answer."
+    if proc.returncode != 0:
+        detail = ANSI.sub("", (proc.stdout or "") + " " + (proc.stderr or ""))
+        detail = " ".join(detail.split())[:200]
+        return False, detail or f"Couldn't connect to {ssid}."
+    for _ in range(20):
+        if wifi_state(dev).lower() == "connected":
+            break
+        time.sleep(1)
+    else:
+        return False, f"{ssid} wouldn't accept that password."
+    if wait_online(30):
+        return True, ""
+    return False, f"Joined {ssid}, but it didn't give this computer an address."
+
+
 def wifi_networks(dev: str) -> list[tuple[str, str]]:
     run(["iwctl", "station", dev, "scan"])
     time.sleep(4)
@@ -475,6 +560,7 @@ def wifi_setup() -> bool:
         pause("Press Enter to try again, or q for a shell.")
         return wait_online(15)
     dev = devs[0]
+    wifi_power_on(dev)
     while True:
         gum_style("--foreground", "8", "Looking for Wi-Fi networks...")
         nets = wifi_networks(dev)
@@ -487,22 +573,17 @@ def wifi_setup() -> bool:
         if choice == "I'll plug in a cable":
             pause("Plug in the cable, then press Enter.")
             return wait_online(15)
-        security = dict(nets).get(choice, "psk")
-        pw = None
-        if security != "open":
+        if dict(nets).get(choice, "psk") != "open":
             pw = gum_input(header=f"Wi-Fi password for {choice}", password=True)
             if pw is None:
                 continue
-        # Passed on stdin, not as --passphrase: an argument is visible to
-        # anything that lists running processes.
-        run_input(
-            ["iwctl", "station", dev, "connect", choice],
-            (pw + "\n") if pw is not None else None,
-        )
+            if not wifi_save_password(choice, pw):
+                continue
         gum_style("--foreground", "8", f"Connecting to {choice}...")
-        if wait_online(30):
+        ok, why = wifi_connect(dev, choice)
+        if ok:
             return True
-        gum_style("--foreground", "3", "Couldn't connect. Check the password and try again.")
+        gum_style("--foreground", "3", f"  {why}")
 
 
 def tailscale_up() -> bool:
