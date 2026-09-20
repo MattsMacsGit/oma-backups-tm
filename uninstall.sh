@@ -12,18 +12,30 @@ PLUGIN="$HOME/.config/omarchy/plugins/oma.backups"
 CFG="$HOME/.config/omarchy-backups"
 STATE="$HOME/.local/state/omarchy-backups"
 
+# Settings (the skip list) are removed unless you say otherwise, so that
+# reinstalling really does give you a fresh start: a folder skipped on the old
+# install used to come back on the new one, with nothing to say why.
 PURGE=0
-[[ ${1:-} == --purge ]] && PURGE=1
+KEEP=0
+case "${1:-}" in
+  --purge) PURGE=1 ;;
+  --keep-settings) KEEP=1 ;;
+esac
 
 ask() {
   if command -v gum >/dev/null 2>&1; then
     gum confirm "$1"
   else
-    local reply
-    read -rp "$1 [Y/n] " reply
+    local reply=""
+    # No terminal (piped into bash): take the default rather than dying.
+    read -rp "$1 [Y/n] " reply || true
     [[ -z $reply || $reply == [Yy]* ]]
   fi
 }
+
+if [[ $PURGE == 0 && $KEEP == 0 && -d $CFG ]]; then
+  ask "Also delete your settings (the skip list) in $CFG?" && PURGE=1
+fi
 
 # Only offer to delete something that is unmistakably this repo.
 REMOVE_SRC=0
@@ -67,10 +79,10 @@ fi
 
 if [[ $PURGE == 1 ]]; then
   rm -rf "$CFG"
-  echo "Removed your settings too (skip list, etc — ran with --purge)."
+  echo "Removed your settings (skip list, etc). A reinstall starts fresh."
 else
   echo "Kept your settings at $CFG (skip list, etc)."
-  echo "Re-run with --purge to remove those too."
+  echo "A reinstall will pick them up again, including anything you skipped."
 fi
 
 if [[ $REMOVE_SRC == 1 ]]; then

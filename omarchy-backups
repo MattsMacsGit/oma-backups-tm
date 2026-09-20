@@ -30,7 +30,7 @@ Every day
 
 Setting up
   disks [--all] [--json]  disks that could be used
-  first-run /dev/sdX      set up a disk and take the first backup
+  first-run /dev/sdX      set up a disk, ready for its first backup
   format-disk /dev/sdX [--yes] [--force] [--skip-live] [--iso PATH]
                           set up a disk and nothing else
   link [--refresh]        stop everyday actions asking for a password
@@ -199,10 +199,14 @@ case "$cmd" in
       exit 1
     fi
     "$OMARCHY_TM_ROOT/link.sh" --quiet || echo "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
-    "$OMARCHY_TM_ROOT/mount.sh" mount --disk "$disk"
-    extra=()
-    [[ ${OMARCHY_TM_HOME_ONLY:-0} == 1 ]] && extra+=(--home-only)
-    exec "$OMARCHY_TM_ROOT/backup.sh" --yes "${extra[@]}"
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" idle || true
+    # Setup ends here. The first backup is a big job and it is the user's to
+    # start, once they have looked through the settings — not something that
+    # begins on its own the moment a disk is set up.
+    echo
+    echo "Backup disk ready. Nothing has been copied to it yet."
+    echo "Open the OmaBackups icon on the bar, set up what to skip, then press Backup now."
+    [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
     ;;
   stop)
     require_root stop

@@ -31,6 +31,27 @@ Item {
   property string progressLabel: ""
   property bool progressBusy: false
   property string progressDetail: ""
+  // The second bar: the whole backup, weighted by how much data each step has
+  // to move (see lib/progress.py), plus what it thinks is left.
+  property int overallPercent: 0
+  property int overallStep: 0
+  property int overallSteps: 0
+  property string overallEta: ""
+  property string overallTotalTime: ""
+  property string elapsedText: ""
+  readonly property bool hasOverall: overallSteps > 0
+  readonly property string overallText: {
+    if (!hasOverall) return ""
+    var s = "Overall  ·  " + overallPercent + "%"
+    if (overallStep > 0) s += "  ·  step " + overallStep + " of " + overallSteps
+    return s
+  }
+  readonly property string overallDetail: {
+    if (overallEta === "") return elapsedText !== "" ? elapsedText + " so far" : ""
+    var s = "about " + overallEta + " left"
+    if (overallTotalTime !== "") s += " of about " + overallTotalTime
+    return s
+  }
   readonly property string progressText: progressBusy || progressLabel === ""
     ? (progressLabel || Model.phaseLabel(progressPhase))
     : progressLabel + "  " + progressPercent + "%"
@@ -579,6 +600,12 @@ Item {
     root.progressLabel = j.label ? String(j.label) : ""
     root.progressBusy = j.busy === true
     root.progressDetail = j.detail ? String(j.detail) : ""
+    root.overallPercent = typeof j.overall_percent === "number" ? j.overall_percent : 0
+    root.overallStep = typeof j.overall_step === "number" ? j.overall_step : 0
+    root.overallSteps = typeof j.overall_steps === "number" ? j.overall_steps : 0
+    root.overallEta = j.overall_eta ? String(j.overall_eta) : ""
+    root.overallTotalTime = j.overall_total_time ? String(j.overall_total_time) : ""
+    root.elapsedText = j.elapsed ? String(j.elapsed) : ""
     if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
   }
 
