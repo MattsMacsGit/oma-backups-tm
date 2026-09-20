@@ -51,7 +51,11 @@ MOUNT = Path(os.environ.get("OMA_GATE_MOUNT", "")) if TEST else Path("/run/omarc
 # each request is its own process. Without this, a lock arriving mid-unlock
 # saw nothing open yet, locked nothing, and the unlock landed behind it and
 # left the disk open -- which is what a Stop pressed while unlocking did.
-CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK", "")) if TEST else Path("/run/oma-gate.capsule.lock")
+# The fallback matters: an empty path here made `with_name` below raise on
+# import, so a test run that set the other three variables but not this one
+# died before it could answer anything. Production never reaches it (root is
+# not TEST) — it is only the test harness that could trip over it.
+CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK") or "/tmp/oma-gate-test.capsule.lock") if TEST else Path("/run/oma-gate.capsule.lock")
 # A lock request leaves this behind while it queues. If the laptop is killed
 # before its turn comes (a Stop cut short by a short service timeout), the
 # unlock it was chasing finishes, sees the note, and locks up after itself.
