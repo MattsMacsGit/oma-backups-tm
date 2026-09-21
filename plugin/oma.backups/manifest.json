@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "oma.backups",
   "name": "OmaBackups",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": "OmaBackups",
   "license": "MIT",
   "description": "Encrypted backups of this system and home to a USB disk. Setting up a disk and restoring both wipe a disk.",
