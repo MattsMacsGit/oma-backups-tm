@@ -2,7 +2,6 @@
 # User skip-paths.txt is merged on top of these on every backup.
 tmp
 var/tmp
-var/lib/ollama
 swap
 swapfile
 lost+found

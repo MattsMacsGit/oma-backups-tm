@@ -85,6 +85,25 @@ refuse_if_backup_disk() {
 }
 refuse_if_backup_disk
 
+# Never restore onto the stick this is running from. On the rescue system /
+# is a RAM overlay, so the / and /boot checks above can't see the stick; the
+# wizard used to be the only thing standing in the way, and it went by labels.
+refuse_if_running_from() {
+  local mp src disk
+  for mp in "$OMARCHY_TM_ROOT" /run/archiso/bootmnt; do
+    mountpoint -q "$mp" 2>/dev/null || [[ $mp == "$OMARCHY_TM_ROOT" ]] || continue
+    src="$(findmnt -n -o SOURCE --target "$mp" 2>/dev/null || true)"
+    src=${src%%\[*}
+    [[ $src == /dev/* ]] || continue
+    disk="$(lsblk -nr -s -o NAME,TYPE "$src" 2>/dev/null | awk '$2=="disk"{d=$1} END{print d}')"
+    [[ -n $disk ]] || continue
+    if [[ $(real_dev "/dev/$disk") == "$(real_dev "$TARGET")" ]]; then
+      die "REFUSING to restore onto $TARGET — OmaBackups is running from it."
+    fi
+  done
+}
+refuse_if_running_from
+
 # Where the restore point is read from: the mounted backup disk, or the Pi.
 RSYNC_RSH=()
 if [[ $FROM_PI == 1 ]]; then
@@ -237,6 +256,7 @@ trap on_restore_exit EXIT
 # typed, and to catch a backup disk that was mounted in the meantime.
 recheck_disk "$TARGET" "restore onto" "$TARGET_WAS"
 refuse_if_backup_disk
+refuse_if_running_from
 
 while read -r mp; do
   [[ -z $mp ]] && continue
