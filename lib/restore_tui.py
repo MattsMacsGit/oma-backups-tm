@@ -230,17 +230,42 @@ def live_root_disk() -> str | None:
     return f"/dev/{name}"
 
 
+def mounts_of(disk: dict) -> set[str]:
+    out_m: set[str] = set()
+    for mp in disk.get("mountpoints") or []:
+        if mp:
+            out_m.add(mp)
+    for ch in disk.get("children") or []:
+        out_m |= mounts_of(ch)
+    return out_m
+
+
+def has_open_crypt(disk: dict) -> bool:
+    return any(
+        ch.get("type") == "crypt" or has_open_crypt(ch)
+        for ch in disk.get("children") or []
+    )
+
+
 def classify_disk(path: str, n: dict, live: str | None) -> dict:
+    # What protects a disk is whether we are using it right now, not what it
+    # is called. The rescue system only mounts what it runs from and the
+    # backup it reads, so anything mounted or unlocked is one of those two.
+    # Going by labels alone locked out a spare or half-made rescue stick,
+    # which someone restoring a broken machine may have no other way to wipe.
     labs = labels_of(n)
+    mps = mounts_of(n)
     kind = "disk"
     try:
         same_live = bool(live and os.path.realpath(path) == os.path.realpath(live))
     except OSError:
         same_live = False
-    if labs & LIVE_LABELS or labs & BACKUP_LABELS:
+    if str(MNT) in mps:
         kind = "backup-usb"
-    elif same_live:
+    elif same_live or mps or has_open_crypt(n):
         kind = "live-usb"
+    elif labs & LIVE_LABELS or labs & BACKUP_LABELS:
+        kind = "oma-spare"
     elif labs & INSTALLER_LABELS:
         kind = "installer"
     elif (n.get("tran") or "").lower() in {"usb", "mmc", "sdio"}:
@@ -721,8 +746,9 @@ def pick_snapshot(snaps: list[dict]) -> dict | None:
 
 def kind_tag(d: dict) -> str:
     return {
-        "live-usb": "this rescue USB (booted)",
-        "backup-usb": "backup source USB",
+        "live-usb": "in use: this rescue USB",
+        "backup-usb": "in use: the backup you restore from",
+        "oma-spare": "OmaBackups disk, not in use",
         "installer": "Ventoy/installer",
         "internal": "INTERNAL",
         "usb": "USB",
@@ -730,9 +756,10 @@ def kind_tag(d: dict) -> str:
 
 
 def pick_target(disks: list[dict] | None = None) -> dict | None:
-    # Only this backup/rescue stick is omitted. Other USB disks (installer
-    # sticks, extra cards) stay on the list even if they look "live".
-    hidden_kinds = {"backup-usb"}
+    # Only the disks in use right now are omitted: the stick we booted from
+    # and the backup being read. Every other disk stays on the list, a spare
+    # OmaBackups stick included.
+    hidden_kinds = {"live-usb", "backup-usb"}
     while True:
         settle_block_devices()
         disks = list_disks()
@@ -750,7 +777,7 @@ def pick_target(disks: list[dict] | None = None) -> dict | None:
             )
         out()
         if skipped:
-            gum_style("--foreground", "8", "This backup/rescue USB is not offered as a restore target.")
+            gum_style("--foreground", "8", "Disks in use (the rescue USB, the backup) can't be restored onto.")
             out()
         if not candidates:
             gum_style("--foreground", "3", "No other disks yet (USB card readers are often slow).")
@@ -788,14 +815,15 @@ def confirm_wipe(target: dict, snap: dict) -> bool:
         f"  {target['path']}  {target['size']}  {target['model']}  ({kind_tag(target)})",
     )
     gum_style("--foreground", "8", f"  Restore point: {snap.get('timestamp')}")
-    if target["kind"] in {"live-usb", "backup-usb"}:
+    if target["kind"] == "oma-spare":
         out()
-        gum_style(
-            "--foreground",
-            "3",
-            "That is this backup/rescue USB — restoring onto it destroys the copy",
-        )
-        gum_style("--foreground", "3", "you are restoring from.")
+        labs = set(target.get("labels") or [])
+        if labs & BACKUP_LABELS:
+            gum_style("--foreground", "3", "That disk holds OmaBackups backups (not the ones you are restoring")
+            gum_style("--foreground", "3", "from). Every restore point on it will be gone.")
+        else:
+            gum_style("--foreground", "3", "That disk is an OmaBackups rescue USB (not the one running now).")
+            gum_style("--foreground", "3", "It will no longer boot; you can make it again from Settings.")
     out()
     name = Path(target["path"]).name
     typed = ask(f"Type the disk name to confirm ({name})")
