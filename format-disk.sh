@@ -204,7 +204,14 @@ close_crypt_on_disk "$DISK"
 if [[ -b $P3 ]]; then
   wipe_luks_header "$P3"
 fi
+unmount_disk "$DISK" ||
+  fail_setup "something on $DISK won't unmount ($OMA_STILL_MOUNTED) — close anything open on it, unplug it, plug it back in, and try again"
 step "Wiping old partition signatures"
+# Each partition's own signature first: wiping the disk only takes out the
+# partition table, and the new partitions land at the same offsets, so an old
+# filesystem survives it intact and the desktop re-mounts it out from under
+# the mkfs below. See wipe_partition_signatures.
+wipe_partition_signatures "$DISK"
 run_quiet wipefs -a "$DISK" || true
 step "Partitioning the disk"
 run_quiet sgdisk --zap-all "$DISK"
@@ -217,6 +224,8 @@ run_quiet partprobe "$DISK" || true
 command -v udevadm >/dev/null && run_quiet udevadm settle || true
 sleep 2
 close_crypt_on_disk "$DISK" || true
+unmount_disk "$DISK" ||
+  fail_setup "the desktop keeps re-mounting $DISK ($OMA_STILL_MOUNTED) — unplug it, plug it back in, and try again"
 [[ -b $P1 && -b $P2 && -b $P3 ]] || fail_setup "new partitions did not appear"
 if lsblk -nr -o TYPE "$DISK" | grep -qx crypt; then
   fail_setup "old LUKS volume is still unlocked (Files/GNOME reopened it)"
@@ -265,6 +274,13 @@ chmod 755 "$MNT" "$MNT/os" "$MNT/home" "$MNT/esp" "$MNT/meta" 2>/dev/null || tru
 progress set setup 30
 
 step "Formatting the boot and rescue partitions"
+# Minutes have passed since the partition table was written — long enough for
+# the desktop to have mounted one of these. mkfs.ext4 will not touch a mounted
+# partition, so make sure neither of them is.
+# These two only: the encrypted volume is mounted by now and lives on the
+# same disk, so a whole-disk sweep would pull it out from under us.
+unmount_disk "$P1" "$P2" ||
+  fail_setup "the desktop keeps re-mounting $DISK ($OMA_STILL_MOUNTED) — unplug it, plug it back in, and try again"
 run_quiet mkfs.fat -F32 -n "$EFI_LABEL" "$P1"
 run_quiet mkfs.ext4 -F -L "$LIVE_LABEL" "$P2"
 progress set setup 35

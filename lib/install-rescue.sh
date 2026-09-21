@@ -177,7 +177,11 @@ extract_omarchy_iso() {
     trap 'umount "$loop" 2>/dev/null || umount -l "$loop" 2>/dev/null || true; rmdir "$loop" 2>/dev/null || true' EXIT
     mount -o loop,ro "$iso" "$loop"
     [[ -d $loop/arch ]] || die "That file is not an Omarchy installer ISO (there is no arch/ folder inside it)."
-    step "Extracting the Omarchy live system (this is the big one — it's ~6GB)"
+    step "Extracting the Omarchy live system (the big one — it's ~6GB)"
+    # No progress output on this one (plain rsync, no --info=progress2), so
+    # say up front that silence is expected: on a slow USB stick this single
+    # step is 10-15 minutes and people reasonably think it has hung.
+    step "This step shows no progress and can take 10-15 minutes on a slower USB stick. That is normal — please be patient and leave it running."
     rsync -a --delete "$loop/arch/" "$live/arch/"
   )
   [[ -d $live/arch/x86_64 || -d $live/arch/boot ]] || die "extracted ISO missing arch/boot or arch/x86_64"

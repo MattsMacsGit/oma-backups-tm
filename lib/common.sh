@@ -437,6 +437,86 @@ close_crypt_on_disk() {
   die "could not close LUKS on $disk — eject the disk in Files, unplug it, plug it back in, and try again. Refusing to format while the old volume is still unlocked."
 }
 
+# Every mount point currently under the given disks or partitions, one per
+# line. Mount points nested below one of them (a LUKS volume of ours, say)
+# count too — that is what makes it a usable "is anything in the way" check.
+disk_mountpoints() {
+  local d
+  for d in "$@"; do
+    # Not -r: raw mode joins a device's several mount points into a single
+    # line with a literal \x0a between them, which hands umount a path that
+    # does not exist and slips straight past the / /boot /home guard in
+    # unmount_disk. Plain output puts one mount point on each line.
+    lsblk -n -o MOUNTPOINTS "$d" 2>/dev/null | awk 'NF'
+  done
+}
+
+# Unmount everything on a whole disk and keep at it until the disk is clear.
+#
+# One pass is not enough. The desktop's udisks mounts whatever it finds the
+# moment a partition table changes, without asking, so an unmount done before
+# wipefs is undone again by the time mkfs runs — and the automount can land
+# just *after* a single retry, which is why this keeps checking rather than
+# unmounting once and hoping.
+#
+# Returns 1 with OMA_STILL_MOUNTED set if something will not let go; the
+# caller reports that in its own voice (fail/fail_setup/die all differ).
+OMA_STILL_MOUNTED=""
+# Takes a whole disk, or individual partitions when only those should be
+# cleared — a whole-disk sweep would also take down our own backup volume
+# once it is mounted, which is never what the caller means.
+unmount_disk() {
+  local i mp src busy
+  OMA_STILL_MOUNTED=""
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    busy=""
+    while IFS= read -r mp; do
+      [[ -n $mp ]] || continue
+      case "$mp" in
+        /|/boot|/home) die "REFUSING to unmount $mp while erasing $*" ;;
+      esac
+      busy="$mp"
+      umount "$mp" 2>/dev/null && continue
+      if command -v udisksctl >/dev/null; then
+        src="$(findmnt -n -o SOURCE --target "$mp" 2>/dev/null || true)"
+        [[ -n $src ]] && udisksctl unmount -b "$src" >/dev/null 2>&1 && continue
+      fi
+      umount -l "$mp" 2>/dev/null || true
+    done < <(disk_mountpoints "$@")
+    [[ -n $busy ]] || return 0
+    sleep 1
+  done
+  OMA_STILL_MOUNTED="$(disk_mountpoints "$@" | paste -sd' ' -)"
+  [[ -n $OMA_STILL_MOUNTED ]] || return 0
+  return 1
+}
+
+# Erase the filesystem signature inside each partition, before the partition
+# table itself goes.
+#
+# `wipefs -a /dev/sdX` clears the *disk's* partition table and nothing else —
+# the filesystems inside the partitions are left untouched. Since we always
+# lay the new partitions down at byte-identical offsets, those old
+# filesystems come straight back to life the instant the new table is
+# written: same ext4, same label, same UUID. The desktop then auto-mounts one
+# of them and the next mkfs refuses outright —
+#   /dev/sdb2 is mounted; will not make a filesystem here!
+# — which left a half-erased, unbootable USB and a "wipe it and start again"
+# that could never work, because starting again hit the same wall. (mke2fs
+# takes -F twice to steamroll a mounted device; forcing a blind write over
+# something that is mounted is the wrong answer, so remove the cause.)
+#
+# Best effort per partition: a signature we fail to clear is not worth
+# aborting an erase over, and the unmount + mkfs checks downstream still
+# catch the case where it mattered.
+wipe_partition_signatures() {
+  local disk=$1 part
+  while read -r part; do
+    [[ -n $part && -b $part ]] || continue
+    run_quiet wipefs -a "$part" || log_file "wipefs -a $part failed (carrying on)"
+  done < <(lsblk -nr -p -o NAME,TYPE "$disk" 2>/dev/null | awk '$2=="part"{print $1}')
+}
+
 luks_uuid_of() {
   cryptsetup luksUUID "$1" 2>/dev/null || true
 }
@@ -531,6 +611,12 @@ recheck_disk() {
 }
 
 progress() {
+  # A browse session borrows open_destination (and so its "Unlocking the
+  # backup disk" step), but it is not a backup: the status file is the
+  # plugin's answer to "is a backup running?", nothing here ever writes it
+  # back to idle, and a browse that says "running" pins the panel to a
+  # backup that does not exist — long after the browse has gone.
+  [[ -n ${BROWSE_STATE:-} ]] && return 0
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$@" || true
 }
 
@@ -703,7 +789,19 @@ pid_file() {
 OMA_BROWSE_DIR=/run/omarchy-backups-browse
 
 browse_in_progress() {
-  compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1
+  local f ts
+  compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1 || return 1
+  # The state file is only as trustworthy as the unit behind it. A browse
+  # killed before its cleanup ran leaves the file there for good, and this
+  # question is what pauses automatic backups — so one leftover file used to
+  # mean no automatic backup ever happened again. Check, and sweep up.
+  for f in "$OMA_BROWSE_DIR"/*.json; do
+    ts=$(basename "$f" .json)
+    systemctl is-active --quiet "oma-backups-browse@$ts.service" 2>/dev/null && return 0
+    rm -f "$f" 2>/dev/null || true
+    rmdir "$OMA_BROWSE_DIR/$ts" 2>/dev/null || true
+  done
+  return 1
 }
 
 # "Does a process with this number exist?" — nothing more. For the question

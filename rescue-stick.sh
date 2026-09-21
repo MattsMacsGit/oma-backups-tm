@@ -192,14 +192,18 @@ done
 # —— Build it ——
 WORK="$(mktemp -d /run/oma-stick.XXXXXX)"
 EFI_MNT=$WORK/efi LIVE_MNT=$WORK/live KEYS_MNT=$WORK/keys
-trap 'fail "Something went wrong partway through. Details: $OMARCHY_TM_LOG"' ERR
+trap 'fail "The USB was erased but the stick was never finished, so it will not boot. Run this again to make it properly. Details: $OMARCHY_TM_LOG"' ERR
 
 echo
 step "Erasing $DISK"
 close_crypt_on_disk "$DISK"
-while read -r mp; do
-  [[ -n $mp ]] && umount "$mp" 2>/dev/null || true
-done < <(lsblk -n -o MOUNTPOINTS "$DISK" | awk 'NF')
+unmount_disk "$DISK" ||
+  fail "Something on $DISK won't unmount ($OMA_STILL_MOUNTED). Close anything open on it, unplug it, plug it back in, and try again."
+# Before the partition table goes, not after: the new partitions land at the
+# same offsets as the old ones, so any filesystem left inside them survives
+# the table being rewritten and comes back complete with its old label. See
+# wipe_partition_signatures — this is what made re-making a stick impossible.
+wipe_partition_signatures "$DISK"
 run_quiet wipefs -a "$DISK"
 run_quiet sgdisk --zap-all "$DISK"
 run_quiet sgdisk \
@@ -210,6 +214,10 @@ run_quiet sgdisk \
 run_quiet partprobe "$DISK" || true
 udevadm settle || true
 sleep 1
+# A fresh partition table is exactly what makes the desktop pounce, so sweep
+# again here — mkfs.ext4 refuses a mounted partition outright.
+unmount_disk "$DISK" ||
+  fail "The desktop keeps re-mounting $DISK ($OMA_STILL_MOUNTED). Unplug it, plug it back in, and try again."
 [[ -b $P1 && -b $P2 && -b $P3 ]] || fail "The new partitions didn't appear. Unplug the USB, plug it back in, and try again."
 run_quiet mkfs.fat -F32 -n "$EFI_LABEL" "$P1"
 run_quiet mkfs.ext4 -F -L "$LIVE_LABEL" "$P2"
