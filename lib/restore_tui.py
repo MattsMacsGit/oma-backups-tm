@@ -834,14 +834,46 @@ def confirm_wipe(target: dict, snap: dict) -> bool:
     return yes == "YES"
 
 
-LEVELS = {
-    "Everything: the system and all your files": "full",
-    "System + settings: faster; your files come back later from Settings → Restore my files": "settings",
-}
+QUICK = "Quick System Rescue (recommended)"
+FULL = "Full Unattended Restore"
+LEVELS = {QUICK: "settings", FULL: "full"}
+
+# restore_flow's answer when the user asked to restart: main() restarts only
+# after lock_pi, so the Pi isn't left unlocked by a network restore.
+REBOOT = -1
 
 
-def pick_level() -> str | None:
-    choice = gum_choose(list(LEVELS), header="How much do you want to restore?")
+def when_text(snap: dict, fallback: str) -> str:
+    return " ".join(str(snap.get("label") or snap.get("timestamp") or fallback).split())
+
+
+def pick_level(snap: dict) -> str | None:
+    when = when_text(snap, "that date")
+    out()
+    gum_style("--bold", QUICK)
+    for line in (
+        f"  Puts back your system, apps and settings from {when}.",
+        "  It's the fastest way to be up and running again: you can start",
+        "  working right away, and your files can come back later, even while",
+        "  you work. They stay safe on the backup until then. Bring them back",
+        "  with \"Restore my files\" in the OmaBackups panel whenever it suits",
+        "  you: back home next to the backup drive, or on a good connection.",
+        "  Need something sooner? Open the restore point in the panel and",
+        "  copy out just what you need.",
+    ):
+        gum_style("--foreground", "8", line)
+    out()
+    gum_style("--bold", FULL)
+    for line in (
+        f"  Puts back everything from {when}: system, apps,",
+        "  settings and all your files. It takes the longest, but you can",
+        "  walk away: when it's done, your machine is back to how it was",
+        "  that day.",
+        "  (Anything you set OmaBackups to skip won't be there.)",
+    ):
+        gum_style("--foreground", "8", line)
+    out()
+    choice = gum_choose(list(LEVELS), header="How would you like to restore?")
     return LEVELS.get(choice) if choice else None
 
 
@@ -899,9 +931,15 @@ def main() -> int:
         drop_to_shell()
         return 1
     try:
-        return restore_flow()
+        rc = restore_flow()
     finally:
         lock_pi()
+    if rc == REBOOT:
+        out()
+        gum_style("--foreground", "8", "Restarting...")
+        subprocess.call(["systemctl", "reboot"])
+        return 0
+    return rc
 
 
 def restore_flow() -> int:
@@ -910,7 +948,7 @@ def restore_flow() -> int:
     if not snap:
         drop_to_shell()
         return 1
-    level = pick_level()
+    level = pick_level(snap)
     if not level:
         drop_to_shell()
         return 1
@@ -942,18 +980,37 @@ def restore_flow() -> int:
         return 1
     rc = run_restore(target, snap, level)
     if rc == 0:
-        out()
-        gum_style("--bold", "--foreground", "2", "● Restore finished.")
-        gum_style("--foreground", "8", "  Remove this USB and boot the restored disk.")
-        if level == "settings":
-            gum_style("--foreground", "8", "  Your documents, photos and other files are still on the backup: once")
-            gum_style("--foreground", "8", "  you're in, open OmaBackups → Settings → Restore my files.")
-        pause("Press Enter for a shell.")
-    else:
-        gum_style("--bold", "--foreground", "1", f"Restore failed (exit {rc}).")
-        drop_to_shell()
+        return finished(snap, level)
+    gum_style("--bold", "--foreground", "1", f"Restore failed (exit {rc}).")
+    drop_to_shell()
     return rc
 
+
+def finished(snap: dict, level: str) -> int:
+    when = when_text(snap, "the date you picked")
+    out()
+    if level == "settings":
+        gum_style("--bold", "--foreground", "2", f"● Done. Your system is back as it was on {when}.")
+    else:
+        gum_style("--bold", "--foreground", "2", f"● Done. Your machine is back as it was on {when}.")
+    out()
+    gum_style("--foreground", "8", "  Next: take out this USB and start your machine as normal.")
+    if level == "settings":
+        out()
+        for line in (
+            "  Your files are still waiting on the backup. When you're ready, open",
+            "  the OmaBackups panel and press \"Restore my files\". Until then you can",
+            "  open the restore point in the panel and copy out anything you need.",
+            "  Backups are paused until your files are back, so nothing overwrites them.",
+        ):
+            gum_style("--foreground", "8", line)
+    out()
+    restart = "Restart into my system now (take out this USB first)"
+    choice = gum_choose([restart, "Open a command line instead"], header="What next?")
+    if choice == restart:
+        return REBOOT
+    drop_to_shell()
+    return 0
 
 if __name__ == "__main__":
     try:

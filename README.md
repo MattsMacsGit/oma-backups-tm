@@ -219,23 +219,28 @@ stick too: the old one would still open, but couldn't unlock the backup disk.
 ## Restoring
 
 Boot the backup USB (firmware boot menu → Limine: **Rescue Disk**), or the
-network rescue stick. The wizard asks what to bring back:
+network rescue stick. Pick a date, then how to restore:
 
-- **Everything** — the system and your whole home folder, as it was on that date.
-- **System + settings** — Omarchy, your apps and all your settings, but not the
-  contents of Documents, Pictures, Videos, Downloads and so on. Those folders
-  come back empty, and anything over 100 MB is left for later. It's much
-  quicker, and gets you to a working desktop sooner.
+- **Quick System Rescue** (recommended) — Omarchy, your apps and all your
+  settings, but not the contents of Documents, Pictures, Videos, Downloads and
+  so on. Those folders come back empty, and anything over 100 MB is left for
+  later. You're back at a working desktop much sooner and can start working
+  right away, then bring your files back with **Restore my files** whenever it
+  suits you. Need something sooner? Open the restore point in the plugin and
+  copy out just what you need.
+- **Full Unattended Restore** — the system and your whole home folder, as it
+  was on that date. It takes the longest, but you can walk away.
 
-Then pick a date, pick a disk, and type the disk name and YES. Restoring
-**wipes** the disk you restore onto.
+Then pick a disk, and type the disk name and YES. Restoring **wipes** the disk
+you restore onto. When it's done, the wizard offers to restart into the
+restored system (take the USB out first) or open a command line.
 
 Restore from a running desktop is expert-only (`--allow-internal`). The
 intended path is **booting**.
 
 ### Restore my files
 
-After a **System + settings** restore, the plugin shows **Restore my files**.
+After a **Quick System Rescue**, the plugin shows **Restore my files**.
 It copies back everything that was left behind, without overwriting anything
 you've changed since. Stop it and carry on later if you like. Until your files
 are back, the restore point they came from is kept safe from thinning — it's
@@ -243,7 +248,7 @@ the only one that still has them.
 
 ### Backups pause until the system is whole again
 
-A system restored with **System + settings** is missing files that are still in
+A system restored with **Quick System Rescue** is missing files that are still in
 the backup. If it backed up in that state, rsync would delete them from the
 backup's current copy and turn the gap into a restore point. That matters most
 when you restore onto a spare disk and boot it to check it: the restored system
