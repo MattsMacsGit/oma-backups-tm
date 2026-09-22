@@ -636,7 +636,9 @@ Panel {
                   ? "No dated copies yet. After a backup they appear here."
                   : (svc.remoteActive && !svc.linked
                     ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
-                    : "Open a date to browse that copy.")
+                    : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
+                      ? "Smart thinning keeps every backup from the last day, one a day for a month, then one a week."
+                      : "All restore points are kept."))
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
