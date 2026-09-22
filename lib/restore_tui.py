@@ -902,6 +902,9 @@ def run_restore(target: dict, snap: dict, level: str) -> int:
 
 def drop_to_shell() -> None:
     out()
+    # Same trap as the finish screen: everything below runs from the USB.
+    gum_style("--foreground", "8", "Leave this USB in — the rescue system is running from it.")
+    out()
     gum_style("--foreground", "8", "Shell. Useful commands:")
     if NET:
         out("  oma-backups restore-tui      (start the network restore again)")
@@ -994,7 +997,11 @@ def finished(snap: dict, level: str) -> int:
     else:
         gum_style("--bold", "--foreground", "2", f"● Done. Your machine is back as it was on {when}.")
     out()
-    gum_style("--foreground", "8", "  Next: take out this USB and start your machine as normal.")
+    # Order matters, and it used to be given the wrong way round here. This
+    # rescue system runs from the USB (its squashfs is still mounted), so
+    # pulling it now takes the screen, the shell and `reboot` with it.
+    gum_style("--foreground", "8", "  Next: restart, and take this USB out while the machine restarts.")
+    gum_style("--foreground", "8", "  Leave it in until then — this rescue screen is running from it.")
     if level == "settings":
         out()
         for line in (
@@ -1005,7 +1012,7 @@ def finished(snap: dict, level: str) -> int:
         ):
             gum_style("--foreground", "8", line)
     out()
-    restart = "Restart into my system now (take out this USB first)"
+    restart = "Restart now (take the USB out once the screen goes black)"
     choice = gum_choose([restart, "Open a command line instead"], header="What next?")
     if choice == restart:
         return REBOOT

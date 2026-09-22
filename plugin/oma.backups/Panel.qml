@@ -19,10 +19,11 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
-  // A system restored without its files: backups are paused so this machine
-  // can't overwrite the real backup with the gap. Holding Ctrl wakes the
-  // Backup now button for a one-off forced backup; automatic backups stay
-  // off until the files are back or a forced backup settles it.
+  // A system restored without its files. Everything to do with backing up is
+  // hidden until they are back — a half-restored machine has nothing worth
+  // backing up, and a backup from it would overwrite the real one with the
+  // gap. The way past it is "I've got my files another way" in the restore
+  // card below (forceAsked), which settles it with one forced backup.
   readonly property bool blockedByRestore: svc.partialSnapshot !== ""
   // A restore point open for browsing keeps the backup disk (or the Pi's)
   // unlocked, and a backup would lock it again on its way out — from under the
@@ -30,8 +31,7 @@ Panel {
   // quiet and says why. No Ctrl override here; pressing Done is the answer.
   readonly property bool blockedByBrowse: svc.browseTs !== "" && !svc.restoringFiles
   readonly property bool backupBlocked: blockedByRestore || blockedByBrowse
-  readonly property bool backupGreyed: (blockedByRestore && !ctrlHeld) || blockedByBrowse
-  property bool ctrlHeld: false
+  readonly property bool backupGreyed: blockedByBrowse
   property bool forceAsked: false
   property bool forceConfirmed: false
   readonly property var quickSkips: [
@@ -92,7 +92,6 @@ Panel {
       showAllSnaps = false
       newDisk = ""
       newDiskConfirmed = false
-      ctrlHeld = false
       forceAsked = false
       forceConfirmed = false
       stickDisk = ""
@@ -229,8 +228,8 @@ Panel {
               PanelHero {
                 id: hero
                 anchors.left: parent.left
-                anchors.right: gearBtn.left
-                anchors.rightMargin: Style.space(8)
+                anchors.right: gearBtn.visible ? gearBtn.left : parent.right
+                anchors.rightMargin: gearBtn.visible ? Style.space(8) : 0
                 title: "OmaBackups"
                 meta: svc.backupRunning
                   ? svc.progressText
@@ -243,6 +242,10 @@ Panel {
                 anchors.right: parent.right
                 anchors.top: parent.top
                 text: "\uf013"
+                // Nothing in Settings can be acted on until the restore is
+                // finished, and half of it (skip lists, erasing the disk)
+                // would be actively wrong to touch now.
+                visible: !root.blockedByRestore
                 bordered: true
                 foreground: root.foreground
                 fontFamily: root.fontFamily
@@ -403,7 +406,7 @@ Panel {
             Item {
               width: parent.width
               height: backupBtn.implicitHeight
-              visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup
+              visible: svc.hasCapsule && !svc.backupRunning && !svc.launchedBackup && !root.blockedByRestore
               Button {
                 id: backupBtn
                 width: parent.width
@@ -419,25 +422,6 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.startBackup()
               }
-              // The shared Button's clicked() carries no modifiers, so the
-              // blocked case gets its own layer on top: it reads Ctrl at
-              // click time and only ever opens the warning below.
-              MouseArea {
-                anchors.fill: parent
-                visible: root.blockedByRestore && !root.blockedByBrowse
-                enabled: root.blockedByRestore && !root.blockedByBrowse
-                hoverEnabled: true
-                acceptedButtons: Qt.LeftButton
-                cursorShape: root.ctrlHeld ? Qt.PointingHandCursor : Qt.ArrowCursor
-                onPositionChanged: function (mouse) {
-                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
-                }
-                onExited: root.ctrlHeld = false
-                onPressed: function (mouse) {
-                  root.ctrlHeld = (mouse.modifiers & Qt.ControlModifier) !== 0
-                  if (root.ctrlHeld) root.forceAsked = true
-                }
-              }
             }
             Text {
               visible: root.blockedByBrowse
@@ -450,69 +434,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
             Text {
-              visible: root.blockedByRestore && !root.forceAsked && !root.blockedByBrowse
-              width: parent.width
-              horizontalAlignment: Text.AlignHCenter
-              text: (svc.filesDone ? "Paused until your AI models are back." : "Paused until your files are back.")
-                + " Hold Ctrl to back up anyway."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-            Column {
-              visible: root.blockedByRestore && root.forceAsked && !root.blockedByBrowse
-              width: parent.width
-              spacing: Style.space(8)
-              Text {
-                width: parent.width
-                text: "Backing up now keeps only what's on this system. Everything that "
-                  + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
-                  + (svc.filesDone ? " — your AI models — is dropped from the "
-                    : " — your documents, photos and other files"
-                      + (svc.skippedSystem > 0 ? ", and your AI models" : "") + " — is dropped from the ")
-                  + "backup's current copy and won't be in any new restore point. "
-                  + "Older restore points still have it."
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.bodySmall
-                wrapMode: Text.WordWrap
-              }
-              Toggle {
-                width: parent.width
-                label: "I understand: keep only what's on this system"
-                checked: root.forceConfirmed
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.forceConfirmed = !root.forceConfirmed
-              }
-              Button {
-                width: parent.width
-                text: "Back up anyway"
-                foreground: root.urgent
-                bordered: true
-                enabled: root.forceConfirmed && !svc.backupRunning
-                fontFamily: root.fontFamily
-                onClicked: {
-                  root.forceAsked = false
-                  root.forceConfirmed = false
-                  svc.startBackup(true)
-                }
-              }
-              Button {
-                width: parent.width
-                text: "Cancel"
-                bordered: true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: {
-                  root.forceAsked = false
-                  root.forceConfirmed = false
-                }
-              }
-            }
-            Text {
-              visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup
+              visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup && !root.blockedByRestore
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: svc.nextBackupText
@@ -638,6 +560,67 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: svc.stopRestoringFiles()
+              }
+              Button {
+                visible: !svc.restoringFiles && svc.systemPhase !== "waiting" && !root.forceAsked
+                width: parent.width
+                text: "I've got my files another way"
+                bordered: true
+                foreground: root.dim
+                fontFamily: root.fontFamily
+                tooltipText: "Finish the restore without copying anything else back, and start backing up again"
+                onClicked: root.forceAsked = true
+              }
+              Column {
+                visible: root.forceAsked
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  width: parent.width
+                  text: "Backing up now keeps only what's on this system. Everything that "
+                    + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
+                    + (svc.filesDone ? " — your AI models — is dropped from the "
+                      : " — your documents, photos and other files"
+                        + (svc.skippedSystem > 0 ? ", and your AI models" : "") + " — is dropped from the ")
+                    + "backup's current copy and won't be in any new restore point. "
+                    + "Older restore points still have it."
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                Toggle {
+                  width: parent.width
+                  label: "I understand: keep only what's on this system"
+                  checked: root.forceConfirmed
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.forceConfirmed = !root.forceConfirmed
+                }
+                Button {
+                  width: parent.width
+                  text: "Back up anyway"
+                  foreground: root.urgent
+                  bordered: true
+                  enabled: root.forceConfirmed && !svc.backupRunning
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    root.forceAsked = false
+                    root.forceConfirmed = false
+                    svc.startBackup(true)
+                  }
+                }
+                Button {
+                  width: parent.width
+                  text: "Cancel"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    root.forceAsked = false
+                    root.forceConfirmed = false
+                  }
+                }
               }
             }
 
