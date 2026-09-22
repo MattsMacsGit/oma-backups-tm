@@ -139,9 +139,10 @@ cmd_run() {
   # forcing is a manual act by design, so it never reaches this path.
   if [[ -s $OMARCHY_TM_STATE/partial-restore.json ]]; then
     log_file "scheduled backup skipped: this system was restored without its files"
-    notify_user "Automatic backups are paused" \
-      "This system was restored without your files. Open OmaBackups and press \"Restore my files\"." \
-      partial-restore
+    local what="This system was restored without your files. Open OmaBackups and press \"Restore my files\"."
+    [[ $(jq -r '.files_done // false' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null) == true ]] &&
+      what="Your AI models are still on the backup. Open OmaBackups and press \"Put AI models back\"."
+    notify_user "Automatic backups are paused" "$what" partial-restore
     exit 0
   fi
 

@@ -16,7 +16,8 @@ the mounted backup disk. The network rescue stick uses this.
 
 --level settings: the system plus each home's hidden settings (.config,
 .local, ...); visible folders come back empty and files over 100 MB are
-skipped. Bring the rest back later with "Restore my files".
+skipped, and so are AI models kept in the system area (Ollama's). Bring the
+rest back later with "Restore my files".
 
 Restores a VALID (os+home+esp) point onto a blank disk so it boots Omarchy:
   GPT → 2G ESP + LUKS2 → btrfs (@, @home, empty @log/@pkg)
@@ -302,9 +303,74 @@ run btrfs subvolume create "$NEW_ROOT/@pkg"
 # normal install.
 chmod 755 "$NEW_ROOT/@log" "$NEW_ROOT/@pkg"
 
+# AI models a system service keeps outside anyone's home: gigabytes that would
+# make a quick restore slow. A quick restore leaves them on the backup, and
+# "Restore my files" puts them back (oma-backups put-back-system). Ollama's
+# Arch package keeps them in /var/lib/ollama, its own installer in
+# /usr/share/ollama/.ollama/models, and OLLAMA_MODELS in the service moves
+# them. Only the models go (blobs + manifests), so the folder, its owner and
+# Ollama's own keys come back as they were.
+SYSTEM_MODELS=()
+find_system_models() {
+  local probe m d sub rel part f parts=() dirs=(var/lib/ollama usr/share/ollama/.ollama/models)
+  probe="$(mktemp -d)"
+  # Two small reads that copy names, not contents, so they work the same from
+  # a plugged-in disk or a Pi. First the service files, for OLLAMA_MODELS.
+  rsync "${RSYNC_RSH[@]}" -a --include=/etc/ --include=/etc/systemd/ --include=/etc/systemd/system/ \
+    --include=/etc/systemd/system/ollama.service --include=/etc/systemd/system/ollama.service.d/ \
+    --include='/etc/systemd/system/ollama.service.d/*.conf' --include=/usr/ --include=/usr/lib/ \
+    --include=/usr/lib/systemd/ --include=/usr/lib/systemd/system/ \
+    --include=/usr/lib/systemd/system/ollama.service --exclude='*' \
+    "$(src "os/$SNAPSHOT")"/ "$probe/" 2>>"$OMARCHY_TM_LOG" || true
+  # Later files override earlier ones, as systemd reads them.
+  m=""
+  for f in "$probe/usr/lib/systemd/system/ollama.service" "$probe/etc/systemd/system/ollama.service" \
+    "$probe"/etc/systemd/system/ollama.service.d/*.conf; do
+    [[ -f $f ]] || continue
+    d="$(grep -oE 'OLLAMA_MODELS=[^"[:space:]]+' "$f" | tail -n 1 | cut -d= -f2-)"
+    [[ -n $d ]] && m=$d
+  done
+  m=${m#/}
+  m=${m%/}
+  # A models folder in someone's home comes back with the home folder.
+  if [[ -n $m && $m =~ ^[A-Za-z0-9._/-]+$ && $m != *..* && $m != home/* && $m != root/* ]]; then
+    [[ " ${dirs[*]} " == *" $m "* ]] || dirs+=("$m")
+  fi
+  # Then which of those folders exist, without what's in them.
+  rm -rf "${probe:?}"/*
+  local filt=()
+  for d in "${dirs[@]}"; do
+    for sub in blobs manifests; do
+      rel=""
+      IFS=/ read -ra parts <<<"$d/$sub"
+      for part in "${parts[@]}"; do
+        rel+="/$part"
+        filt+=(--include="$rel/")
+      done
+    done
+  done
+  rsync "${RSYNC_RSH[@]}" -a "${filt[@]}" --exclude='*' \
+    "$(src "os/$SNAPSHOT")"/ "$probe/" 2>>"$OMARCHY_TM_LOG" || true
+  for d in "${dirs[@]}"; do
+    [[ -d $probe/$d/blobs ]] || continue
+    for sub in blobs manifests; do
+      [[ -d $probe/$d/$sub ]] && SYSTEM_MODELS+=("$d/$sub")
+    done
+  done
+  rm -rf "$probe"
+}
+os_skip=()
+if [[ $LEVEL == settings ]]; then
+  find_system_models
+  for rel in "${SYSTEM_MODELS[@]}"; do
+    os_skip+=(--exclude="/$rel")
+  done
+  ((${#SYSTEM_MODELS[@]} == 0)) || log "leaving AI models on the backup for later: ${SYSTEM_MODELS[*]}"
+fi
+
 log "rsync OS snapshot"
 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
-  --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp \
+  --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp "${os_skip[@]}" \
   "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
 log "rsync home snapshot ($LEVEL)"
 home_filter=()
@@ -326,8 +392,11 @@ if [[ $LEVEL == settings ]]; then
     [[ -d $h ]] || continue
     d="$h.local/state/omarchy-backups"
     mkdir -p "$d"
-    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" \
-      '{snapshot: $s, level: "settings", restored_at: $at}' >"$d/partial-restore.json"
+    # skipped_system: what put-back-system brings back. Recorded here rather
+    # than worked out again later, when the settings may have changed.
+    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" --args \
+      '{snapshot: $s, level: "settings", restored_at: $at, skipped_system: $ARGS.positional}' \
+      "${SYSTEM_MODELS[@]}" >"$d/partial-restore.json"
     chown --reference="$h" "$h.local" "$h.local/state" "$d" "$d/partial-restore.json" 2>/dev/null || true
   done
 fi
@@ -492,3 +561,6 @@ cryptsetup close "$MAPPER" || true
 log "restore complete."
 log "Reboot, pick this disk in firmware, unlock LUKS with the password you just set."
 log "TPM auto-unlock is not restored — enroll it again after login if you use it."
+if ((${#SYSTEM_MODELS[@]})); then
+  log "Your AI models (Ollama) were left on the backup to keep this quick. \"Restore my files\" puts them back."
+fi

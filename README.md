@@ -246,6 +246,12 @@ you've changed since. Stop it and carry on later if you like. Until your files
 are back, the restore point they came from is kept safe from thinning — it's
 the only one that still has them.
 
+AI models kept in the system area (Ollama's, in `/var/lib/ollama`) are left on
+the backup by a Quick System Rescue too: they're often many gigabytes. **Restore
+my files** puts them back first, in a terminal, because that needs your
+password. Skip it and your files still come back; the panel then offers **Put
+AI models back** for later, and backups stay paused until they are.
+
 ### Backups pause until the system is whole again
 
 A system restored with **Quick System Rescue** is missing files that are still in

@@ -41,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --json) LIST_JSON=1; shift ;;
     --files) MODE=files; shift; break ;;
     --copy) MODE=copy; shift; break ;;
+    --put-back-system) MODE=put_back_system; shift ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -448,7 +449,7 @@ on_stop_signal() {
 BACKUP_FAILED=0
 fail_backup() {
   echo
-  gum style --bold --foreground 1 "Backup failed."
+  gum style --bold --foreground 1 "${FAIL_TITLE:-Backup failed.}"
   gum style --foreground 8 "$*"
   gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
   # The plugin shows this; backups started without a terminal have no other
@@ -509,11 +510,23 @@ refuse_if_partial_restore() {
   fi
   echo
   gum style --bold "This system isn't whole yet, so backups are paused."
-  gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
-  gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
-  gum style --foreground 8 "  up now would delete them from the backup's current copy."
-  echo
-  gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  local m="$OMARCHY_TM_STATE/partial-restore.json"
+  if [[ $(jq -r '.files_done // false' "$m" 2>/dev/null) == true ]]; then
+    gum style --foreground 8 "  Your files are back, but the AI models the quick restore left behind"
+    gum style --foreground 8 "  are still on the backup and not on this system, so backing up now"
+    gum style --foreground 8 "  would delete them from the backup's current copy."
+    echo
+    gum style --foreground 8 "  Bring them back first: open the plugin and press \"Put AI models back\"."
+  else
+    gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
+    gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
+    gum style --foreground 8 "  up now would delete them from the backup's current copy."
+    if [[ $(jq -r '.skipped_system // [] | length' "$m" 2>/dev/null || echo 0) != 0 ]]; then
+      gum style --foreground 8 "  The same goes for your AI models, which the quick restore left behind."
+    fi
+    echo
+    gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  fi
   gum style --foreground 8 "  To back up anyway and keep only what's here, hold Ctrl and press"
   gum style --foreground 8 "  \"Backup now\" in the plugin, or run:"
   gum style --foreground 8 "    oma-backups backup --force-after-restore"
@@ -1023,6 +1036,82 @@ cmd_browse() {
   wait "$pid" || true
 }
 
+# After a quick restore: put back what restore-to-disk left in the system area
+# (AI models, listed as skipped_system in partial-restore.json). The plugin's
+# "Restore my files" runs this in a terminal before bringing the files back,
+# and it needs root because those folders belong to a system service. When
+# it's done it takes them off the list, and removes the marker altogether if
+# the files are already back (files_done).
+cmd_put_back_system() {
+  local marker="$OMARCHY_TM_STATE/partial-restore.json" snap rel was_active=0 failed=0 remaining
+  local -a paths=()
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    echo
+    gum style --bold "Putting your AI models back"
+    gum style --foreground 8 "  The quick restore left your AI models on the backup so you could get"
+    gum style --foreground 8 "  going sooner. They live in the system area (Ollama keeps them there,"
+    gum style --foreground 8 "  not in your home folder), so putting them back needs your password."
+    gum style --foreground 8 "  If you'd rather not now, press Ctrl+C: your files still come back, and"
+    gum style --foreground 8 "  the panel offers \"Put AI models back\" for later."
+    echo
+  fi
+  require_root "${ORIG_ARGS[@]}"
+  snap="$(jq -r '.snapshot // empty' "$marker" 2>/dev/null || true)"
+  mapfile -t paths < <(jq -r '.skipped_system // [] | .[]' "$marker" 2>/dev/null || true)
+  if [[ -z $snap || ${#paths[@]} -eq 0 ]]; then
+    gum style --foreground 8 "  Nothing to put back: no AI models were left on the backup."
+    return 0
+  fi
+  for rel in "${paths[@]}"; do
+    # Written by restore-to-disk, but it is a file in the user's home: never
+    # let it name anything outside the system folders models live in.
+    [[ $rel =~ ^(var|usr|opt|srv)/[A-Za-z0-9._/-]+$ && $rel != *..* ]] ||
+      die "partial-restore.json lists a folder that isn't allowed: $rel"
+  done
+  [[ $snap =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "partial-restore.json names a restore point that isn't one: $snap"
+  backup_running && die "A backup is running. Try again once it has finished."
+
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't put your AI models back."
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  open_destination
+  d_exists "os/$snap" || fail_backup "The restore point $snap isn't on the backup any more."
+
+  # Ollama holds its models open; stop it while they're copied.
+  if systemctl is-active --quiet ollama.service 2>/dev/null; then
+    was_active=1
+    step "Stopping Ollama while its models are copied"
+    systemctl stop ollama.service || true
+  fi
+  for rel in "${paths[@]}"; do
+    step "Copying /$rel from $snap"
+    mkdir -p "$(dirname "/$rel")"
+    if ! rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 \
+      "$(d_target "os/$snap/$rel")"/ "/$rel/"; then
+      warn "Couldn't copy /$rel."
+      failed=1
+    fi
+  done
+  if ((was_active)); then
+    step "Starting Ollama again"
+    systemctl start ollama.service || warn "Ollama didn't start again. Try: sudo systemctl start ollama"
+  fi
+  ((failed)) && fail_backup "Some models didn't copy. Nothing was removed; press \"Put AI models back\" to try again. Details are in $OMARCHY_TM_LOG."
+
+  # Rewritten in place so the file keeps its owner (the user's plugin clears it).
+  remaining="$(jq 'del(.skipped_system)' "$marker")"
+  if [[ $(jq -r '.files_done // false' <<<"$remaining") == true ]]; then
+    rm -f "$marker"
+    log_file "AI models put back from $snap; restore complete, partial-restore marker cleared"
+  else
+    printf '%s\n' "$remaining" >"$marker"
+    log_file "AI models put back from $snap"
+  fi
+  echo
+  gum style --bold --foreground 2 "● Your AI models are back."
+}
+
 cmd_prune() {
   # Even a dry run has to unlock the disk to read its restore points.
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
@@ -1087,4 +1176,5 @@ case "$MODE" in
   backup) cmd_backup ;;
   prune) cmd_prune ;;
   browse) cmd_browse "$@" ;;
+  put_back_system) cmd_put_back_system ;;
 esac

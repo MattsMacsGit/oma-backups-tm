@@ -453,7 +453,8 @@ Panel {
               visible: root.blockedByRestore && !root.forceAsked && !root.blockedByBrowse
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Paused until your files are back. Hold Ctrl to back up anyway."
+              text: (svc.filesDone ? "Paused until your AI models are back." : "Paused until your files are back.")
+                + " Hold Ctrl to back up anyway."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -467,7 +468,9 @@ Panel {
                 width: parent.width
                 text: "Backing up now keeps only what's on this system. Everything that "
                   + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
-                  + " — your documents, photos and other files — is dropped from the "
+                  + (svc.filesDone ? " — your AI models — is dropped from the "
+                    : " — your documents, photos and other files"
+                      + (svc.skippedSystem > 0 ? ", and your AI models" : "") + " — is dropped from the ")
                   + "backup's current copy and won't be in any new restore point. "
                   + "Older restore points still have it."
                 color: root.urgent
@@ -585,29 +588,47 @@ Panel {
               }
               Text {
                 width: parent.width
-                text: svc.restoringFiles
+                text: svc.systemPhase === "waiting"
+                  ? "Finish in the terminal window: it's putting your AI models back. Your files come next."
+                  : svc.restoringFiles
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
                     : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                  : svc.filesDone
+                  ? "Your files are back. Your AI models are still on the backup: they live in the "
+                    + "system area, so putting them back needs your password."
                   : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
-                    + ". Your documents, photos and other files are still on the backup."
+                    + ". Your documents, photos and other files are still on the backup"
+                    + (svc.skippedSystem > 0 ? ", and so are your AI models." : ".")
                     + (svc.linked ? "" : " Link this laptop (button above) to bring them back.")
-                color: svc.restoringFiles ? root.foreground : root.dim
+                color: (svc.restoringFiles || svc.systemPhase === "waiting") ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
               Button {
-                visible: !svc.restoringFiles
+                visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
                 width: parent.width
-                text: "Restore my files"
+                text: svc.filesDone ? "Put AI models back" : "Restore my files"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
                 enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
                 fontFamily: root.fontFamily
-                tooltipText: "Copies back everything that's missing. Never overwrites a file you've changed since."
-                onClicked: svc.restoreMyFiles()
+                tooltipText: svc.filesDone
+                  ? "Opens a terminal to put your AI models back. Asks for your password."
+                  : "Copies back everything that's missing. Never overwrites a file you've changed since."
+                onClicked: svc.filesDone ? svc.putBackModels() : svc.restoreMyFiles()
+              }
+              Button {
+                visible: svc.systemPhase === "waiting"
+                width: parent.width
+                text: "Carry on without the models"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "Your files come back now. You can put the models back afterwards."
+                onClicked: svc.putBackFinished(null)
               }
               Button {
                 visible: svc.restoringFiles

@@ -202,12 +202,61 @@ Item {
   property string partialSnapshot: ""
   property bool restoringFiles: false
   property int restorePercent: 0
+  // What the quick restore left in the system area (AI models), still to put
+  // back, and whether the files themselves are back already.
+  property int skippedSystem: 0
+  property bool filesDone: false
+  // "waiting" while the terminal that puts the models back is open. It can't
+  // be watched directly (the launcher returns at once), so the terminal
+  // leaves a note when it's done.
+  property string systemPhase: ""
+  property bool systemAsked: false
+  readonly property string putBackNote: root.home + "/.local/state/omarchy-backups/put-back-system.done"
 
   function restoreMyFiles() {
     if (root.partialSnapshot === "" || !root.linked) return
+    // The models first, while someone is here to type the password.
+    if (root.skippedSystem > 0 && !root.systemAsked) {
+      putBackModels()
+      return
+    }
+    if (root.filesDone) return
     root.restoringFiles = true
     root.restorePercent = 0
     browse(root.partialSnapshot, "restore")
+  }
+
+  function putBackModels() {
+    if (root.systemPhase === "waiting") return
+    root.systemPhase = "waiting"
+    root.lastError = ""
+    Quickshell.execDetached(["rm", "-f", root.putBackNote])
+    // trap: Ctrl+C at the password prompt stops the command, not this shell,
+    // so the note still gets written and the panel moves on.
+    var inner = "rm -f " + root.shQuote([root.putBackNote]) + "; trap true INT; "
+      + root.shQuote([root.cli, "put-back-system"]) + "; printf '%s' $? > " + root.shQuote([root.putBackNote])
+    var term = "omarchy-launch-floating-terminal-with-presentation"
+    Quickshell.execDetached(["sh", "-c",
+      "if command -v " + term + " >/dev/null 2>&1; then exec " + term + " " + root.shQuote([inner]) + "; fi; "
+      + "notify-send -a OmaBackups 'OmaBackups needs a terminal window' "
+      + "\"Couldn't open one. Run this in a terminal instead: oma-backups put-back-system\""])
+  }
+
+  // The terminal finished (rc), or the user chose to carry on without it.
+  function putBackFinished(rc) {
+    if (root.systemPhase !== "waiting") return
+    root.systemPhase = ""
+    root.systemAsked = true
+    Quickshell.execDetached(["rm", "-f", root.putBackNote])
+    if (rc !== 0 && rc !== null)
+      root.lastError = "Your AI models weren't put back. Press \"Put AI models back\" to try again."
+    partialFile.reload()
+    // Straight on to the files, unless they're already back.
+    if (!root.filesDone && root.partialSnapshot !== "") {
+      root.restoringFiles = true
+      root.restorePercent = 0
+      browse(root.partialSnapshot, "restore")
+    }
   }
 
   function stopRestoringFiles() {
@@ -312,6 +361,7 @@ Item {
     linkedFile.reload()
     lastSuccessFile.reload()
     if (!root.restoringFiles) partialFile.reload()
+    if (root.systemPhase === "waiting") putBackFile.reload()
     nowSec = Date.now() / 1000
     if (!skipLoaded) loadSkipFile()
   }
@@ -798,13 +848,50 @@ Item {
       if (root.browseMode === "restore") root.closeBrowse()
       if (code === 0) {
         // Everything's back: the protected restore point can be thinned again.
-        Quickshell.execDetached(["rm", "-f", root.home + "/.local/state/omarchy-backups/partial-restore.json"])
-        root.partialSnapshot = ""
-        Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
-          "Everything from the backup has been restored to your home folder."])
+        // Unless the AI models are still on the backup: then the marker stays
+        // (backups stay paused, the restore point stays protected) and only
+        // records that the files are done. Decided from the file itself, as
+        // the terminal may have changed it since the panel last read it.
+        finishFilesProc.running = true
       } else {
         root.lastError = "Restoring your files stopped before finishing. Press Restore my files to carry on."
       }
+    }
+  }
+
+  Process {
+    id: finishFilesProc
+    command: ["sh", "-c",
+      "f=\"$1\"; if jq -e '(.skipped_system // []) | length > 0' \"$f\" >/dev/null 2>&1; then "
+      + "jq '.files_done = true' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\" && echo models; "
+      + "else rm -f \"$f\"; echo done; fi",
+      "sh", root.home + "/.local/state/omarchy-backups/partial-restore.json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        if (String(text || "").trim() === "models") {
+          root.filesDone = true
+          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
+            "Your AI models are still on the backup. Press \"Put AI models back\" in OmaBackups."])
+        } else {
+          root.partialSnapshot = ""
+          root.skippedSystem = 0
+          root.filesDone = false
+          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
+            "Everything from the backup has been restored to your home folder."])
+        }
+        partialFile.reload()
+      }
+    }
+  }
+
+  FileView {
+    id: putBackFile
+    path: root.putBackNote
+    printErrors: false
+    onLoaded: {
+      var rc = parseInt(String(text()).trim(), 10)
+      root.putBackFinished(isNaN(rc) ? null : rc)
     }
   }
 
@@ -816,11 +903,19 @@ Item {
       try {
         var j = JSON.parse(text())
         root.partialSnapshot = /^\d{8}T\d{6}Z$/.test(j.snapshot || "") ? j.snapshot : ""
+        root.skippedSystem = Array.isArray(j.skipped_system) ? j.skipped_system.length : 0
+        root.filesDone = j.files_done === true
       } catch (e) {
         root.partialSnapshot = ""
+        root.skippedSystem = 0
+        root.filesDone = false
       }
     }
-    onLoadFailed: root.partialSnapshot = ""
+    onLoadFailed: {
+      root.partialSnapshot = ""
+      root.skippedSystem = 0
+      root.filesDone = false
+    }
   }
 
   Timer {

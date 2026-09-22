@@ -616,7 +616,8 @@ progress() {
   # plugin's answer to "is a backup running?", nothing here ever writes it
   # back to idle, and a browse that says "running" pins the panel to a
   # backup that does not exist — long after the browse has gone.
-  [[ -n ${BROWSE_STATE:-} ]] && return 0
+  # Putting AI models back after a restore borrows it the same way.
+  [[ -n ${BROWSE_STATE:-} || ${NOT_A_BACKUP:-0} == 1 ]] && return 0
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$@" || true
 }
 
