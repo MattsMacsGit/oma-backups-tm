@@ -327,7 +327,9 @@ find_system_models() {
   for f in "$probe/usr/lib/systemd/system/ollama.service" "$probe/etc/systemd/system/ollama.service" \
     "$probe"/etc/systemd/system/ollama.service.d/*.conf; do
     [[ -f $f ]] || continue
-    d="$(grep -oE 'OLLAMA_MODELS=[^"[:space:]]+' "$f" | tail -n 1 | cut -d= -f2-)"
+    # A service file with no OLLAMA_MODELS is normal (a drop-in that only sets
+    # other things), so grep finding nothing must not end the restore.
+    d="$(grep -oE 'OLLAMA_MODELS=[^"[:space:]]+' "$f" | tail -n 1 | cut -d= -f2- || true)"
     [[ -n $d ]] && m=$d
   done
   m=${m#/}
