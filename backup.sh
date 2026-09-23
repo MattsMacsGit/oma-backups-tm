@@ -218,6 +218,17 @@ measure_tree() {
 # Every d_* helper takes paths relative to the backup disk's top level.
 DEST_REMOTE=0
 RSYNC_RSH=()
+# Gatekeeper 9 hands back a mark when it unlocks: one per thing using the disk.
+# It locks when the LAST mark goes, not the first, so a browse session closing
+# can no longer pull the disk out from under a models put-back. Empty against
+# an older gatekeeper, where lock still means lock.
+REMOTE_HOLD=""
+REMOTE_HOLD_PID=""
+# Whether this gatekeeper issues marks at all, which is a different question
+# from whether we are still holding one. Without it, a second remote_close --
+# an explicit one followed by the EXIT trap -- would look like "no mark" and
+# fall through to the blunt lock that takes the disk off everybody.
+REMOTE_HOLD_ISSUED=0
 
 pick_destination() {
   # "No backup disk plugged in here" also covers "a backup disk is plugged in,
@@ -243,17 +254,63 @@ remote_open() {
   # need the key before it found out it would. That clears itself in seconds,
   # so it is worth one more try before telling anyone their pairing is broken,
   # which in that case it isn't.
-  rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" && return 0
-  sleep 5
-  rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" ||
-    fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Give it a moment and try again — if it keeps happening, re-pair it: oma-backups remote pair $REMOTE_HOST"
+  local out
+  if ! out="$(rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG")"; then
+    sleep 5
+    out="$(rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG")" ||
+      fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Give it a moment and try again — if it keeps happening, re-pair it: oma-backups remote pair $REMOTE_HOST"
+  fi
+  # Matched whole, not filtered: anything that isn't exactly a mark means we
+  # are talking to a gatekeeper that doesn't issue them.
+  REMOTE_HOLD=""
+  if [[ $out =~ ^[0-9a-f]{16}$ ]]; then
+    REMOTE_HOLD="$out"
+    REMOTE_HOLD_ISSUED=1
+  fi
+  remote_hold_start
+}
+
+# A mark nothing refreshes for ten minutes is taken to belong to something
+# that died, so anything long-running says "still here" as it goes. The loop
+# stops of its own accord the moment the gatekeeper stops recognising it.
+remote_hold_start() {
+  [[ -n $REMOTE_HOLD ]] || return 0
+  (
+    # Not the caller's cleanup: this loop ending, or being killed, must never
+    # be mistaken for the job itself finishing.
+    trap - EXIT INT TERM
+    while sleep 120; do
+      rgate hold "$REMOTE_HOLD" >/dev/null 2>&1 || exit 0
+    done
+  ) &
+  REMOTE_HOLD_PID=$!
+}
+
+remote_hold_stop() {
+  [[ -n $REMOTE_HOLD_PID ]] || return 0
+  kill "$REMOTE_HOLD_PID" 2>/dev/null || true
+  wait "$REMOTE_HOLD_PID" 2>/dev/null || true
+  REMOTE_HOLD_PID=""
 }
 
 remote_close() {
   [[ $DEST_REMOTE == 1 ]] || return 0
-  # Gatekeepers before v6 don't queue a lock behind an unlock, so a Stop
-  # pressed while unlocking could lock nothing and leave the disk open once
-  # the unlock landed. Check, and lock again if it's still open.
+  remote_hold_stop
+  if ((REMOTE_HOLD_ISSUED)); then
+    # Let go of our own mark and nothing else. Whether the disk actually locks
+    # is the gatekeeper's call: if a backup, a browse session or a put-back is
+    # still on it, staying open is the right answer, not a failure.
+    [[ -n $REMOTE_HOLD ]] || return 0
+    local hold=$REMOTE_HOLD
+    REMOTE_HOLD=""
+    rgate lock "$hold" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+      warn "Couldn't let go of the backup disk on $REMOTE_HOST (it locks itself when nobody is using it)."
+    return 0
+  fi
+  # Gatekeeper 8 and older: no marks, so lock means lock. Those before v6 also
+  # don't queue a lock behind an unlock, so a Stop pressed while unlocking
+  # could lock nothing and leave the disk open once the unlock landed. Check,
+  # and lock again if it's still open.
   local i
   for i in 1 2 3; do
     rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
@@ -1008,8 +1065,16 @@ browse_cleanup() {
     rmdir "$mp" 2>/dev/null || true
   fi
   rm -f "$BROWSE_STATE" 2>/dev/null || true
-  # Mid-backup, the backup owns the disk and locks it itself on its way out.
-  backup_running || remote_close || true
+  # With a mark of our own, letting go is safe whatever else is going on: the
+  # gatekeeper locks the disk when the last user leaves, not the first. Without
+  # one, the old guard stands -- and it only ever asked about backups, which is
+  # exactly how closing a browse session locked the disk out from under a
+  # models put-back and threw away everything it had copied.
+  if ((${REMOTE_HOLD_ISSUED:-0})); then
+    remote_close || true
+  else
+    backup_running || remote_close || true
+  fi
 }
 
 # Open one restore point's copy of the user's home folder, read-only, until

@@ -18,6 +18,7 @@ import json
 import os
 import pwd
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -27,7 +28,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "8"
+VERSION = "9"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -60,6 +61,25 @@ CAPSULE_LOCK = Path(os.environ.get("OMA_GATE_LOCK") or "/tmp/oma-gate-test.capsu
 # before its turn comes (a Stop cut short by a short service timeout), the
 # unlock it was chasing finishes, sees the note, and locks up after itself.
 LOCK_WANTED = CAPSULE_LOCK.with_name(CAPSULE_LOCK.name + ".wanted")
+# One file per thing currently using the disk -- a backup, a browse session, a
+# models put-back, a restore. Unlock adds one, lock drops one, and the disk is
+# only really locked once the last one has gone. Before this, whoever finished
+# first locked the disk out from under everyone else; a browse session closing
+# mid-put-back threw away gigabytes that were already down.
+#
+# They live here and not on the backup disk itself for the obvious reason: a
+# mark on the disk cannot be read while the disk is locked. /run is cleared
+# when the Pi reboots, which is right -- a reboot means nobody is holding it.
+HOLDERS = CAPSULE_LOCK.with_name(CAPSULE_LOCK.name + ".holders")
+HOLD_ID = re.compile(r"^[0-9a-f]{16}$")
+# A mark not refreshed in this long belongs to something that died without
+# saying so. Long enough that an ordinary slow patch never trips it.
+HOLD_STALE = 600
+# ...and even with nothing holding it, the disk is only locked once it has also
+# been quiet this long. Both, so a transfer that is alive but not heartbeating
+# is never cut off mid-flight.
+IDLE_LOCK = 600
+IO_STAMP = CAPSULE_LOCK.with_name(CAPSULE_LOCK.name + ".io")
 
 
 def keys_file() -> Path:
@@ -106,6 +126,66 @@ def capsule_turn():
         yield
     finally:
         os.close(fd)
+
+
+def holders_seen() -> list[str]:
+    """Whatever is there, pruning nothing -- for status, which does not take
+    the turn and must not change anything."""
+    try:
+        return sorted(p.name for p in HOLDERS.iterdir() if HOLD_ID.match(p.name))
+    except OSError:
+        return []
+
+
+def holders_live() -> list[str]:
+    """The marks still worth honouring, dropping any that have gone stale.
+
+    Always called with the capsule turn held, so nothing is being added or
+    removed underneath it.
+    """
+    now = time.time()
+    live = []
+    for name in holders_seen():
+        f = HOLDERS / name
+        try:
+            if now - f.stat().st_mtime <= HOLD_STALE:
+                live.append(name)
+            else:
+                f.unlink()
+                log(f"dropped a mark nothing refreshed: {name}")
+        except OSError:
+            pass
+    return live
+
+
+def hold_add() -> str:
+    """The gate hands out the id, so a caller can only ever drop its own."""
+    HOLDERS.mkdir(parents=True, exist_ok=True)
+    os.chmod(HOLDERS, 0o700)
+    hid = secrets.token_hex(8)
+    (HOLDERS / hid).touch()
+    return hid
+
+
+def hold_drop(hid: str) -> None:
+    try:
+        (HOLDERS / hid).unlink()
+    except OSError:
+        pass
+
+
+def hold_drop_all() -> None:
+    for name in holders_live():
+        hold_drop(name)
+
+
+def capsule_io() -> str | None:
+    """The disk's own read/write counters, or None if it isn't open."""
+    try:
+        dm = os.path.basename(os.path.realpath(f"/dev/mapper/{MAPPER}"))
+        return Path("/sys/block", dm, "stat").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
 
 
 def mapper_open() -> bool:
@@ -155,6 +235,7 @@ def v_status(args: list[str]) -> None:
         "present": device().exists(),
         "unlocked": mapper_open(),
         "mounted": mounted(),
+        "holders": len(holders_seen()),
     }))
 
 
@@ -170,24 +251,30 @@ def v_unlock(args: list[str]) -> None:
     key = sys.stdin.buffer.read(MAX_KEY + 1)
     started = time.time()
     with capsule_turn():
-        if mounted():
-            return
-        dev = device()
-        if not dev.exists():
-            raise Refused("capsule not plugged in (or not powered)")
-        if not mapper_open():
-            if not key or len(key) > MAX_KEY:
-                raise Refused("unlock key missing or too large")
-            run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
-        MOUNT.mkdir(parents=True, exist_ok=True)
-        run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
-        os.chmod(MOUNT, 0o755)
-        log("capsule unlocked")
-        # Somebody asked to lock while this unlock was in flight. Whether or
-        # not they are still waiting for their turn, they asked last: undo.
+        if not mounted():
+            dev = device()
+            if not dev.exists():
+                raise Refused("capsule not plugged in (or not powered)")
+            if not mapper_open():
+                if not key or len(key) > MAX_KEY:
+                    raise Refused("unlock key missing or too large")
+                run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
+            MOUNT.mkdir(parents=True, exist_ok=True)
+            run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
+            os.chmod(MOUNT, 0o755)
+            log("capsule unlocked")
+        # A forced lock asked for while this was in flight still wins: it is
+        # the one way to say "everybody off, now". Say so rather than hand back
+        # a mark on a disk that is closing.
         if lock_wanted_since(started):
+            hold_drop_all()
             do_lock()
-            log("locked again: a lock was waiting behind this unlock")
+            log("locked again: a forced lock was waiting behind this unlock")
+            raise Refused("the disk was locked while this was opening; try again")
+        # The mark goes on inside the turn, so nothing can slip between the
+        # unlock landing and this caller being counted among its users.
+        hid = hold_add()
+        print(hid)
 
 
 def lock_wanted_since(started: float) -> bool:
@@ -214,19 +301,85 @@ def do_lock() -> None:
 
 
 def v_lock(args: list[str]) -> None:
-    # The note goes down before queueing: if this request is killed while it
-    # waits, the unlock it is chasing still finds it and locks up afterwards.
-    try:
-        LOCK_WANTED.touch()
-    except OSError:
-        pass
+    """lock [HOLD] -- let go of one mark, or of everything.
+
+    With a hold id this only lets go of that one caller: the disk is locked
+    when the last mark goes, and not before. Without one it is the blunt
+    "everybody off" that the rescue stick and a person clearing up by hand
+    need.
+    """
+    hid = args[0] if args else ""
+    if hid and not HOLD_ID.match(hid):
+        raise Refused("that is not a hold id")
+    if not hid:
+        # The note goes down before queueing: if this request is killed while
+        # it waits, the unlock it is chasing still finds it and locks up
+        # afterwards.
+        try:
+            LOCK_WANTED.touch()
+        except OSError:
+            pass
     with capsule_turn():
+        if hid:
+            hold_drop(hid)
+            still = holders_live()
+            if still:
+                log(f"let go of {hid}; {len(still)} still using the disk")
+                return
+        else:
+            hold_drop_all()
         do_lock()
         try:
             LOCK_WANTED.unlink()
         except OSError:
             pass
         log("capsule locked")
+
+
+def v_hold(args: list[str]) -> None:
+    """hold HOLD -- still here. A mark nothing refreshes is dropped once it is
+    HOLD_STALE old, so anything long-running says this as it goes."""
+    (hid,) = args
+    if not HOLD_ID.match(hid):
+        raise Refused("that is not a hold id")
+    try:
+        os.utime(HOLDERS / hid, None)
+    except OSError:
+        raise Refused("that hold has gone -- unlock again to take a new one")
+
+
+def v_sweep(args: list[str]) -> None:
+    """The safety net, from a timer here on the Pi: lock a disk nobody is on.
+
+    Both things have to be true -- no live marks, and no disk activity for
+    IDLE_LOCK -- so something that is alive but has stopped saying so is never
+    cut off mid-transfer. It only ever closes a disk; it never opens one.
+    """
+    with capsule_turn():
+        if not mapper_open() and not mounted():
+            return
+        if holders_live():
+            IO_STAMP.unlink(missing_ok=True)
+            return
+        now = time.time()
+        io = capsule_io()
+        quiet_since, was = None, None
+        try:
+            head, _, rest = IO_STAMP.read_text(encoding="utf-8").partition("\n")
+            quiet_since, was = float(head), rest
+        except (OSError, ValueError):
+            pass
+        if io is not None and was is not None and io == was:
+            if now - quiet_since >= IDLE_LOCK:
+                do_lock()
+                IO_STAMP.unlink(missing_ok=True)
+                log("locked: nothing holding it, and quiet for 10 minutes")
+            return
+        # It moved, or this is the first look: start the clock again.
+        try:
+            IO_STAMP.write_text(f"{now}\n{io or ''}", encoding="utf-8")
+        except OSError:
+            pass
 
 
 def v_subvol_create(args: list[str]) -> None:
@@ -459,7 +612,9 @@ VERBS = {
     "version": (v_version, 0),
     "status": (v_status, 0),
     "unlock": (v_unlock, 0),
-    "lock": (v_lock, 0),
+    "lock": (v_lock, (0, 1)),
+    "hold": (v_hold, 1),
+    "sweep": (v_sweep, 0),
     "subvol-create": (v_subvol_create, 1),
     "snapshot": (v_snapshot, 2),
     "set-writable": (v_set_writable, 1),
@@ -481,7 +636,7 @@ VERBS = {
 }
 
 # A rescue stick only ever reads: rsync is forced read-only in v_rsync.
-RESCUE_VERBS = {v: VERBS[v] for v in ("version", "status", "unlock", "lock", "list", "exists")}
+RESCUE_VERBS = {v: VERBS[v] for v in ("version", "status", "unlock", "lock", "hold", "list", "exists")}
 
 
 def main() -> int:
@@ -502,7 +657,13 @@ def main() -> int:
             raise Refused(f"unknown command {argv[0]!r}")
         fn, nargs = verb
         args = argv[1:]
-        if (nargs is not None and len(args) != nargs) or (nargs is None and not args):
+        if isinstance(nargs, tuple):
+            ok = len(args) in nargs
+        elif nargs is None:
+            ok = bool(args)
+        else:
+            ok = len(args) == nargs
+        if not ok:
             raise Refused(f"{argv[0]}: wrong number of arguments")
         fn(args)
         return 0

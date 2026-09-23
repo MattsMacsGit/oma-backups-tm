@@ -49,6 +49,9 @@ if [[ $UNINSTALL == 1 ]]; then
   if [[ -x $GATE ]]; then
     SSH_ORIGINAL_COMMAND=lock "$GATE" 2>/dev/null || true
   fi
+  systemctl disable --now oma-gate-sweep.timer >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/oma-gate-sweep.timer /etc/systemd/system/oma-gate-sweep.service
+  systemctl daemon-reload >/dev/null 2>&1 || true
   rm -f "$SUDOERS"
   id "$ACCOUNT" >/dev/null 2>&1 && userdel -r "$ACCOUNT" 2>/dev/null || true
   rm -rf "$LIB" "$CONF_DIR"
@@ -105,6 +108,36 @@ python3 -m py_compile "$tmp/oma-gate" "$tmp/list_snapshots.py" || die "Downloade
 install -d -m 755 "$LIB"
 install -m 755 "$tmp/oma-gate" "$GATE"
 install -m 644 "$tmp/list_snapshots.py" "$LIB/list_snapshots.py"
+
+# The safety net behind the marks: everything that opens the disk leaves one
+# and takes it away again, but something can always be killed before it gets
+# the chance. This closes a disk nobody is holding once it has also been quiet
+# for ten minutes -- both, so a slow transfer is never cut off.
+step "Installing the idle lock"
+cat >/etc/systemd/system/oma-gate-sweep.service <<UNIT
+[Unit]
+Description=OmaBackups: lock the backup disk when nobody is using it
+
+[Service]
+Type=oneshot
+Environment=SSH_ORIGINAL_COMMAND=sweep
+ExecStart=$GATE
+UNIT
+cat >/etc/systemd/system/oma-gate-sweep.timer <<'UNIT'
+[Unit]
+Description=OmaBackups: check every minute whether the backup disk can be locked
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=10s
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now oma-gate-sweep.timer >/dev/null 2>&1 ||
+  warn "Couldn't start the idle lock timer; the disk still locks when the last user lets go."
 
 if [[ $UPDATE == 1 ]]; then
   v=$(gate_as_account version) || die "Self-test failed: the gatekeeper didn't answer."
