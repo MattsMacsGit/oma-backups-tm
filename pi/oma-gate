@@ -260,7 +260,7 @@ def v_unlock(args: list[str]) -> None:
                     raise Refused("unlock key missing or too large")
                 run("cryptsetup", "open", "--key-file=-", str(dev), MAPPER, stdin=key)
             MOUNT.mkdir(parents=True, exist_ok=True)
-            run("mount", "-o", "rw,noatime,compress=zstd:3", f"/dev/mapper/{MAPPER}", str(MOUNT))
+            run("mount", "-o", "rw,noatime,compress=zstd:1", f"/dev/mapper/{MAPPER}", str(MOUNT))
             os.chmod(MOUNT, 0o755)
             log("capsule unlocked")
         # A forced lock asked for while this was in flight still wins: it is

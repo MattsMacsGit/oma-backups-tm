@@ -218,6 +218,10 @@ measure_tree() {
 # Every d_* helper takes paths relative to the backup disk's top level.
 DEST_REMOTE=0
 RSYNC_RSH=()
+# Filled in once the destination is known. Whole changed files on USB and
+# LAN. Over Tailscale, keep the delta and compress: a one-byte change in a
+# big file should not cross the slow link in full.
+RSYNC_LINK=()
 # Gatekeeper 9 hands back a mark when it unlocks: one per thing using the disk.
 # It locks when the LAST mark goes, not the first, so a browse session closing
 # can no longer pull the disk out from under a models put-back. Empty against
@@ -418,6 +422,21 @@ announce_backup() {
   echo
 }
 
+# Whole files, or delta plus zstd, depending on how we reach the disk.
+rsync_link_flags() {
+  RSYNC_LINK=()
+  if rsync --help 2>&1 | grep -q -- '--checksum-choice'; then
+    RSYNC_LINK+=(--checksum-choice=xxh128)
+  fi
+  if [[ $DEST_REMOTE == 1 && ${REMOTE_ADDR:-} =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
+    if rsync --help 2>&1 | grep -q -- '--compress-choice'; then
+      RSYNC_LINK+=(--compress --compress-choice=zstd)
+    fi
+  else
+    RSYNC_LINK+=(-W)
+  fi
+}
+
 # Parse rsync progress2 on stderr without a PTY and without du.
 # Copy one tree. Sets TREE_SIZE to rsync's "Total file size" (the restore
 # point's size for this part), so nothing ever has to walk the tree again.
@@ -442,7 +461,7 @@ rsync_tree() {
   # knows the real total from its first progress line. Folder-by-folder it
   # reports a total that keeps growing, which is why the bar could only ever
   # say "working" through the longest step of the backup.
-  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
     --no-inc-recursive --info=progress2,name0,flist2 --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
@@ -831,6 +850,7 @@ cmd_backup() {
   # still looks mounted; writing to it fails with I/O errors mid-backup.
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
+  rsync_link_flags
   announce_backup "$ts"
   open_destination
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
@@ -885,13 +905,26 @@ cmd_backup() {
   plan_progress
   progress phase "measure"
   step "Working out how much there is to copy"
+  # An incremental reuses the previous run's size and skips the dry-run
+  # walk. The copy still walks the tree once. The bar's total is that
+  # older size, so a much bigger home can pass 100%.
+  seed_or_measure() {
+    local step=$1 src=$2 ex=$3 known=0
+    known="$(jq -r --arg s "$step" '.[$s] // 0' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || echo 0)"
+    if [[ $known =~ ^[0-9]+$ && $known -gt 0 ]]; then
+      progress seed "$step" "$known"
+      log_file "using the last backup's size for $step ($known bytes)"
+      return 0
+    fi
+    measure_tree "$src" "$ex" "$step"
+  }
   if [[ $HOME_ONLY != 1 ]]; then
     if ! is_done os; then
-      measure_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS" os
+      seed_or_measure os "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS"
     fi
   fi
   if ! is_done home; then
-    measure_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME" home
+    seed_or_measure home "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME"
   fi
   if ! is_done esp; then
     measure_tree /boot "" esp
@@ -915,7 +948,7 @@ cmd_backup() {
     # copy was still saved as a valid restore point.
     set +e
     set +o pipefail
-    rsync "${RSYNC_RSH[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
+    rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
       /boot/ "$(d_target "$esp_dest")/" \
       2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp
     esp_rc=${PIPESTATUS[0]}
@@ -957,6 +990,17 @@ cmd_backup() {
   run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
   local size_os size_home
   size_os="$(step_size os)" size_home="$(step_size home)"
+  [[ $size_os =~ ^[0-9]+$ ]] || size_os=0
+  [[ $size_home =~ ^[0-9]+$ ]] || size_home=0
+  # Kept for the next incremental, which skips the measuring walk when a
+  # size is already here. A home-only run must not wipe a real OS size.
+  # Remembering the size is not the backup: a failure here still finishes.
+  local sizes_file="$OMARCHY_TM_STATE/last-sizes.json"
+  [[ -f $sizes_file ]] || echo '{}' >"$sizes_file"
+  jq --argjson os "$size_os" --argjson home "$size_home" \
+    'if $os > 0 then .os = $os else . end | if $home > 0 then .home = $home else . end' \
+    "$sizes_file" >"$sizes_file.tmp" && chmod 644 "$sizes_file.tmp" && mv "$sizes_file.tmp" "$sizes_file" \
+    || log_file "couldn't remember this backup's size for next time"
   # Saved as a restore point: nothing left to resume.
   rm -f "$RESUME_FILE"
 
@@ -1188,6 +1232,7 @@ cmd_put_back_system() {
   FAIL_TITLE="Couldn't put your AI models back."
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
+  rsync_link_flags
   open_destination
   d_exists "os/$snap" || fail_backup "The restore point $snap isn't on the backup any more."
 
@@ -1200,7 +1245,7 @@ cmd_put_back_system() {
   for rel in "${paths[@]}"; do
     step "Copying /$rel from $snap"
     mkdir -p "$(dirname "/$rel")"
-    if ! rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 \
+    if ! rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --info=progress2 \
       "$(d_target "os/$snap/$rel")"/ "/$rel/"; then
       warn "Couldn't copy /$rel."
       failed=1

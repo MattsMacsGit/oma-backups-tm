@@ -5,3 +5,6 @@ var/tmp
 swap
 swapfile
 lost+found
+# Rebuilt by the system. User files are not in this list.
+var/cache
+var/lib/systemd/coredump

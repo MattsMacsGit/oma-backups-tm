@@ -216,7 +216,7 @@ mount_backup_rw() {
   local mnt=$1
   local mapper=$2
   mkdir -p "$mnt"
-  if mount -o rw,compress=zstd:3 "/dev/mapper/$mapper" "$mnt" 2>/dev/null; then
+  if mount -o rw,noatime,compress=zstd:1 "/dev/mapper/$mapper" "$mnt" 2>/dev/null; then
     :
   elif mount -o rw "/dev/mapper/$mapper" "$mnt"; then
     :

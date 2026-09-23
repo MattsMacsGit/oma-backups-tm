@@ -608,6 +608,19 @@ def main() -> int:
         plan.save()
         write(status(step, pct, speed=args[2] if len(args) > 2 else "",
                      eta=args[3] if len(args) > 3 else "", plan=plan))
+    elif cmd == "seed":
+        # Last backup's size, so an incremental can skip the measuring walk.
+        # The bar's total is that size: a much bigger tree can pass 100%.
+        step = args[0] if args else ""
+        try:
+            size = int(args[1]) if len(args) > 1 else 0
+        except ValueError:
+            return 0
+        plan = Plan.load()
+        entry = plan.step(step)
+        if entry is not None and size > 0:
+            entry["total_bytes"] = size
+            plan.save()
     elif cmd == "measure":
         return measure(args[0] if args else "home")
     elif cmd == "done":

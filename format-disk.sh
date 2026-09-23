@@ -265,7 +265,7 @@ progress set setup 22
 step "Formatting the encrypted volume"
 run_quiet mkfs.btrfs -f -L "$TM_LABEL" "/dev/mapper/${LUKS_MAPPER}"
 mkdir -p "$MNT"
-run_quiet mount -o compress=zstd:3 "/dev/mapper/${LUKS_MAPPER}" "$MNT"
+run_quiet mount -o noatime,compress=zstd:1 "/dev/mapper/${LUKS_MAPPER}" "$MNT"
 if compgen -G "$MNT/home/20*" >/dev/null || compgen -G "$MNT/os/20*" >/dev/null; then
   fail_setup "old restore points are still on the disk — format did not wipe the volume"
 fi
