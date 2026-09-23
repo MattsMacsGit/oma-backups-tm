@@ -1035,7 +1035,7 @@ cmd_browse() {
 
   [[ $(rgate version 2>/dev/null || echo 0) -ge 3 ]] ||
     fail_backup "The Pi needs updating to open restore points. Run this on it: curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
-  command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: oma-backups link --refresh)."
+  command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: sudo oma-backups link --refresh)."
   local mp="$BROWSE_DIR/$ts" pid
   mkdir -p "$mp"
   # Leave the disk unlocked if a backup is mid-way; it locks it when done.
