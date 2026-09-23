@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -37,8 +38,44 @@ def nonempty(p: Path) -> bool:
     return False
 
 
+def explain(home: Path) -> None:
+    """Plain sentences for the failures a person actually hits.
+
+    These do not change the exit code. The skip-list check below still does.
+    """
+    marker = home / ".local" / "state" / "omarchy-backups" / "partial-restore.json"
+    if marker.is_file() and marker.stat().st_size:
+        print("Backups are paused. This system was restored without all of its files.")
+        print("  Open OmaBackups and press \"Restore my files\".")
+    gate = home / ".local" / "state" / "omarchy-backups" / "pi-gate.json"
+    try:
+        data = json.loads(gate.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if isinstance(data, dict) and data.get("behind") is True:
+        print(
+            f"The Pi's gatekeeper is v{data.get('version')}. This laptop wants v{data.get('want')}."
+        )
+        print("  One session can still lock the disk out from under another.")
+        print("  On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update")
+    logs = [
+        Path("/var/log/omarchy-backups/oma-backups.log"),
+        home / ".local" / "state" / "omarchy-backups" / "oma-backups.log",
+    ]
+    for log in logs:
+        try:
+            blob = log.read_bytes()[-200_000:]
+        except OSError:
+            continue
+        for line in reversed(blob.decode("utf-8", "replace").splitlines()):
+            if " ERROR " in line:
+                print("Last error: " + line.strip())
+                return
+
+
 def main() -> int:
     home = user_home()
+    explain(home)
     skip = home / ".config" / "omarchy-backups" / "skip-paths.txt"
     etc_home = Path("/etc/omarchy-backups/excludes-home.txt")
     etc_os = Path("/etc/omarchy-backups/excludes-os.txt")
@@ -75,7 +112,7 @@ def main() -> int:
         rc = 1
 
     if dest is None:
-        print("dest not mounted (checked /run/omarchy-backups and /run/media/*/OmaBackups)")
+        print("The backup disk is not mounted, so your files can't be compared with the copy.")
         return rc
 
     print(f"dest: {dest}")
