@@ -50,8 +50,9 @@ Restoring
       [--level full|settings] [--from-pi] [--yes] [--allow-internal]
                           put a restore point onto a blank disk
   restore-tui             the restore wizard the rescue USB boots into
-  refresh-rescue [--boot-only]
-                          update the rescue system on the backup disk
+  refresh-rescue [--scripts-only | --boot-only]
+                          update a rescue USB (--scripts-only: just the
+                          wizard and scripts, in seconds, after an update)
   files TIMESTAMP [PATH]  list what is inside a restore point
   copy TIMESTAMP SRC DEST copy one thing out of a restore point
 
