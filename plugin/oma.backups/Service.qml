@@ -68,24 +68,35 @@ Item {
   property string version: ""
 
   readonly property string home: Quickshell.env("HOME") || ""
-  readonly property string cli: home + "/.local/bin/oma-backups"
-  readonly property string shareRoot: home + "/.local/share/oma-backups"
+  // Where this plugin finds OmaBackups itself. install.sh leaves links in the
+  // home folder (~/.local/bin/oma-backups -> ~/.local/share/oma-backups ->
+  // wherever the repo was cloned), and on a quick-restored system that clone
+  // is a visible folder that came back empty — so every one of those links
+  // dangles and each call through them fails with nothing in the log. That is
+  // what killed "Restore my files"' terminal. link.sh's root copy lives in the
+  // system area, always comes back with it, and is what the services already
+  // run; prefer it, and keep the home links for an install never linked.
+  property bool hasRootCopy: false
+  readonly property string shareRoot: hasRootCopy
+    ? "/usr/local/lib/oma-backups"
+    : home + "/.local/share/oma-backups"
+  readonly property string cli: shareRoot + "/omarchy-backups"
   readonly property string listSnaps: shareRoot + "/lib/list_snapshots.py"
   readonly property string skipFile: home + "/.config/omarchy-backups/skip-paths.txt"
   readonly property string picker: {
     var r = detect && detect._root
     if (r) return r + "/lib/pick_path.py"
-    return home + "/.local/share/oma-backups/lib/pick_path.py"
+    return shareRoot + "/lib/pick_path.py"
   }
   readonly property string writeSkip: {
     var r = detect && detect._root
     if (r) return r + "/lib/write_skip_paths.py"
-    return home + "/.local/share/oma-backups/lib/write_skip_paths.py"
+    return shareRoot + "/lib/write_skip_paths.py"
   }
   readonly property string seedSkip: {
     var r = detect && detect._root
     if (r) return r + "/lib/skip_defaults.py"
-    return home + "/.local/share/oma-backups/lib/skip_defaults.py"
+    return shareRoot + "/lib/skip_defaults.py"
   }
 
   readonly property var disks: {
@@ -355,6 +366,7 @@ Item {
     // part of its own scan, and snapFile below watches that file — so this was
     // a second python process every two seconds for an answer already coming.
     // Also catches pairing/unpairing: the file may not exist to be watched.
+    rootCopyFile.reload()
     remoteFile.reload()
     scheduleFile.reload()
     timerFile.reload()
@@ -947,6 +959,16 @@ Item {
       root.lastSuccess = isNaN(v) ? 0 : v
     }
     onLoadFailed: root.lastSuccess = 0
+  }
+
+  // link.sh writes this copy; its absence means OmaBackups has never been
+  // linked on this machine, and the home links are all there is.
+  FileView {
+    id: rootCopyFile
+    path: "/usr/local/lib/oma-backups/VERSION"
+    printErrors: false
+    onLoaded: root.hasRootCopy = true
+    onLoadFailed: root.hasRootCopy = false
   }
 
   FileView {
