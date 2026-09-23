@@ -34,21 +34,62 @@ Panel {
   property bool ctrlHeld: false
   property bool forceAsked: false
   property bool forceConfirmed: false
+  // Named categories rather than a size rule, and close to the set Pika
+  // Backup offers, so anyone who has met one of these tools recognises them.
+  // Each is something that can be downloaded or made again. `paths` are skip
+  // list entries (relative to /home); `restorePaths` say the same thing
+  // relative to one home folder inside a restore point, which is what
+  // "Restore my files" copies from.
   readonly property var quickSkips: [
-    { label: "Downloads", paths: [svc.home + "/Downloads"], note: "" },
-    { label: "Trash", paths: ["**/.local/share/Trash", ".Trash"], note: "Recommended" },
-    { label: "Caches", paths: [".cache"], note: "Recommended" },
-    { label: "Thumbnails & system clutter", paths: [".thumbnails", "lost+found"], note: "Recommended" }
+    { label: "Downloads", note: "",
+      paths: [svc.home + "/Downloads"],
+      restorePaths: ["/Downloads"] },
+    { label: "Caches", note: "Made again whenever they're needed",
+      paths: [".cache", ".thumbnails", svc.home + "/.var/app/*/cache"],
+      restorePaths: ["/.cache", "/.thumbnails", "/.var/app/*/cache"] },
+    { label: "Trash", note: "Files you have already thrown away",
+      paths: ["**/.local/share/Trash", ".Trash", "lost+found"],
+      restorePaths: ["/.local/share/Trash", "/.Trash", "lost+found"] },
+    { label: "Flatpak apps", note: "The apps themselves — their documents and settings still come back",
+      paths: [svc.home + "/.local/share/flatpak"],
+      restorePaths: ["/.local/share/flatpak"] },
+    { label: "Virtual machines and containers", note: "May hold things kept inside them",
+      paths: [svc.home + "/.local/share/containers", svc.home + "/.local/share/docker",
+        svc.home + "/.local/share/libvirt", svc.home + "/.local/share/gnome-boxes",
+        svc.home + "/.local/share/bottles", svc.home + "/.var/app/org.gnome.Boxes",
+        svc.home + "/.var/app/com.usebottles.bottles"],
+      restorePaths: ["/.local/share/containers", "/.local/share/docker",
+        "/.local/share/libvirt", "/.local/share/gnome-boxes",
+        "/.local/share/bottles", "/.var/app/org.gnome.Boxes",
+        "/.var/app/com.usebottles.bottles"] },
+    { label: "AI models", note: "Large downloads you can fetch again",
+      paths: [svc.home + "/.lmstudio/models", svc.home + "/.ollama/models",
+        svc.home + "/.local/share/nomic.ai", svc.home + "/.local/share/Jan"],
+      restorePaths: ["/.lmstudio/models", "/.ollama/models",
+        "/.local/share/nomic.ai", "/.local/share/Jan"] },
+    { label: "Game libraries", note: "Games you can install again",
+      paths: [svc.home + "/.steam", svc.home + "/.local/share/Steam"],
+      restorePaths: ["/.steam", "/.local/share/Steam"] }
   ]
 
-  function quickSkipOn(paths) {
-    for (var i = 0; i < paths.length; i++) if (!svc.hasSkip(paths[i])) return false
+  // In restore mode the same switches drive the restore skip list instead.
+  function quickSkipPaths(entry) {
+    return root.blockedByRestore ? entry.restorePaths : entry.paths
+  }
+
+  function quickSkipOn(entry) {
+    var paths = root.quickSkipPaths(entry)
+    for (var i = 0; i < paths.length; i++) {
+      if (root.blockedByRestore ? !svc.hasRestoreSkip(paths[i]) : !svc.hasSkip(paths[i])) return false
+    }
     return true
   }
 
   function isQuickSkip(path) {
-    for (var i = 0; i < quickSkips.length; i++)
+    for (var i = 0; i < quickSkips.length; i++) {
       if (quickSkips[i].paths.indexOf(path) !== -1) return true
+      if (quickSkips[i].restorePaths.indexOf(path) !== -1) return true
+    }
     return false
   }
 
@@ -73,8 +114,9 @@ Panel {
   }
 
   readonly property int customSkipCount: {
-    var n = 0
-    for (var i = 0; i < svc.skipCount; i++) if (!isQuickSkip(svc.skipModel.get(i).path)) n++
+    var n = 0, m = root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
+    var c = root.blockedByRestore ? svc.restoreSkipCount : svc.skipCount
+    for (var i = 0; i < c; i++) if (!isQuickSkip(m.get(i).path)) n++
     return n
   }
 
@@ -531,7 +573,7 @@ Panel {
             }
 
             Rectangle {
-              visible: svc.browseTs !== "" && svc.browseMode === "open"
+              visible: svc.browseTs !== "" && (svc.browseMode === "open" || svc.browseMode === "pick")
               width: parent.width
               height: doneBtn.implicitHeight + Style.space(10)
               radius: Style.cornerRadius
@@ -546,7 +588,9 @@ Panel {
                 anchors.rightMargin: Style.space(8)
                 text: svc.browsePhase === "opening"
                   ? "Opening " + Model.prettyStamp(svc.browseTs) + "…"
-                  : "Browsing " + Model.prettyStamp(svc.browseTs) + "  ·  read-only"
+                  : (svc.browseMode === "pick"
+                    ? "Choosing from " + Model.prettyStamp(svc.browseTs) + "  ·  read-only"
+                    : "Browsing " + Model.prettyStamp(svc.browseTs) + "  ·  read-only")
                 elide: Text.ElideRight
                 color: root.foreground
                 font.family: root.fontFamily
@@ -594,9 +638,14 @@ Panel {
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
                     : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
-                  : svc.filesDone
+                  : svc.filesDone && svc.skippedSystem > 0
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
+                  : svc.filesDone
+                  ? "Your files are back, apart from the " + svc.restoreSkipCount
+                    + (svc.restoreSkipCount === 1 ? " thing" : " things") + " you left out. They are still "
+                    + "on the backup and this restore point is kept for them. Take them off the "
+                    + "list in Settings and press Restore my files again, or finish up below."
                   : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
                     + ". Your documents, photos and other files are still on the backup"
                     + (svc.skippedSystem > 0 ? ", and so are your AI models." : ".")
@@ -609,16 +658,28 @@ Panel {
               Button {
                 visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
                 width: parent.width
-                text: svc.filesDone ? "Put AI models back" : "Restore my files"
+                text: svc.filesDone && svc.skippedSystem > 0 ? "Put AI models back" : "Restore my files"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
                 enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
                 fontFamily: root.fontFamily
-                tooltipText: svc.filesDone
+                tooltipText: svc.filesDone && svc.skippedSystem > 0
                   ? "Opens a terminal to put your AI models back. Asks for your password."
                   : "Copies back everything that's missing. Never overwrites a file you've changed since."
-                onClicked: svc.filesDone ? svc.putBackModels() : svc.restoreMyFiles()
+                onClicked: svc.filesDone && svc.skippedSystem > 0 ? svc.putBackModels() : svc.restoreMyFiles()
+              }
+              Button {
+                visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
+                width: parent.width
+                text: svc.restoreSkipCount > 0
+                  ? "Change what's left out  ·  " + svc.restoreSkipCount
+                  : "Choose what to leave out"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "For anything too big for this disk. Picked from the backup's own copy."
+                onClicked: root.page = "settings"
               }
               Button {
                 visible: svc.systemPhase === "waiting"
@@ -800,7 +861,9 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: svc.version + "  ·  skip folders, disks, Pi, erase disk"
+              meta: root.blockedByRestore
+                ? svc.version + "  ·  what to leave out of this restore"
+                : svc.version + "  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
@@ -865,6 +928,16 @@ Panel {
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
+            Text {
+              visible: root.blockedByRestore
+              width: parent.width
+              text: "Tick anything you don't want brought back right now. It stays on the "
+                + "backup, and this restore point is kept until you come for it."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
             Repeater {
               model: root.quickSkips
               delegate: Toggle {
@@ -872,42 +945,51 @@ Panel {
                 width: parent.width
                 label: modelData.label
                 description: modelData.note
-                checked: root.quickSkipOn(modelData.paths)
+                checked: root.quickSkipOn(modelData)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: {
-                  var on = root.quickSkipOn(modelData.paths)
-                  for (var i = 0; i < modelData.paths.length; i++) {
-                    if (on) svc.removeSkip(modelData.paths[i])
-                    else svc.addSkip(modelData.paths[i])
+                  var on = root.quickSkipOn(modelData)
+                  var paths = root.quickSkipPaths(modelData)
+                  for (var i = 0; i < paths.length; i++) {
+                    if (root.blockedByRestore) {
+                      if (on) svc.removeRestoreSkip(paths[i])
+                      else svc.addRestoreSkip(paths[i])
+                    } else {
+                      if (on) svc.removeSkip(paths[i])
+                      else svc.addSkip(paths[i])
+                    }
                   }
                 }
               }
             }
 
             PanelSectionHeader {
-              text: "SKIP"
+              text: root.blockedByRestore ? "LEAVE OUT OF THE RESTORE" : "SKIP"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
             Text {
               visible: root.customSkipCount === 0
               width: parent.width
-              text: "Nothing skipped yet."
+              text: root.blockedByRestore ? "Nothing left out — everything comes back." : "Nothing skipped yet."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               width: parent.width
-              text: "Left off every backup. Use this for anything large you don’t need on the USB."
+              text: root.blockedByRestore
+                ? "Use this for anything too big for this disk. Folder and File open the "
+                  + "backup's own copy, so you pick from what is actually waiting there."
+                : "Left off every backup. Use this for anything large you don’t need on the USB."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
             Repeater {
-              model: svc.skipModel
+              model: root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
               delegate: Rectangle {
                 required property string path
                 visible: !root.isQuickSkip(path)
@@ -944,7 +1026,11 @@ Panel {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                       var p = path
-                      Qt.callLater(function () { svc.removeSkip(p) })
+                      var restoring = root.blockedByRestore
+                      Qt.callLater(function () {
+                        if (restoring) svc.removeRestoreSkip(p)
+                        else svc.removeSkip(p)
+                      })
                     }
                   }
                 }
@@ -955,20 +1041,33 @@ Panel {
               Button {
                 text: "+ Folder"
                 bordered: true
+                // Picking from the restore point means opening it first, which
+                // needs the backup disk and a linked laptop.
+                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: svc.pickFolder()
+                tooltipText: root.blockedByRestore
+                  ? "Opens the restore point so you can pick from the copy on the backup"
+                  : ""
+                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(false) : svc.pickFolder()
               }
               Button {
                 text: "+ File"
                 bordered: true
+                // Picking from the restore point means opening it first, which
+                // needs the backup disk and a linked laptop.
+                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: svc.pickFile()
+                tooltipText: root.blockedByRestore
+                  ? "Opens the restore point so you can pick from the copy on the backup"
+                  : ""
+                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(true) : svc.pickFile()
               }
             }
 
             Toggle {
+              visible: !root.blockedByRestore
               width: parent.width
               label: "Show all disks"
               description: "Includes internal drives. Easy to wipe the computer’s own disk."
