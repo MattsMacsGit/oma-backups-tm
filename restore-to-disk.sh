@@ -450,68 +450,104 @@ fi
 NEW_BTRFS_UUID="$(blkid -s UUID -o value "/dev/mapper/$MAPPER")"
 NEW_ESP_UUID="$(blkid -s UUID -o value "$P1")"
 NEW_PARTUUID="$(blkid -s PARTUUID -o value "$P2")"
-[[ -n $NEW_BTRFS_UUID && -n $NEW_ESP_UUID && -n $NEW_PARTUUID ]] || die "missing new UUIDs"
+NEW_LUKS_UUID="$(blkid -s UUID -o value "$P2")"
+[[ -n $NEW_BTRFS_UUID && -n $NEW_ESP_UUID && -n $NEW_PARTUUID && -n $NEW_LUKS_UUID ]] || die "missing new UUIDs"
 
 FSTAB="$NEW_ROOT/@/etc/fstab"
-if [[ -f $FSTAB ]]; then
-  "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
+[[ -f $FSTAB ]] || die "restored system has no /etc/fstab. Restore aborted."
+if ! "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
 import re, sys
 path, btrfs_uuid, esp_uuid = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
-# Replace btrfs UUID= lines (root/home/log/pkg)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/home\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/var/log\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/var/cache/pacman/pkg\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9A-F-]+(\s+/boot\s+vfat)",
-    f"UUID={esp_uuid}\\1",
-    text,
-    flags=re.M,
-)
-# Comment hibernation swapfile — offset is wrong on a new disk
+# mount -> (fstype, new uuid). / and /boot must be here. The others are
+# rewritten when the restored system has that line, and left alone when it
+# does not.
+wanted = {
+    "/": ("btrfs", btrfs_uuid),
+    "/home": ("btrfs", btrfs_uuid),
+    "/var/log": ("btrfs", btrfs_uuid),
+    "/var/cache/pacman/pkg": ("btrfs", btrfs_uuid),
+    "/boot": ("vfat", esp_uuid),
+}
+boot_types = {"vfat", "fat", "msdos"}
+required = {"/", "/boot"}
+seen = set()
+problems = []
 lines = []
 for line in text.splitlines(True):
-    if "swapfile" in line and not line.lstrip().startswith("#"):
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        lines.append(line)
+        continue
+    parts = line.split()
+    if len(parts) >= 3 and parts[1] in wanted:
+        mount, (fstype, uuid) = parts[1], wanted[parts[1]]
+        ok_type = parts[2] == fstype or (mount == "/boot" and parts[2] in boot_types)
+        if parts[0].startswith("UUID=") and ok_type:
+            lines.append(re.sub(r"^(\s*)UUID=\S+", rf"\1UUID={uuid}", line, count=1))
+            seen.add(mount)
+            continue
+        problems.append(mount + " (" + parts[0] + " " + parts[2] + ")")
+    if "swapfile" in line:
         lines.append("# restored: swapfile omitted\n# " + line)
     else:
         lines.append(line)
+missing = sorted(required - seen)
+if missing or problems:
+    if missing:
+        print("fstab has no UUID= line for: " + ", ".join(missing), file=sys.stderr)
+    if problems:
+        print("fstab line not rewritten: " + ", ".join(problems), file=sys.stderr)
+    sys.exit(1)
 open(path, "w", encoding="utf-8").writelines(lines)
 PY
+then
+  die "fstab still names the old disk (or has no UUID for / or /boot). Restore aborted."
 fi
+
+# The root line only. Another disk named in crypttab is not this restore.
+rewrite_crypttab() {
+  local file=$1
+  [[ -f $file ]] || return 0
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_LUKS_UUID" <<'PY' || die "crypttab root entry still names the old disk. Restore aborted."
+import re, sys
+path, luks = sys.argv[1], sys.argv[2]
+text = open(path, encoding="utf-8", errors="replace").read()
+out = []
+for line in text.splitlines(True):
+    raw = line.strip()
+    if not raw or raw.startswith("#") or raw.split()[0] != "root":
+        out.append(line)
+        continue
+    new, n = re.subn(r"UUID=[0-9a-fA-F-]+", f"UUID={luks}", line, count=1)
+    if n == 0:
+        new, n = re.subn(r"/dev/disk/by-uuid/[0-9a-fA-F-]+", f"/dev/disk/by-uuid/{luks}", line, count=1)
+    if n == 0 or luks.lower() not in new.lower():
+        print("crypttab root entry has no UUID to point at this disk", file=sys.stderr)
+        sys.exit(1)
+    out.append(new)
+open(path, "w", encoding="utf-8").writelines(out)
+PY
+}
+
+rewrite_crypttab "$NEW_ROOT/@/etc/crypttab"
+rewrite_crypttab "$NEW_ROOT/@/etc/crypttab.initramfs"
 
 rewrite_cryptdevice() {
   local file=$1
   [[ -f $file ]] || return 0
-  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_PARTUUID" <<'PY'
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_PARTUUID" "$NEW_LUKS_UUID" <<'PY'
 import re, sys
-path, partuuid = sys.argv[1], sys.argv[2]
+path, partuuid, luks = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
 text = re.sub(
     r"cryptdevice=PARTUUID=[0-9a-fA-F-]+",
     f"cryptdevice=PARTUUID={partuuid}",
     text,
 )
+text = re.sub(r"rd\.luks\.uuid=[0-9a-fA-F-]+", f"rd.luks.uuid={luks}", text)
+# Leaves the "=root" mapper name sitting after the UUID.
+text = re.sub(r"rd\.luks\.name=[0-9a-fA-F-]+", f"rd.luks.name={luks}", text)
 # Hibernation offset is invalid on a new disk. Empty resume= hangs the initramfs.
 text = re.sub(r"\s*resume_offset=\S+", "", text)
 text = re.sub(r"\s*resume=\S*", "", text)
@@ -587,10 +623,10 @@ fi
 # when the UKI actually needs it.
 log "checking the boot entry points at PARTUUID $NEW_PARTUUID"
 "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --chroot "$NEW_ROOT" \
+  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --luks-uuid "$NEW_LUKS_UUID" --chroot "$NEW_ROOT" \
   || die "could not patch UKI cmdline"
 if ! "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --verify-only; then
+  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --luks-uuid "$NEW_LUKS_UUID" --verify-only; then
   die "restored disk would not unlock LUKS (UKI cmdline PARTUUID != $NEW_PARTUUID). Restore aborted."
 fi
 log "boot cmdline verified PARTUUID=$NEW_PARTUUID"
