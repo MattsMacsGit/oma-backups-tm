@@ -15,9 +15,9 @@ Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--level ful
 the mounted backup disk. The network rescue stick uses this.
 
 --level settings: the system plus each home's hidden settings (.config,
-.local, ...); visible folders come back empty and files over 100 MB are
-skipped, and so are AI models kept in the system area (Ollama's). Bring the
-rest back later with "Restore my files".
+.local, ...). Visible folders come back empty. Caches, Flatpak, containers,
+Steam, and model folders are left for "Restore my files", and so are AI
+models kept in the system area (Ollama's).
 
 Restores a VALID (os+home+esp) point onto a blank disk so it boots Omarchy:
   GPT → 2G ESP + LUKS2 → btrfs (@, @home, empty @log/@pkg)
