@@ -57,7 +57,8 @@ def explain(home: Path) -> None:
             f"The Pi's gatekeeper is v{data.get('version')}. This laptop wants v{data.get('want')}."
         )
         print("  One session can still lock the disk out from under another.")
-        print("  On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update")
+        if data.get("update"):
+            print("  Update it by running this on the Pi: " + str(data["update"]))
     logs = [
         Path("/var/log/omarchy-backups/oma-backups.log"),
         home / ".local" / "state" / "omarchy-backups" / "oma-backups.log",
@@ -112,7 +113,7 @@ def main() -> int:
         rc = 1
 
     if dest is None:
-        print("The backup disk is not mounted, so your files can't be compared with the copy.")
+        print("The backup disk is not mounted, so your files can't be compared with the backup.")
         return rc
 
     print(f"dest: {dest}")

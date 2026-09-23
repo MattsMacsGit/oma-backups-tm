@@ -762,7 +762,7 @@ prune_restore_points() {
   mode="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get retention)"
   if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 2 ]]; then
     warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up."
-    warn "On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update"
+    warn "Update it by running this on the Pi: $(pi_update_cmd)"
     return 0
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
@@ -1170,7 +1170,7 @@ cmd_browse() {
   local gate_ver
   gate_ver="$(rgate version 2>/dev/null || echo 0)"
   [[ $gate_ver -ge 3 ]] ||
-    fail_backup "The Pi needs updating to open restore points. On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update"
+    fail_backup "The Pi needs updating to open restore points. Run this on it: $(pi_update_cmd)"
   command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: sudo oma-backups link --refresh)."
   local mp="$BROWSE_DIR/$ts" pid
   mkdir -p "$mp"

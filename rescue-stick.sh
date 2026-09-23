@@ -132,7 +132,9 @@ step "Checking the Pi"
 st="$(rgate status 2>&1)" || fail "Can't reach $REMOTE_HOST. Is it switched on and on the network (or Tailscale)?"
 gate_ver="$(rgate version 2>/dev/null || echo 0)"
 note_pi_gate "$gate_ver"
-((gate_ver >= MIN_GATE)) || fail "The Pi's gatekeeper is v${gate_ver}. A rescue stick needs v${MIN_GATE}. On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update"
+((gate_ver >= MIN_GATE)) || fail "The Pi's gatekeeper is v${gate_ver}. A rescue stick needs v${MIN_GATE}. Update it by running this on the Pi:
+
+  $(pi_update_cmd)"
 
 # The password is checked against the backup disk wherever it is right now.
 local_part="$(capsule_luks_partition 2>/dev/null || true)"

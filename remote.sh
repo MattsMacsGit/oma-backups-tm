@@ -148,7 +148,7 @@ cmd_forget() {
   echo
   gum style --bold "Unpaired from $REMOTE_HOST."
   gum style --foreground 8 "  To clean up the Pi too, run this on it:"
-  echo "  sudo ./pi/pi-setup.sh --uninstall    # from a copy of this same tree, on the Pi"
+  echo "  $(pi_update_cmd --uninstall)"
   press_enter
 }
 

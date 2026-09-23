@@ -109,9 +109,19 @@ remote_refresh_addresses() {
 # but they lock the disk when the first session finishes, not the last.
 OMA_GATE_WANT=9
 
+# The one-liner that updates (or with --uninstall, removes) the Pi's side.
+# OMA_REPO_RAW is where this copy came from, so someone testing another
+# branch points it there and gets that branch's gatekeeper.
+pi_update_cmd() {
+  printf 'curl -fsSL %s/pi/pi-setup.sh | sudo bash -s -- %s' "$OMA_REPO_RAW" "${1:---update}"
+}
+
 # Remember the version where the panel and doctor can read it. The SSH key
-# is root-only, so a user-level poll cannot ask the Pi itself.
+# is root-only, so a user-level poll cannot ask the Pi itself. --quiet
+# records it without printing: the hourly check would say it every hour.
 note_pi_gate() {
+  local quiet=0
+  if [[ ${1:-} == --quiet ]]; then quiet=1; shift; fi
   local v=${1:-0} f="$OMARCHY_TM_STATE/pi-gate.json" behind=false
   [[ $v =~ ^[0-9]+$ ]] || v=0
   # 0 means we never heard a version (Pi off, SSH down). That is not
@@ -125,12 +135,13 @@ note_pi_gate() {
   # false, and `((behind))` with `set -u` looks that word up as a variable.
   mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
   jq -n --argjson v "$v" --argjson want "$OMA_GATE_WANT" --argjson behind "$behind" \
-    '{version: $v, want: $want, behind: $behind}' >"$f.tmp" \
+    --arg update "$(pi_update_cmd)" \
+    '{version: $v, want: $want, behind: $behind, update: $update}' >"$f.tmp" \
     && chmod 644 "$f.tmp" && mv "$f.tmp" "$f" || return 0
-  [[ $behind == true ]] || return 0
+  [[ $behind == true && $quiet == 0 ]] || return 0
   warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}. One session can still lock the disk out from under another." || true
-  gum style --foreground 8 "  On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update" || true
-  gum style --foreground 8 "  The curl command installs main, which is older than this tree." || true
+  gum style --foreground 8 "  Update it by running this on the Pi (keeps the pairing):" || true
+  gum style --foreground 8 "  $(pi_update_cmd)" || true
   return 0
 }
 

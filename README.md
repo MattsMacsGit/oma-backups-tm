@@ -163,12 +163,10 @@ and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
 and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
 address is used, the Pi's key is still checked under the name you paired it as.
 
-After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing).
-Do that from a copy of this same tree, on the Pi. The old curl one-liner
-installs main, which can be older than the laptop.
+After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
 
 ```bash
-sudo ./pi/pi-setup.sh --update
+curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
 ```
 
 Unpairing (`oma-backups remote forget`) removes the Pi connection but keeps the
@@ -305,10 +303,10 @@ start rather than quietly bringing back folders you once skipped.
 
 ### Removing it from the Pi
 
-If you paired a Raspberry Pi, clean that up separately — from a copy of this same tree, **on the Pi**:
+If you paired a Raspberry Pi, clean that up separately — run this **on the Pi**:
 
 ```bash
-sudo ./pi/pi-setup.sh --uninstall
+curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --uninstall
 ```
 
 It locks the backup disk, deletes the `omabackups` account and its home, and

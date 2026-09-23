@@ -555,6 +555,7 @@ Item {
     timerFile.reload()
     linkedFile.reload()
     lastSuccessFile.reload()
+    piGateFile.reload()
     if (!root.restoringFiles) partialFile.reload()
     if (root.systemPhase === "waiting") putBackFile.reload()
     nowSec = Date.now() / 1000
@@ -1207,7 +1208,7 @@ Item {
         root.piBehind = j.behind === true
         root.piGateText = root.piBehind
           ? ("The Pi's gatekeeper is v" + j.version + ". This laptop wants v" + j.want
-            + ". One session can still lock the disk out from under another. On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update")
+            + ". Update it by running this on the Pi: " + (j.update || "pi-setup.sh --update"))
           : ""
       } catch (e) {
         root.piBehind = false
