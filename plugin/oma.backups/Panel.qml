@@ -16,6 +16,13 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
+  // Themes give us foreground/accent/urgent and nothing else, and none of
+  // them mean "safe". Literal, like urgent means warning — and always paired
+  // with the word KEPT, so it still reads on a theme this clashes with.
+  readonly property color kept: "#6fa86f"
+  // Which restore point has been asked about: letting one go is not something
+  // a stray click should do.
+  property string releaseAsk: ""
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
@@ -638,14 +645,9 @@ Panel {
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
                     : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
-                  : svc.filesDone && svc.skippedSystem > 0
+                  : svc.filesDone
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
-                  : svc.filesDone
-                  ? "Your files are back, apart from the " + svc.restoreSkipCount
-                    + (svc.restoreSkipCount === 1 ? " thing" : " things") + " you left out. They are still "
-                    + "on the backup and this restore point is kept for them. Take them off the "
-                    + "list in Settings and press Restore my files again, or finish up below."
                   : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
                     + ". Your documents, photos and other files are still on the backup"
                     + (svc.skippedSystem > 0 ? ", and so are your AI models." : ".")
@@ -658,16 +660,16 @@ Panel {
               Button {
                 visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
                 width: parent.width
-                text: svc.filesDone && svc.skippedSystem > 0 ? "Put AI models back" : "Restore my files"
+                text: svc.filesDone ? "Put AI models back" : "Restore my files"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
                 enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
                 fontFamily: root.fontFamily
-                tooltipText: svc.filesDone && svc.skippedSystem > 0
+                tooltipText: svc.filesDone
                   ? "Opens a terminal to put your AI models back. Asks for your password."
                   : "Copies back everything that's missing. Never overwrites a file you've changed since."
-                onClicked: svc.filesDone && svc.skippedSystem > 0 ? svc.putBackModels() : svc.restoreMyFiles()
+                onClicked: svc.filesDone ? svc.putBackModels() : svc.restoreMyFiles()
               }
               Button {
                 visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
@@ -720,11 +722,54 @@ Panel {
                     ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
                     : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
                       ? "Smart thinning keeps every backup from the last day, one a day for a month, then one a week."
-                      : "All restore points are kept."))
+                      : "All restore points are kept.")
+                    + (svc.keptCount > 0
+                      ? " The ones marked KEPT are never thinned: a restore left something on them."
+                      : ""))
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
+              }
+              Column {
+                visible: root.releaseAsk !== "" && svc.isKept(root.releaseAsk)
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  width: parent.width
+                  text: {
+                    var l = svc.keptLeftOut(root.releaseAsk)
+                    return Model.prettyStamp(root.releaseAsk) + " is kept because a restore left "
+                      + (l.length ? l.join(", ") : "something")
+                      + " on it. Let it go and it can be thinned away like any other, taking "
+                      + "the last copy of that with it."
+                  }
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                Row {
+                  spacing: Style.space(8)
+                  Button {
+                    text: "Let it go"
+                    bordered: true
+                    foreground: root.urgent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                      var t = root.releaseAsk
+                      root.releaseAsk = ""
+                      svc.releaseKept(t)
+                    }
+                  }
+                  Button {
+                    text: "Keep it"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: root.releaseAsk = ""
+                  }
+                }
               }
               Repeater {
                 model: svc.snapModel
@@ -738,12 +783,14 @@ Panel {
                   height: visible ? (rpTxt.implicitHeight + Style.space(10)) : 0
                   radius: Style.cornerRadius
                   color: "transparent"
-                  border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+                  border.color: svc.isKept(snapId)
+                    ? root.kept
+                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
                   border.width: 1
                   Text {
                     id: rpTxt
                     anchors.left: parent.left
-                    anchors.right: rpSize.visible ? rpSize.left : parent.right
+                    anchors.right: rpSize.visible ? rpSize.left : (rpKept.visible ? rpKept.left : parent.right)
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(8)
                     anchors.rightMargin: Style.space(6)
@@ -756,13 +803,30 @@ Panel {
                   Text {
                     id: rpSize
                     visible: sizeText !== ""
-                    anchors.right: parent.right
+                    anchors.right: rpKept.visible ? rpKept.left : parent.right
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.rightMargin: Style.space(8)
                     text: sizeText
                     color: root.dim
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.bodySmall
+                  }
+                  Text {
+                    id: rpKept
+                    visible: svc.isKept(snapId)
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Style.space(8)
+                    text: "KEPT"
+                    color: root.kept
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    MouseArea {
+                      anchors.fill: parent
+                      anchors.margins: -6
+                      cursorShape: Qt.PointingHandCursor
+                      onClicked: root.releaseAsk = (root.releaseAsk === snapId ? "" : snapId)
+                    }
                   }
                   MouseArea {
                     anchors.fill: parent

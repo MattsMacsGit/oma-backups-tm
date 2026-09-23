@@ -60,6 +60,7 @@ Item {
   property bool wipeConfirmed: false
   property bool skipLoaded: false
   property bool restoreSkipLoaded: false
+  property int _leftOutAtFinish: 0
   property bool backupIncomplete: false
   // Set by the Panel: the disk scan only needs to run while someone is looking.
   property bool panelOpen: false
@@ -93,6 +94,11 @@ Item {
     var r = detect && detect._root
     if (r) return r + "/lib/write_skip_paths.py"
     return shareRoot + "/lib/write_skip_paths.py"
+  }
+  readonly property string keptPointsCli: {
+    var r = detect && detect._root
+    if (r) return r + "/lib/kept_points.py"
+    return shareRoot + "/lib/kept_points.py"
   }
   readonly property string writeRestoreSkip: {
     var r = detect && detect._root
@@ -245,11 +251,7 @@ Item {
       putBackModels()
       return
     }
-    // filesDone with models outstanding is the panel's "Put AI models back"
-    // case and never comes through here. filesDone with things left out does:
-    // take the entries off the list and press it again, and --ignore-existing
-    // means the second pass only carries what is still missing.
-    if (root.filesDone && root.skippedSystem > 0) return
+    if (root.filesDone) return
     root.restoringFiles = true
     root.restorePercent = 0
     browse(root.partialSnapshot, "restore")
@@ -340,6 +342,54 @@ Item {
   readonly property string lastSnapshot: snapList.count > 0 ? snapList.get(0).whenText : ""
 
   property string _detectOut: ""
+  // Restore points that must never be thinned away: a restore left something
+  // behind on them on purpose, so they hold the only copy of it. The system
+  // carries on backing up as normal around them — earmarking one is cheaper
+  // than pausing everything until the user comes back for it.
+  property var keptPoints: ({})
+  readonly property int keptCount: Object.keys(root.keptPoints).length
+
+  function isKept(ts) { return root.keptPoints.hasOwnProperty(ts) }
+
+  function keptLeftOut(ts) {
+    var e = root.keptPoints[ts]
+    return (e && Array.isArray(e.left_out)) ? e.left_out : []
+  }
+
+  function releaseKept(ts) {
+    if (!root.isKept(ts)) return
+    keptPointProc.command = ["python3", root.keptPointsCli, "--remove", ts]
+    keptPointProc.running = true
+  }
+
+  Process {
+    id: keptPointProc
+    onExited: {
+      keptFile.reload()
+      // Only set when this ran as the last step of a restore.
+      if (root._afterKeep) {
+        root._afterKeep = false
+        root.runFinishFiles()
+      }
+    }
+  }
+  property bool _afterKeep: false
+
+  FileView {
+    id: keptFile
+    path: root.home + "/.local/state/omarchy-backups/kept-points.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.keptPoints = (j && typeof j === "object") ? j : ({})
+      } catch (e) {
+        root.keptPoints = ({})
+      }
+    }
+    onLoadFailed: root.keptPoints = ({})
+  }
+
   // What to leave out of "Restore my files" — a different question from the
   // backup skip list above. That one is "is this worth keeping a copy of";
   // this is "will it fit on the disk I am restoring onto, today". Empty by
@@ -451,6 +501,7 @@ Item {
     // a second python process every two seconds for an answer already coming.
     // Also catches pairing/unpairing: the file may not exist to be watched.
     rootCopyFile.reload()
+    keptFile.reload()
     remoteFile.reload()
     scheduleFile.reload()
     timerFile.reload()
@@ -996,10 +1047,20 @@ Item {
         // (backups stay paused, the restore point stays protected) and only
         // records that the files are done. Decided from the file itself, as
         // the terminal may have changed it since the panel last read it.
-        finishFilesProc.command = ["sh", "-c", root.finishFilesScript, "sh",
-          root.home + "/.local/state/omarchy-backups/partial-restore.json",
-          root.restoreSkipCount > 0 ? "1" : "0"]
-        finishFilesProc.running = true
+        // Things left out on purpose do not hold the restore open any more:
+        // the restore point they are on is earmarked instead, and this system
+        // goes back to backing up as normal.
+        root._leftOutAtFinish = root.restoreSkipCount
+        if (root.restoreSkipCount > 0 && root.partialSnapshot !== "") {
+          var mark = ["python3", root.keptPointsCli, "--add", root.partialSnapshot]
+          for (var n = 0; n < restoreSkipListModel.count; n++)
+            mark.push(restoreSkipListModel.get(n).path)
+          root._afterKeep = true
+          keptPointProc.command = mark
+          keptPointProc.running = true
+        } else {
+          root.runFinishFiles()
+        }
       } else {
         root.lastError = "Restoring your files stopped before finishing. Press Restore my files to carry on."
       }
@@ -1011,10 +1072,15 @@ Item {
   // paused and this restore point is never thinned away, which is the only
   // thing keeping what was left out reachable.
   readonly property string finishFilesScript:
-    "f=\"$1\"; keep() { jq '.files_done = true' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\"; }; "
-    + "if jq -e '(.skipped_system // []) | length > 0' \"$f\" >/dev/null 2>&1; then keep && echo models; "
-    + "elif [ \"$2\" = 1 ]; then keep && echo left; "
+    "f=\"$1\"; if jq -e '(.skipped_system // []) | length > 0' \"$f\" >/dev/null 2>&1; then "
+    + "jq '.files_done = true' \"$f\" > \"$f.tmp\" && mv \"$f.tmp\" \"$f\" && echo models; "
     + "else rm -f \"$f\"; echo done; fi"
+
+  function runFinishFiles() {
+    finishFilesProc.command = ["sh", "-c", root.finishFilesScript, "sh",
+      root.home + "/.local/state/omarchy-backups/partial-restore.json"]
+    finishFilesProc.running = true
+  }
 
   Process {
     id: finishFilesProc
@@ -1022,14 +1088,12 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         var outcome = String(text || "").trim()
+        var left = root._leftOutAtFinish
+        root._leftOutAtFinish = 0
         if (outcome === "models") {
           root.filesDone = true
           Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
             "Your AI models are still on the backup. Press \"Put AI models back\" in OmaBackups."])
-        } else if (outcome === "left") {
-          root.filesDone = true
-          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
-            "What you left out is still on the backup, and this restore point is kept for it."])
         } else {
           root.partialSnapshot = ""
           root.skippedSystem = 0
@@ -1040,7 +1104,10 @@ Item {
           root.persistRestoreSkips()
           root.restoreSkipLoaded = false
           Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Your files are back",
-            "Everything from the backup has been restored to your home folder."])
+            left > 0
+              ? "Backups start again now. The restore point you left " + left
+                + (left === 1 ? " thing" : " things") + " on is kept for as long as you want it."
+              : "Everything from the backup has been restored to your home folder."])
         }
         partialFile.reload()
       }

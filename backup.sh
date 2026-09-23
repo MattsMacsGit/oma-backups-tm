@@ -671,12 +671,26 @@ prune_restore_points() {
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
-  # After a "system + settings" restore, the restore point it came from is the
-  # only one that still has the user's files until they're brought back.
-  local protected
-  protected="$(jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
-  if [[ -n $protected ]]; then
-    plan="$(jq --arg p "$protected" '.thin -= [$p] | .space_order -= [$p] | .keep = (.keep + [$p] | unique)' <<<"$plan")"
+  # Two kinds of restore point thinning must never touch. The one a restore
+  # is still mid-way through (partial-restore.json), and the ones earmarked
+  # because a restore deliberately left something behind on them — those are
+  # the only copy of what was left out, and the system carries on backing up
+  # around them (kept-points.json, written by the plugin).
+  local protect_json
+  protect_json="$(
+    {
+      jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --list 2>/dev/null |
+        jq -r 'keys[]?' 2>/dev/null || true
+    } | grep -E '^[0-9]{8}T[0-9]{6}Z$' | jq -R . | jq -s 'unique'
+  )"
+  if [[ $(jq 'length' <<<"$protect_json") -gt 0 ]]; then
+    # Intersect with what is actually on the disk first, or a restore point
+    # deleted by hand would inflate the "Keep:" count in the dry run for good.
+    plan="$(jq --argjson p "$protect_json" '
+      ($p - ($p - (.keep + .thin + .space_order))) as $k
+      | .thin -= $k | .space_order -= $k | .keep = (.keep + $k | unique)' <<<"$plan")"
+    log_file "thinning will not touch: $(jq -r 'join(" ")' <<<"$protect_json")"
   fi
   if [[ $dry == 1 ]]; then
     echo "Setting: $mode"
