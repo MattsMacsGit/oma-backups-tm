@@ -474,8 +474,14 @@ fail_backup() {
 }
 
 backup_running() {
-  local p
-  p="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  local p f
+  # Checked for readability first: a `<missing-file` redirection is reported by
+  # the shell before the command's own `2>/dev/null` can be applied, so the
+  # "No such file or directory" went to the journal on every browse stop --
+  # there is no pid file unless a backup is actually running.
+  f="$(pid_file)"
+  [[ -r $f ]] || return 1
+  p="$(tr -d '[:space:]' <"$f" 2>/dev/null || true)"
   [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
