@@ -611,7 +611,13 @@ refuse_if_partial_restore() {
 refuse_if_running() {
   local other
   exec 9>"$(pid_file).lock"
-  flock -w 10 9 || true
+  # Giving up and continuing used to let Backup now and the hourly timer
+  # both pass the check and both write the disk.
+  if ! flock -w 10 9; then
+    exec 9>&-
+    gum style --bold "A backup is already starting. Leaving it to finish."
+    exit 0
+  fi
   other="$(tr -d '[:space:]' 2>/dev/null <"$(pid_file)" || true)"
   if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
     grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
