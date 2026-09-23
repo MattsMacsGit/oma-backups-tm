@@ -16,10 +16,11 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
-  // Themes give us foreground/accent/urgent and nothing else, and none of
-  // them mean "safe". Literal, like urgent means warning — and always paired
-  // with the word KEPT, so it still reads on a theme this clashes with.
-  readonly property color kept: "#6fa86f"
+  // The theme's own accent rather than a colour of our own, so this follows
+  // whatever Omarchy is wearing. Not `urgent` — nothing is wrong with a kept
+  // restore point. On a theme where accent sits close to the ordinary text
+  // the row still reads as different: it is the only one carrying buttons.
+  readonly property color kept: Color.accent
   // Which restore point has been asked about: letting one go is not something
   // a stray click should do.
   property string releaseAsk: ""
@@ -724,7 +725,9 @@ Panel {
                       ? "Smart thinning keeps every backup from the last day, one a day for a month, then one a week."
                       : "All restore points are kept.")
                     + (svc.keptCount > 0
-                      ? " The ones marked KEPT are never thinned: a restore left something on them."
+                      ? " The marked ones still hold files a restore never brought back, so they "
+                        + "are never thinned away. Press Restore on one to go and get them, or "
+                        + "tap the row itself to stop keeping it."
                       : ""))
                 color: root.dim
                 font.family: root.fontFamily
@@ -779,60 +782,92 @@ Panel {
                   required property string snapId
                   required property string sizeText
                   visible: root.showAllSnaps || index < 5
+                  readonly property bool rpKeptRow: svc.isKept(snapId)
                   width: column.width
-                  height: visible ? (rpTxt.implicitHeight + Style.space(10)) : 0
+                  height: visible
+                    ? (Math.max(rpTxt.implicitHeight, rpActions.implicitHeight) + Style.space(10))
+                    : 0
                   radius: Style.cornerRadius
                   color: "transparent"
-                  border.color: svc.isKept(snapId)
+                  border.color: rpKeptRow
                     ? root.kept
                     : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
                   border.width: 1
                   Text {
                     id: rpTxt
                     anchors.left: parent.left
-                    anchors.right: rpSize.visible ? rpSize.left : (rpKept.visible ? rpKept.left : parent.right)
+                    anchors.right: rpActions.left
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(8)
                     anchors.rightMargin: Style.space(6)
                     text: whenText
-                    color: root.foreground
+                    color: rpKeptRow ? root.kept : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     elide: Text.ElideRight
                   }
-                  Text {
-                    id: rpSize
-                    visible: sizeText !== ""
-                    anchors.right: rpKept.visible ? rpKept.left : parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.rightMargin: Style.space(8)
-                    text: sizeText
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
-                  Text {
-                    id: rpKept
-                    visible: svc.isKept(snapId)
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.rightMargin: Style.space(8)
-                    text: "KEPT"
-                    color: root.kept
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                    MouseArea {
-                      anchors.fill: parent
-                      anchors.margins: -6
-                      cursorShape: Qt.PointingHandCursor
-                      onClicked: root.releaseAsk = (root.releaseAsk === snapId ? "" : snapId)
-                    }
-                  }
+                  // Declared before the buttons so they take the clicks that
+                  // land on them: a plain row opens the restore point, a
+                  // marked one asks whether to stop keeping it (its own
+                  // Browse button does the opening).
                   MouseArea {
                     anchors.fill: parent
                     enabled: svc.linked || !svc.remoteActive
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: svc.openSnapshot(snapId)
+                    onClicked: {
+                      if (rpKeptRow) root.releaseAsk = (root.releaseAsk === snapId ? "" : snapId)
+                      else svc.openSnapshot(snapId)
+                    }
+                  }
+                  Row {
+                    id: rpActions
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Style.space(8)
+                    spacing: Style.space(6)
+                    Text {
+                      // No anchors: Row positions its own children, and it is
+                      // centred in the row itself.
+                      visible: sizeText !== "" && !rpKeptRow
+                      text: sizeText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Button {
+                      visible: rpKeptRow
+                      text: "Browse"
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(8)
+                      verticalPadding: Style.space(4)
+                      enabled: (svc.linked || !svc.remoteActive) && !svc.restoringFiles
+                      tooltipText: "Open this restore point read-only"
+                      onClicked: svc.openSnapshot(snapId)
+                    }
+                    Button {
+                      visible: rpKeptRow
+                      text: svc.restoreKeptTs === snapId
+                        ? (svc.browsePhase === "opening" ? "Opening…" : svc.restorePercent + "%")
+                        : "Restore"
+                      bordered: true
+                      foreground: root.kept
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(8)
+                      verticalPadding: Style.space(4)
+                      enabled: svc.linked && !svc.backupRunning
+                        && (!svc.restoringFiles || svc.restoreKeptTs === snapId)
+                      tooltipText: svc.restoreKeptTs === snapId
+                        ? "Stop, and carry on another time"
+                        : "Bring back what this one still holds. Never overwrites a file you have changed since."
+                      onClicked: {
+                        if (svc.restoreKeptTs === snapId) svc.stopRestoringFiles()
+                        else svc.restoreKept(snapId)
+                      }
+                    }
                   }
                 }
               }

@@ -293,6 +293,7 @@ Item {
   function stopRestoringFiles() {
     restoreProc.running = false
     root.restoringFiles = false
+    root.restoreKeptTs = ""
     closeBrowse()
   }
 
@@ -354,6 +355,20 @@ Item {
   function keptLeftOut(ts) {
     var e = root.keptPoints[ts]
     return (e && Array.isArray(e.left_out)) ? e.left_out : []
+  }
+
+  // The other half of earmarking: go and get what was left behind, whenever
+  // the user is ready. Same copy as "Restore my files" and the same rule
+  // (never overwrite anything changed since), but from a restore point this
+  // machine is no longer mid-restore from, and with nothing left out.
+  property string restoreKeptTs: ""
+
+  function restoreKept(ts) {
+    if (!root.isKept(ts) || !root.linked || root.restoringFiles) return
+    root.restoreKeptTs = ts
+    root.restoringFiles = true
+    root.restorePercent = 0
+    root.browse(ts, "restore")
   }
 
   function releaseKept(ts) {
@@ -1007,8 +1022,11 @@ Item {
         if (root.browseMode === "restore") {
           // Only what's missing: never overwrite anything changed since.
           var cmd = ["rsync", "-a", "--ignore-existing", "--info=progress2"]
-          for (var k = 0; k < restoreSkipListModel.count; k++)
-            cmd.push("--exclude=" + restoreSkipListModel.get(k).path)
+          // Going back for what was left behind leaves nothing out — that is
+          // the whole point of the trip.
+          if (root.restoreKeptTs === "")
+            for (var k = 0; k < restoreSkipListModel.count; k++)
+              cmd.push("--exclude=" + restoreSkipListModel.get(k).path)
           cmd.push(String(j.path) + "/", root.home + "/")
           restoreProc.command = cmd
           restoreProc.running = true
@@ -1041,6 +1059,20 @@ Item {
       if (!root.restoringFiles) return
       root.restoringFiles = false
       if (root.browseMode === "restore") root.closeBrowse()
+      if (root.restoreKeptTs !== "") {
+        var ts = root.restoreKeptTs
+        root.restoreKeptTs = ""
+        if (code === 0) {
+          // Nothing is left on it now, so it goes back to being an ordinary
+          // restore point that thinning may take when its turn comes.
+          root.releaseKept(ts)
+          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
+            "What was left on that restore point is in your home folder again."])
+        } else {
+          root.lastError = "Bringing those back stopped before finishing. Press Restore to carry on."
+        }
+        return
+      }
       if (code === 0) {
         // Everything's back: the protected restore point can be thinned again.
         // Unless the AI models are still on the backup: then the marker stays
