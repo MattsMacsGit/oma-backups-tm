@@ -1,6 +1,6 @@
 # OmaBackups
 
-**v1.3.2** — Time Machine-style **encrypted backups** for
+**v1.4.0** — Time Machine-style **encrypted backups** for
 [Omarchy](https://omarchy.org/).
 
 A USB disk keeps dated copies of your system and your home folder. Click a
@@ -47,6 +47,11 @@ Open the **OmaBackups** disk icon on the bar. Plug in a USB disk.
 
 To update: `git pull` in the clone, then `./install.sh` again. If the laptop is
 linked (see below), this asks for sudo once to refresh the linked copy.
+
+Then bring your rescue USBs up to date too, so the restore wizard on them
+matches: plug in the backup USB (or the network rescue stick) and run
+`oma-backups refresh-rescue --scripts-only`. It takes seconds and asks for
+your password. If you use a Pi, update its gatekeeper as well (see below).
 
 ### If the bar icon goes missing
 
@@ -193,7 +198,7 @@ You need:
 - a paired Pi with the backup disk plugged in, at least one restore point on
   it, and a linked laptop (the Settings section only shows up once all of
   these are true)
-- the Pi's gatekeeper at version 7 or newer (run the `--update` command above)
+- the Pi's gatekeeper at version 9 or newer (run the `--update` command above)
 - a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
   rescue uses)
 - for away-from-home restores: Tailscale already working on the laptop and the
@@ -219,31 +224,53 @@ stick too: the old one would still open, but couldn't unlock the backup disk.
 ## Restoring
 
 Boot the backup USB (firmware boot menu → Limine: **Rescue Disk**), or the
-network rescue stick. The wizard asks what to bring back:
+network rescue stick. Pick a date, then how to restore:
 
-- **Everything** — the system and your whole home folder, as it was on that date.
-- **System + settings** — Omarchy, your apps and all your settings, but not the
-  contents of Documents, Pictures, Videos, Downloads and so on. Those folders
-  come back empty, and anything over 100 MB is left for later. It's much
-  quicker, and gets you to a working desktop sooner.
+- **Quick System Rescue** (recommended) — Omarchy, your apps and all your
+  settings, but not the contents of Documents, Pictures, Videos, Downloads and
+  so on. Those folders come back empty. Things that can be downloaded or made
+  again are left for later too: caches, Flatpak apps, virtual machines and
+  containers, AI models and game libraries. You're back at a working desktop
+  much sooner and can start working
+  right away, then bring your files back with **Restore my files** whenever it
+  suits you. Need something sooner? Open the restore point in the plugin and
+  copy out just what you need.
+- **Full Unattended Restore** — the system and your whole home folder, as it
+  was on that date. It takes the longest, but you can walk away.
 
-Then pick a date, pick a disk, and type the disk name and YES. Restoring
-**wipes** the disk you restore onto.
+Then pick a disk, and type the disk name and YES. Restoring **wipes** the disk
+you restore onto. When it's done, the wizard offers to restart into the
+restored system or open a command line. Leave the USB in until the restart
+begins (the wizard is running from it), then take it out.
 
 Restore from a running desktop is expert-only (`--allow-internal`). The
 intended path is **booting**.
 
 ### Restore my files
 
-After a **System + settings** restore, the plugin shows **Restore my files**.
+After a **Quick System Rescue**, the plugin shows **Restore my files**.
 It copies back everything that was left behind, without overwriting anything
 you've changed since. Stop it and carry on later if you like. Until your files
 are back, the restore point they came from is kept safe from thinning — it's
 the only one that still has them.
 
+Don't want everything back on this disk? Press **Choose what to leave out**
+first: the quick skips and **Folder** / **File** there pick from the backup's
+own copy. Once the rest is back, backups start
+again as normal, and the restore point still holding what you left out is
+marked in the list and never thinned away. Its row has **Browse** and
+**Restore** buttons for fetching the rest later. Tap the row itself to stop
+keeping it.
+
+AI models kept in the system area (Ollama's, in `/var/lib/ollama`) are left on
+the backup by a Quick System Rescue too: they're often many gigabytes. **Restore
+my files** puts them back first, in a terminal, because that needs your
+password. Skip it and your files still come back; the panel then offers **Put
+AI models back** for later, and backups stay paused until they are.
+
 ### Backups pause until the system is whole again
 
-A system restored with **System + settings** is missing files that are still in
+A system restored with **Quick System Rescue** is missing files that are still in
 the backup. If it backed up in that state, rsync would delete them from the
 backup's current copy and turn the gap into a restore point. That matters most
 when you restore onto a spare disk and boot it to check it: the restored system
@@ -254,6 +281,8 @@ So on a restored system:
 
 - automatic backups don't run, and say so once a day
 - **Backup now** is greyed out
+- Settings only shows what to leave out of the restore; the rest comes back
+  once your files do
 
 Press **Restore my files** and backups start again by themselves. If you meant
 to keep only what's on this system — setting up a second machine, say — hold
@@ -334,15 +363,17 @@ Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
   backup, last 5 restore points (click to open), **More**, gear. While a backup
   runs: a bar for the step and a bar for the whole run. After a part restore it
   also shows **Restore my files**, and Backup now is greyed out until your
-  files are back.
+  files are back. A restore point still holding things a restore left out is
+  marked, with **Browse** and **Restore** buttons on its row.
 - **Settings:** automatic backups, Smart thinning, quick skips, skip list, show
   all disks, back up to a Pi, network rescue stick, use a different disk,
   erase / start over
 
 Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Nothing of yours is
-skipped to begin with; the recommended quick-skips (Trash, caches, thumbnails)
-are switches you can turn off like any other. Compiled into rsync excludes at
-the start of **every** backup.
+skipped to begin with. Caches and Trash are switched on as recommended skips,
+and you can turn them off like any other; Downloads, Flatpak apps, virtual
+machines and containers, AI models and game libraries are switches too, off to
+begin with. Compiled into rsync excludes at the start of **every** backup.
 
 ## CLI
 
@@ -361,6 +392,7 @@ oma-backups snapshots
 oma-backups open TIMESTAMP    # open one restore point read-only in Files
 oma-backups remote pair HOST | status | forget
 oma-backups rescue-stick /dev/sdX
+oma-backups refresh-rescue --scripts-only   # after an update, with a rescue USB plugged in
 oma-backups link [--refresh]
 oma-backups doctor
 oma-backups version

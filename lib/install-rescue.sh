@@ -193,6 +193,14 @@ install_rescue_files() {
   local live=$1 efi=$2
   rescue_umask
   mkdir -p "$live/oma-backups" "$efi"
+  # The two excludes at the end are not about what to copy — nothing in the
+  # repo matches them — but about what --delete must leave alone. Both are
+  # written onto the stick after this runs and exist nowhere else:
+  # network-rescue.json is the only thing that makes a stick restore from the
+  # Pi (restore_tui reads it for --from-pi), and etc-omarchy-backups holds the
+  # config this machine was set up with. A full build writes them afterwards
+  # so never noticed; a refresh would have quietly turned a network stick into
+  # one that hunts for a backup disk that isn't there.
   rsync -a --delete \
     --exclude '.git/' \
     --exclude '.claude-notes/' \
@@ -200,6 +208,8 @@ install_rescue_files() {
     --exclude 'plugin/omarchy.omabackups/' \
     --exclude '__pycache__/' \
     --exclude '*.pyc' \
+    --exclude 'network-rescue.json' \
+    --exclude 'etc-omarchy-backups/' \
     "$OMARCHY_TM_ROOT"/ "$live/oma-backups/"
   chmod 755 "$live/oma-backups/share/rescue-run.sh" \
     "$live/oma-backups/share/oma-rescue-launch.sh"

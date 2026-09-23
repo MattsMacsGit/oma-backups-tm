@@ -56,8 +56,12 @@ fi
 # up to date with this install.
 if [[ -f /etc/omarchy-backups/linked.json ]]; then
   echo "Updating the linked backup services (needs sudo)..."
+  # Spelled out in full, and with sudo. `sudo oma-backups` only works once a
+  # refresh has been through -- that is what puts the name on root's PATH --
+  # so telling someone whose refresh just failed to run it that way sends them
+  # straight into "sudo: oma-backups: command not found".
   sudo "$SHARE/omarchy-backups" link --refresh ||
-    echo "  couldn't update them; run: oma-backups link --refresh"
+    echo "  couldn't update them; run: sudo $SHARE/omarchy-backups link --refresh"
 fi
 
 if command -v omarchy >/dev/null; then

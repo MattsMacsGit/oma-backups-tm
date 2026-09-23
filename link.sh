@@ -6,7 +6,11 @@
 #                                (asks for its password once if needed), install
 #                                the services, and let this user run them
 #   oma-backups link --refresh   after updating OmaBackups: refresh the root-owned
-#                                copy and the services, change nothing else
+#                                copy and the services, change nothing else.
+#                                Needs sudo -- and the very first one has to
+#                                name this script by path, since it is the
+#                                refresh itself that puts `oma-backups` on
+#                                root's PATH.
 #
 # The polkit rule lets only this user, only from an active local session,
 # start/stop only the OmaBackups services: back up now, stop, open a restore

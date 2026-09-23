@@ -216,7 +216,7 @@ mount_backup_rw() {
   local mnt=$1
   local mapper=$2
   mkdir -p "$mnt"
-  if mount -o rw,compress=zstd:3 "/dev/mapper/$mapper" "$mnt" 2>/dev/null; then
+  if mount -o rw,noatime,compress=zstd:1 "/dev/mapper/$mapper" "$mnt" 2>/dev/null; then
     :
   elif mount -o rw "/dev/mapper/$mapper" "$mnt"; then
     :
@@ -616,7 +616,8 @@ progress() {
   # plugin's answer to "is a backup running?", nothing here ever writes it
   # back to idle, and a browse that says "running" pins the panel to a
   # backup that does not exist — long after the browse has gone.
-  [[ -n ${BROWSE_STATE:-} ]] && return 0
+  # Putting AI models back after a restore borrows it the same way.
+  [[ -n ${BROWSE_STATE:-} || ${NOT_A_BACKUP:-0} == 1 ]] && return 0
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$@" || true
 }
 
@@ -754,6 +755,14 @@ refresh_root_copy() {
     "$OMARCHY_TM_ROOT/" "$OMA_ROOT_COPY/"
   chown -R root:root "$OMA_ROOT_COPY"
   chmod -R go-w "$OMA_ROOT_COPY"
+  # install.sh only ever put `oma-backups` in the user's own ~/.local/bin,
+  # which is not on root's PATH — so every `sudo oma-backups ...` in the
+  # README and in every set of instructions died with "command not found",
+  # while the identical command without sudo worked. Root's copy gets a name
+  # on root's PATH, so the command is the same command either way.
+  for n in oma-backups omarchy-backups; do
+    ln -sfn "$OMA_ROOT_COPY/omarchy-backups" "/usr/local/bin/$n"
+  done
 }
 
 # Desktop notification for the logged-in user, even from the root timer.

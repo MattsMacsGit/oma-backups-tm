@@ -1,6 +1,13 @@
 #!/usr/bin/env bash
-# Update the rescue USB (OmaRescue + OMABOOT) without wiping backups.
-# --boot-only: copy the Arch ISO kernel already on LIVE onto EFI.
+# Update the rescue USB (OmaRescue + OMABOOT) or a network rescue stick
+# (OmaNetRescue + OMANETBOOT), without wiping backups.
+#   --boot-only     copy the Arch ISO kernel already on LIVE onto EFI
+#   --scripts-only  replace only OmaBackups' own scripts on the stick
+#
+# --scripts-only is the one to reach for after an ordinary update. The wizard
+# and the restore scripts live on the rescue partition as plain files outside
+# the squashfs, so swapping them takes seconds; only a kernel or launcher
+# change needs the full ISO unpack-and-repack.
 set -euo pipefail
 
 OMARCHY_TM_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -11,24 +18,46 @@ source "$OMARCHY_TM_ROOT/lib/common.sh"
 source "$OMARCHY_TM_ROOT/lib/install-rescue.sh"
 
 BOOT_ONLY=0
+SCRIPTS_ONLY=0
 ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --boot-only) BOOT_ONLY=1; shift ;;
+    --scripts-only) SCRIPTS_ONLY=1; shift ;;
     --dry-run) export OMARCHY_TM_DRY_RUN=1; shift ;;
     -h|--help)
-      echo "Usage: oma-backups refresh-rescue [--boot-only]"
+      echo "Usage: oma-backups refresh-rescue [--boot-only | --scripts-only]"
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
   esac
 done
+[[ $BOOT_ONLY == 1 && $SCRIPTS_ONLY == 1 ]] && die "--boot-only and --scripts-only do different jobs; pick one"
 
 require_root "${ORIG_ARGS[@]}"
 
-EFI_DEV="$(lsblk -n -p -o PATH,LABEL |
-  awk "$(oma_label_match '$2' "${OMA_LABELS_EFI[@]}"){print \$1; exit}")"
-[[ -n $EFI_DEV ]] || die "The backup USB's boot partition wasn't found — plug the backup USB in"
+# Either kind of rescue USB: the backup USB's own rescue partitions, or a
+# network rescue stick. They run the same wizard and the same restore script,
+# so they go stale the same way after an update.
+EFI_DEV=""
+LIVE_LABELS=()
+STICK_KIND=""
+for _kind in direct net; do
+  if [[ $_kind == direct ]]; then
+    _efi=("${OMA_LABELS_EFI[@]}"); _live=("${OMA_LABELS_LIVE[@]}")
+  else
+    _efi=("${OMA_LABELS_NET_EFI[@]}"); _live=("${OMA_LABELS_NET_LIVE[@]}")
+  fi
+  EFI_DEV="$(lsblk -n -p -o PATH,LABEL |
+    awk "$(oma_label_match '$2' "${_efi[@]}"){print \$1; exit}")"
+  if [[ -n $EFI_DEV ]]; then
+    STICK_KIND=$_kind
+    LIVE_LABELS=("${_live[@]}")
+    break
+  fi
+done
+[[ -n $EFI_DEV ]] ||
+  die "No rescue USB found — plug in the backup USB, or the network rescue stick"
 
 PK="$(lsblk -n -o PKNAME "$EFI_DEV" 2>/dev/null | head -1)"
 [[ -n $PK ]] ||
@@ -41,9 +70,10 @@ DISK="/dev/$PK"
 # then went onto whichever disk owned the boot one, leaving two half-updated
 # rescue USBs and no error.
 LIVE_DEV="$(lsblk -n -p -o PATH,LABEL "$DISK" |
-  awk "$(oma_label_match '$2' "${OMA_LABELS_LIVE[@]}"){print \$1; exit}")"
+  awk "$(oma_label_match '$2' "${LIVE_LABELS[@]}"){print \$1; exit}")"
 [[ -n $LIVE_DEV ]] ||
-  die "$DISK has a boot partition but no rescue partition. Is this really the backup USB?"
+  die "$DISK has a boot partition but no rescue partition. Is this really a rescue USB?"
+log "refreshing the $STICK_KIND rescue USB on $DISK"
 
 LIVE_MNT=/run/oma-backups-live
 EFI_MNT=/run/omarchy-backups-efi
@@ -66,7 +96,13 @@ if ! findmnt -n "$EFI_MNT" >/dev/null 2>&1; then
   fi
 fi
 
-if [[ $BOOT_ONLY == 1 ]]; then
+if [[ $SCRIPTS_ONLY == 1 ]]; then
+  # Just the plain files on the rescue partition: the wizard, the restore
+  # script and their libraries. Nothing is unpacked or repacked, and the
+  # bootloader is left exactly as it is.
+  log "refresh rescue scripts only"
+  install_rescue_files "$LIVE_MNT" "$EFI_MNT"
+elif [[ $BOOT_ONLY == 1 ]]; then
   log "refresh rescue EFI from Arch ISO on LIVE"
   if [[ ! -d $LIVE_MNT/arch ]]; then
     log "LIVE has no Arch ISO yet — doing a full rescue refresh"

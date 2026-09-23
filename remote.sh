@@ -96,6 +96,7 @@ cmd_pair() {
   remote_load
   local st
   st="$(rgate status 2>&1)" || fail "Couldn't reach the Pi as $OMA_REMOTE_ACCOUNT@$host: $st"
+  note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
   # Remember where the Pi lives on the local network, so backups at home can
   # go straight there instead of round through Tailscale.
   remote_refresh_addresses || true
@@ -127,6 +128,7 @@ cmd_status() {
   remote_load
   local st
   if st="$(rgate status 2>/dev/null)"; then
+    note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
     jq -c --arg host "$REMOTE_HOST" --arg addr "$REMOTE_ADDR" \
       '{paired: true, host: $host, address: $addr, reachable: true} + .' <<<"$st"
   else
@@ -146,7 +148,7 @@ cmd_forget() {
   echo
   gum style --bold "Unpaired from $REMOTE_HOST."
   gum style --foreground 8 "  To clean up the Pi too, run this on it:"
-  echo "  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --uninstall"
+  echo "  $(pi_update_cmd --uninstall)"
   press_enter
 }
 

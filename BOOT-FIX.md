@@ -51,5 +51,12 @@ A restore is not finished until:
 strings $ESP/EFI/Linux/omarchy_linux.efi | grep cryptdevice
 ```
 
-shows the **new** disk’s PARTUUID.
+shows the **new** disk’s PARTUUID. That check runs after `limine-install`,
+and it is the last write to the UKI and `limine.conf`. The restore also
+stops if `EFI/BOOT/BOOTX64.EFI` is missing.
+
+The patched UKI is unsigned. Secure Boot will refuse it until Secure Boot
+is off, or the file is signed again. TPM auto-unlock is not restored.
+A computer that only does BIOS will not boot this disk: the stick and the
+restored disk are UEFI, `EFI/BOOT/BOOTX64.EFI`.
 

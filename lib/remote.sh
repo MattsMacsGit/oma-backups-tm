@@ -75,7 +75,7 @@ remote_pick_addr() {
   local now cached_at cached a
   now=$(date +%s)
   if [[ -r $OMA_REMOTE_PICK ]]; then
-    read -r cached_at cached <"$OMA_REMOTE_PICK" 2>/dev/null || true
+    read -r cached_at cached 2>/dev/null <"$OMA_REMOTE_PICK" || true
     if [[ -n ${cached:-} && ${cached_at:-0} =~ ^[0-9]+$ ]] &&
       ((now - cached_at < OMA_REMOTE_PICK_TTL)); then
       printf '%s' "$cached"
@@ -103,6 +103,46 @@ remote_refresh_addresses() {
   tmp="$OMA_REMOTE_CONF.tmp"
   jq --argjson lan "$addrs" '.lan = $lan' "$OMA_REMOTE_CONF" >"$tmp" 2>/dev/null || return 0
   chmod 644 "$tmp" && mv "$tmp" "$OMA_REMOTE_CONF"
+}
+
+# What this laptop's copy of the gatekeeper speaks. Older Pis still work,
+# but they lock the disk when the first session finishes, not the last.
+OMA_GATE_WANT=9
+
+# The one-liner that updates (or with --uninstall, removes) the Pi's side.
+# OMA_REPO_RAW is where this copy came from, so someone testing another
+# branch points it there and gets that branch's gatekeeper.
+pi_update_cmd() {
+  printf 'curl -fsSL %s/pi/pi-setup.sh | sudo bash -s -- %s' "$OMA_REPO_RAW" "${1:---update}"
+}
+
+# Remember the version where the panel and doctor can read it. The SSH key
+# is root-only, so a user-level poll cannot ask the Pi itself. --quiet
+# records it without printing: the hourly check would say it every hour.
+note_pi_gate() {
+  local quiet=0
+  if [[ ${1:-} == --quiet ]]; then quiet=1; shift; fi
+  local v=${1:-0} f="$OMARCHY_TM_STATE/pi-gate.json" behind=false
+  [[ $v =~ ^[0-9]+$ ]] || v=0
+  # 0 means we never heard a version (Pi off, SSH down). That is not
+  # "the Pi is old", and saying so every hour would be a false alarm.
+  ((v > 0)) || return 0
+  if ((v < OMA_GATE_WANT)); then
+    behind=true
+  fi
+  # A note about the Pi must never stop the backup. mkdir/jq can fail, and
+  # this function used to abort the whole run: `behind` is the word true or
+  # false, and `((behind))` with `set -u` looks that word up as a variable.
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
+  jq -n --argjson v "$v" --argjson want "$OMA_GATE_WANT" --argjson behind "$behind" \
+    --arg update "$(pi_update_cmd)" \
+    '{version: $v, want: $want, behind: $behind, update: $update}' >"$f.tmp" \
+    && chmod 644 "$f.tmp" && mv "$f.tmp" "$f" || return 0
+  [[ $behind == true && $quiet == 0 ]] || return 0
+  warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}. One session can still lock the disk out from under another." || true
+  gum style --foreground 8 "  Update it by running this on the Pi (keeps the pairing):" || true
+  gum style --foreground 8 "  $(pi_update_cmd)" || true
+  return 0
 }
 
 # Run one gatekeeper verb on the Pi, e.g. `rgate snapshot home/current home/TS`.

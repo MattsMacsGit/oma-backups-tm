@@ -24,6 +24,8 @@ Every day
   snapshots [--json]      the restore points on the backup disk
   open TIMESTAMP          open one restore point read-only in Files
   browse TIMESTAMP        the same, held open until stopped (the plugin uses this)
+  put-back-system         after a quick restore, put back the AI models it left
+                          on the backup (the plugin's Restore my files runs it)
   prune [--dry-run]       thin out old restore points now
   schedule enable | disable | status | run
                           automatic backups
@@ -48,8 +50,9 @@ Restoring
       [--level full|settings] [--from-pi] [--yes] [--allow-internal]
                           put a restore point onto a blank disk
   restore-tui             the restore wizard the rescue USB boots into
-  refresh-rescue [--boot-only]
-                          update the rescue system on the backup disk
+  refresh-rescue [--scripts-only | --boot-only]
+                          update a rescue USB (--scripts-only: just the
+                          wizard and scripts, in seconds, after an update)
   files TIMESTAMP [PATH]  list what is inside a restore point
   copy TIMESTAMP SRC DEST copy one thing out of a restore point
 
@@ -166,6 +169,7 @@ case "$cmd" in
   remote) exec "$OMARCHY_TM_ROOT/remote.sh" "$@" ;;
   link) exec "$OMARCHY_TM_ROOT/link.sh" "$@" ;;
   browse) exec "$OMARCHY_TM_ROOT/backup.sh" --browse "$@" ;;
+  put-back-system) exec "$OMARCHY_TM_ROOT/backup.sh" --put-back-system "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
   schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)

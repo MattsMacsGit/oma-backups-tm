@@ -33,7 +33,7 @@ HOST_ALIAS=oma-pi
 # Track the current stable gatekeeper rather than the oldest that would work:
 # one number for the README and the code to agree on. `pi-setup.sh --update`
 # brings an older Pi up to it without disturbing the pairing.
-MIN_GATE=7
+MIN_GATE=9
 
 usage() {
   cat <<'EOF'
@@ -131,9 +131,10 @@ need=$((iso_bytes * 11 / 10 + 600 * 1024 * 1024))
 step "Checking the Pi"
 st="$(rgate status 2>&1)" || fail "Can't reach $REMOTE_HOST. Is it switched on and on the network (or Tailscale)?"
 gate_ver="$(rgate version 2>/dev/null || echo 0)"
-((gate_ver >= MIN_GATE)) || fail "The Pi's OmaBackups is too old for rescue sticks. Update it by running this on the Pi:
+note_pi_gate "$gate_ver"
+((gate_ver >= MIN_GATE)) || fail "The Pi's gatekeeper is v${gate_ver}. A rescue stick needs v${MIN_GATE}. Update it by running this on the Pi:
 
-  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+  $(pi_update_cmd)"
 
 # The password is checked against the backup disk wherever it is right now.
 local_part="$(capsule_luks_partition 2>/dev/null || true)"

@@ -1,7 +1,12 @@
 # Paths relative to @ (root). rsync --exclude-from.
 # User skip-paths.txt is merged on top of these on every backup.
-tmp
-var/tmp
-swap
-swapfile
-lost+found
+# The leading / anchors each one to the top of the system. Without it rsync
+# skips any folder of that name anywhere, e.g. the /tmp inside every Docker
+# or Podman image, which then comes back from a restore without one.
+/tmp
+/var/tmp
+/swap
+/swapfile
+/lost+found
+# Crash dumps: large, and no use on another machine or after a restore.
+/var/lib/systemd/coredump

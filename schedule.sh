@@ -117,7 +117,7 @@ cmd_run() {
   # flight means wait for the next tick, never elbow in alongside it.
   local pidf other
   pidf="$(pid_file)"
-  other="$(tr -d '[:space:]' <"$pidf" 2>/dev/null || true)"
+  other="$(tr -d '[:space:]' 2>/dev/null <"$pidf" || true)"
   # backup_pid_alive, not pid_alive: a recycled process number used to look
   # like a backup that never ended, and automatic backups then stopped
   # happening at all until the next reboot.
@@ -139,9 +139,10 @@ cmd_run() {
   # forcing is a manual act by design, so it never reaches this path.
   if [[ -s $OMARCHY_TM_STATE/partial-restore.json ]]; then
     log_file "scheduled backup skipped: this system was restored without its files"
-    notify_user "Automatic backups are paused" \
-      "This system was restored without your files. Open OmaBackups and press \"Restore my files\"." \
-      partial-restore
+    local what="This system was restored without your files. Open OmaBackups and press \"Restore my files\"."
+    [[ $(jq -r '.files_done // false' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null) == true ]] &&
+      what="Your AI models are still on the backup. Open OmaBackups and press \"Put AI models back\"."
+    notify_user "Automatic backups are paused" "$what" partial-restore
     exit 0
   fi
 
@@ -154,7 +155,10 @@ cmd_run() {
     :
   elif remote_configured; then
     remote_load
-    if [[ $(rgate status 2>/dev/null | jq -r .present 2>/dev/null) != true ]]; then
+    local st
+    st="$(rgate status 2>/dev/null || true)"
+    note_pi_gate --quiet "$(jq -r '.version // 0' <<<"$st" 2>/dev/null || echo 0)"
+    if [[ $(jq -r '.present // false' <<<"$st" 2>/dev/null) != true ]]; then
       why="The backup disk on $REMOTE_HOST couldn't be reached."
     fi
   else

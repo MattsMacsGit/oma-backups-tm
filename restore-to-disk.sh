@@ -15,8 +15,9 @@ Usage: oma-backups restore-to-disk /dev/TARGET --snapshot TIMESTAMP [--level ful
 the mounted backup disk. The network rescue stick uses this.
 
 --level settings: the system plus each home's hidden settings (.config,
-.local, ...); visible folders come back empty and files over 100 MB are
-skipped. Bring the rest back later with "Restore my files".
+.local, ...). Visible folders come back empty. Caches, Flatpak, containers,
+Steam, and model folders are left for "Restore my files", and so are AI
+models kept in the system area (Ollama's).
 
 Restores a VALID (os+home+esp) point onto a blank disk so it boots Omarchy:
   GPT → 2G ESP + LUKS2 → btrfs (@, @home, empty @log/@pkg)
@@ -302,17 +303,114 @@ run btrfs subvolume create "$NEW_ROOT/@pkg"
 # normal install.
 chmod 755 "$NEW_ROOT/@log" "$NEW_ROOT/@pkg"
 
+# AI models a system service keeps outside anyone's home: gigabytes that would
+# make a quick restore slow. A quick restore leaves them on the backup, and
+# "Restore my files" puts them back (oma-backups put-back-system). Ollama's
+# Arch package keeps them in /var/lib/ollama, its own installer in
+# /usr/share/ollama/.ollama/models, and OLLAMA_MODELS in the service moves
+# them. Only the models go (blobs + manifests), so the folder, its owner and
+# Ollama's own keys come back as they were.
+SYSTEM_MODELS=()
+find_system_models() {
+  local probe m d sub rel part f parts=() dirs=(var/lib/ollama usr/share/ollama/.ollama/models)
+  probe="$(mktemp -d)"
+  # Two small reads that copy names, not contents, so they work the same from
+  # a plugged-in disk or a Pi. First the service files, for OLLAMA_MODELS.
+  rsync "${RSYNC_RSH[@]}" -a --include=/etc/ --include=/etc/systemd/ --include=/etc/systemd/system/ \
+    --include=/etc/systemd/system/ollama.service --include=/etc/systemd/system/ollama.service.d/ \
+    --include='/etc/systemd/system/ollama.service.d/*.conf' --include=/usr/ --include=/usr/lib/ \
+    --include=/usr/lib/systemd/ --include=/usr/lib/systemd/system/ \
+    --include=/usr/lib/systemd/system/ollama.service --exclude='*' \
+    "$(src "os/$SNAPSHOT")"/ "$probe/" 2>>"$OMARCHY_TM_LOG" || true
+  # Later files override earlier ones, as systemd reads them.
+  m=""
+  for f in "$probe/usr/lib/systemd/system/ollama.service" "$probe/etc/systemd/system/ollama.service" \
+    "$probe"/etc/systemd/system/ollama.service.d/*.conf; do
+    [[ -f $f ]] || continue
+    # A service file with no OLLAMA_MODELS is normal (a drop-in that only sets
+    # other things), so grep finding nothing must not end the restore.
+    d="$(grep -oE 'OLLAMA_MODELS=[^"[:space:]]+' "$f" | tail -n 1 | cut -d= -f2- || true)"
+    [[ -n $d ]] && m=$d
+  done
+  m=${m#/}
+  m=${m%/}
+  # A models folder in someone's home comes back with the home folder.
+  if [[ -n $m && $m =~ ^[A-Za-z0-9._/-]+$ && $m != *..* && $m != home/* && $m != root/* ]]; then
+    [[ " ${dirs[*]} " == *" $m "* ]] || dirs+=("$m")
+  fi
+  # Then which of those folders exist, without what's in them.
+  rm -rf "${probe:?}"/*
+  local filt=()
+  for d in "${dirs[@]}"; do
+    for sub in blobs manifests; do
+      rel=""
+      IFS=/ read -ra parts <<<"$d/$sub"
+      for part in "${parts[@]}"; do
+        rel+="/$part"
+        filt+=(--include="$rel/")
+      done
+    done
+  done
+  rsync "${RSYNC_RSH[@]}" -a "${filt[@]}" --exclude='*' \
+    "$(src "os/$SNAPSHOT")"/ "$probe/" 2>>"$OMARCHY_TM_LOG" || true
+  for d in "${dirs[@]}"; do
+    [[ -d $probe/$d/blobs ]] || continue
+    for sub in blobs manifests; do
+      [[ -d $probe/$d/$sub ]] && SYSTEM_MODELS+=("$d/$sub")
+    done
+  done
+  rm -rf "$probe"
+}
+os_skip=()
+if [[ $LEVEL == settings ]]; then
+  find_system_models
+  for rel in "${SYSTEM_MODELS[@]}"; do
+    os_skip+=(--exclude="/$rel")
+  done
+  ((${#SYSTEM_MODELS[@]} == 0)) || log "leaving AI models on the backup for later: ${SYSTEM_MODELS[*]}"
+fi
+
 log "rsync OS snapshot"
 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
-  --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp \
+  --exclude=/swap --exclude=/swapfile --exclude=/tmp --exclude=/var/tmp "${os_skip[@]}" \
   "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
 log "rsync home snapshot ($LEVEL)"
+# What a quick restore leaves in each home for "Restore my files" to bring
+# back later. This used to be --max-size=100M, which read as a sensible
+# "skip the big stuff" rule and quietly gutted every tool installed under a
+# hidden folder: a 234 MB `claude` binary left behind as its 115-byte shim,
+# node, codex, the lot. A restored system came up with its programs broken
+# for no gain. Named categories instead, the way Pika Backup does it — each
+# one is something that can be downloaded or made again, whatever it weighs,
+# and everything else comes back however big it is.
+HOME_LATER=(
+  # Caches
+  '.cache' '.thumbnails' '.var/app/*/cache'
+  # Already thrown away
+  '.local/share/Trash' '.Trash' 'lost+found'
+  # Flatpak apps themselves (their documents and settings are not in here)
+  '.local/share/flatpak'
+  # Virtual machines and containers
+  '.local/share/containers' '.local/share/docker' '.local/share/libvirt'
+  '.local/share/gnome-boxes' '.local/share/bottles'
+  '.var/app/org.gnome.Boxes' '.var/app/org.gnome.BoxesDevel'
+  '.var/app/com.usebottles.bottles'
+  # AI models
+  '.lmstudio/models' '.ollama/models' '.local/share/nomic.ai' '.local/share/Jan'
+  # Game libraries
+  '.steam' '.local/share/Steam'
+)
 home_filter=()
 if [[ $LEVEL == settings ]]; then
-  # Hidden files and folders at the top of each home (.config, .local, ...)
-  # come back; visible folders (Documents, Pictures, ...) come back empty;
-  # anything over 100 MB is left for "Restore my files" (games, AI models).
-  home_filter=(--max-size=100M --include='/*/' --include='/*/.*' --include='/*/.*/**'
+  # Excludes first: rsync takes the first rule that matches, so they have to
+  # come before the includes below or they never get a say.
+  for rel in "${HOME_LATER[@]}"; do
+    home_filter+=(--exclude="/*/$rel")
+  done
+  # Then: hidden files and folders at the top of each home (.config, .local,
+  # ...) come back, and visible ones (Documents, Pictures, ...) come back
+  # empty, ready for "Restore my files".
+  home_filter+=(--include='/*/' --include='/*/.*' --include='/*/.*/**'
     --include='/*/*/' --exclude='/*/**')
 fi
 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
@@ -326,8 +424,11 @@ if [[ $LEVEL == settings ]]; then
     [[ -d $h ]] || continue
     d="$h.local/state/omarchy-backups"
     mkdir -p "$d"
-    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" \
-      '{snapshot: $s, level: "settings", restored_at: $at}' >"$d/partial-restore.json"
+    # skipped_system: what put-back-system brings back. Recorded here rather
+    # than worked out again later, when the settings may have changed.
+    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" --args \
+      '{snapshot: $s, level: "settings", restored_at: $at, skipped_system: $ARGS.positional}' \
+      "${SYSTEM_MODELS[@]}" >"$d/partial-restore.json"
     chown --reference="$h" "$h.local" "$h.local/state" "$d" "$d/partial-restore.json" 2>/dev/null || true
   done
 fi
@@ -349,68 +450,114 @@ fi
 NEW_BTRFS_UUID="$(blkid -s UUID -o value "/dev/mapper/$MAPPER")"
 NEW_ESP_UUID="$(blkid -s UUID -o value "$P1")"
 NEW_PARTUUID="$(blkid -s PARTUUID -o value "$P2")"
-[[ -n $NEW_BTRFS_UUID && -n $NEW_ESP_UUID && -n $NEW_PARTUUID ]] || die "missing new UUIDs"
+NEW_LUKS_UUID="$(blkid -s UUID -o value "$P2")"
+[[ -n $NEW_BTRFS_UUID && -n $NEW_ESP_UUID && -n $NEW_PARTUUID && -n $NEW_LUKS_UUID ]] || die "missing new UUIDs"
 
 FSTAB="$NEW_ROOT/@/etc/fstab"
-if [[ -f $FSTAB ]]; then
-  "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
+[[ -f $FSTAB ]] || die "restored system has no /etc/fstab. Restore aborted."
+if ! "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'
 import re, sys
 path, btrfs_uuid, esp_uuid = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
-# Replace btrfs UUID= lines (root/home/log/pkg)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/home\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/var/log\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9a-fA-F-]+(\s+/var/cache/pacman/pkg\s+btrfs)",
-    f"UUID={btrfs_uuid}\\1",
-    text,
-    flags=re.M,
-)
-text = re.sub(
-    r"^UUID=[0-9A-F-]+(\s+/boot\s+vfat)",
-    f"UUID={esp_uuid}\\1",
-    text,
-    flags=re.M,
-)
-# Comment hibernation swapfile — offset is wrong on a new disk
+# mount -> (fstype, new uuid). / and /boot must be here. The others are
+# rewritten when the restored system has that line, and left alone when it
+# does not.
+wanted = {
+    "/": ("btrfs", btrfs_uuid),
+    "/home": ("btrfs", btrfs_uuid),
+    "/var/log": ("btrfs", btrfs_uuid),
+    "/var/cache/pacman/pkg": ("btrfs", btrfs_uuid),
+    "/boot": ("vfat", esp_uuid),
+}
+boot_types = {"vfat", "fat", "msdos"}
+required = {"/", "/boot"}
+seen = set()
+problems = []
 lines = []
 for line in text.splitlines(True):
-    if "swapfile" in line and not line.lstrip().startswith("#"):
+    stripped = line.lstrip()
+    if not stripped or stripped.startswith("#"):
+        lines.append(line)
+        continue
+    parts = line.split()
+    if len(parts) >= 3 and parts[1] in wanted:
+        mount, (fstype, uuid) = parts[1], wanted[parts[1]]
+        ok_type = parts[2] == fstype or (mount == "/boot" and parts[2] in boot_types)
+        if parts[0].startswith("UUID=") and ok_type:
+            lines.append(re.sub(r"^(\s*)UUID=\S+", rf"\1UUID={uuid}", line, count=1))
+            seen.add(mount)
+            continue
+        problems.append(mount + " (" + parts[0] + " " + parts[2] + ")")
+    if "swapfile" in line:
         lines.append("# restored: swapfile omitted\n# " + line)
     else:
         lines.append(line)
+missing = sorted(required - seen)
+if missing or problems:
+    if missing:
+        print("fstab has no UUID= line for: " + ", ".join(missing), file=sys.stderr)
+    if problems:
+        print("fstab line not rewritten: " + ", ".join(problems), file=sys.stderr)
+    sys.exit(1)
 open(path, "w", encoding="utf-8").writelines(lines)
 PY
+then
+  die "fstab still names the old disk (or has no UUID for / or /boot). Restore aborted."
 fi
+
+# The root line only. Another disk named in crypttab is not this restore.
+rewrite_crypttab() {
+  local file=$1
+  [[ -f $file ]] || return 0
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_LUKS_UUID" "$NEW_PARTUUID" <<'PY' || die "crypttab root entry still names the old disk. Restore aborted."
+import re, sys
+path, luks, partuuid = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path, encoding="utf-8", errors="replace").read()
+HEX = r"[0-9a-fA-F-]+"
+# PARTUUID first, and UUID= must not match the tail of PARTUUID=: the
+# partition's id and the LUKS header's id are different numbers.
+forms = [
+    (rf"\bPARTUUID={HEX}", f"PARTUUID={partuuid}"),
+    (rf"/dev/disk/by-partuuid/{HEX}", f"/dev/disk/by-partuuid/{partuuid}"),
+    (rf"(?<![A-Za-z])UUID={HEX}", f"UUID={luks}"),
+    (rf"/dev/disk/by-uuid/{HEX}", f"/dev/disk/by-uuid/{luks}"),
+]
+out = []
+for line in text.splitlines(True):
+    raw = line.strip()
+    if not raw or raw.startswith("#") or raw.split()[0] != "root":
+        out.append(line)
+        continue
+    for pat, rep in forms:
+        new, n = re.subn(pat, rep, line, count=1)
+        if n:
+            break
+    else:
+        print("crypttab root entry has no UUID to point at this disk", file=sys.stderr)
+        sys.exit(1)
+    out.append(new)
+open(path, "w", encoding="utf-8").writelines(out)
+PY
+}
+
+rewrite_crypttab "$NEW_ROOT/@/etc/crypttab"
+rewrite_crypttab "$NEW_ROOT/@/etc/crypttab.initramfs"
 
 rewrite_cryptdevice() {
   local file=$1
   [[ -f $file ]] || return 0
-  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_PARTUUID" <<'PY'
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_PARTUUID" "$NEW_LUKS_UUID" <<'PY'
 import re, sys
-path, partuuid = sys.argv[1], sys.argv[2]
+path, partuuid, luks = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
 text = re.sub(
     r"cryptdevice=PARTUUID=[0-9a-fA-F-]+",
     f"cryptdevice=PARTUUID={partuuid}",
     text,
 )
+text = re.sub(r"rd\.luks\.uuid=[0-9a-fA-F-]+", f"rd.luks.uuid={luks}", text)
+# Leaves the "=root" mapper name sitting after the UUID.
+text = re.sub(r"rd\.luks\.name=[0-9a-fA-F-]+", f"rd.luks.name={luks}", text)
 # Hibernation offset is invalid on a new disk. Empty resume= hangs the initramfs.
 text = re.sub(r"\s*resume_offset=\S+", "", text)
 text = re.sub(r"\s*resume=\S*", "", text)
@@ -446,6 +593,37 @@ else
   log "WARNING: limine-mkinitcpio failed — will patch UKI/limine.conf in place"
 fi
 
+# limine-install takes no disk path. A path makes it print usage and exit 0,
+# having changed nothing. Run on the machine you booted, it installs onto
+# that machine's own boot partition — the rescue stick — so it only runs
+# inside the new system, where /boot is this disk. It can rewrite boot
+# files (and its own hooks can rebuild the UKI), so the check below is
+# the last thing that writes the UKI and limine.conf.
+log "installing Limine onto the new disk"
+if arch-chroot "$NEW_ROOT" limine-install; then
+  log "limine-install finished"
+else
+  log "limine-install did not finish — the fallback boot file still has to be in place"
+fi
+
+mkdir -p "$NEW_ESP/EFI/BOOT" "$NEW_ESP/EFI/limine"
+if [[ ! -f $NEW_ESP/EFI/BOOT/BOOTX64.EFI ]]; then
+  for efi_src in \
+    "$NEW_ROOT/usr/share/limine/BOOTX64.EFI" \
+    /usr/share/limine/BOOTX64.EFI \
+    "$NEW_ROOT/usr/share/limine/limine-uefi.efi" \
+    /usr/share/limine/limine-uefi.efi
+  do
+    if [[ -f $efi_src ]]; then
+      cp "$efi_src" "$NEW_ESP/EFI/BOOT/BOOTX64.EFI"
+      cp "$efi_src" "$NEW_ESP/EFI/limine/limine-uefi.efi" 2>/dev/null || true
+      break
+    fi
+  done
+fi
+[[ -f $NEW_ESP/EFI/BOOT/BOOTX64.EFI ]] ||
+  die "restored disk has no EFI/BOOT/BOOTX64.EFI, so a normal UEFI PC would not boot it. Restore aborted."
+
 # Boot reads the UKI .cmdline and ESP limine.conf, not /etc/default/limine.
 # Official Arch ISO rescue has no binutils; objcopy comes from this chroot.
 # Run unconditionally. As well as pointing the boot entry at this disk's
@@ -455,30 +633,31 @@ fi
 # when the UKI actually needs it.
 log "checking the boot entry points at PARTUUID $NEW_PARTUUID"
 "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --chroot "$NEW_ROOT" \
+  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --luks-uuid "$NEW_LUKS_UUID" --chroot "$NEW_ROOT" \
   || die "could not patch UKI cmdline"
 if ! "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
-  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --verify-only; then
+  --esp "$NEW_ESP" --partuuid "$NEW_PARTUUID" --luks-uuid "$NEW_LUKS_UUID" --verify-only; then
   die "restored disk would not unlock LUKS (UKI cmdline PARTUUID != $NEW_PARTUUID). Restore aborted."
 fi
 log "boot cmdline verified PARTUUID=$NEW_PARTUUID"
 
-if command -v limine-install >/dev/null; then
-  limine-install "$TARGET" || true
-fi
-arch-chroot "$NEW_ROOT" bash -lc "limine-install $TARGET || limine bios-install $TARGET || true" || true
-mkdir -p "$NEW_ESP/EFI/BOOT" "$NEW_ESP/EFI/limine"
-for efi_src in \
-  /usr/share/limine/BOOTX64.EFI \
-  "$NEW_ROOT/usr/share/limine/BOOTX64.EFI" \
-  /usr/share/limine/limine-uefi.efi
-do
-  if [[ -f $efi_src ]]; then
-    cp "$efi_src" "$NEW_ESP/EFI/BOOT/BOOTX64.EFI"
-    cp "$efi_src" "$NEW_ESP/EFI/limine/limine-uefi.efi" 2>/dev/null || true
-    break
+# The entry lives in this computer's firmware, not on the disk. Another PC
+# uses EFI/BOOT/BOOTX64.EFI. Failure here does not undo a checked UKI.
+# limine-install above normally registers "Limine" for this partition
+# already; any entry for it will do, so each restore doesn't leave the
+# firmware one more entry to carry.
+if [[ -d /sys/firmware/efi ]] && command -v efibootmgr >/dev/null; then
+  esp_partuuid="$(blkid -s PARTUUID -o value "$P1" 2>/dev/null || true)"
+  if [[ -n $esp_partuuid ]] && efibootmgr | grep -Fqi "$esp_partuuid"; then
+    log "firmware already has a boot entry for this disk"
+  elif efibootmgr --create --disk "$TARGET" --part 1 --label "Omarchy" --loader '\EFI\BOOT\BOOTX64.EFI' >/dev/null; then
+    log "firmware boot entry created for EFI/BOOT/BOOTX64.EFI"
+  else
+    log "Firmware boot entry was not created. In the firmware menu, boot EFI/BOOT/BOOTX64.EFI on this disk."
   fi
-done
+else
+  log "This computer offered no firmware boot list. In the firmware menu, boot EFI/BOOT/BOOTX64.EFI on this disk."
+fi
 
 sync
 umount "$NEW_ROOT/boot" || true
@@ -492,3 +671,9 @@ cryptsetup close "$MAPPER" || true
 log "restore complete."
 log "Reboot, pick this disk in firmware, unlock LUKS with the password you just set."
 log "TPM auto-unlock is not restored — enroll it again after login if you use it."
+log "Secure Boot will refuse the patched boot file until Secure Boot is off, or the boot file is signed again."
+log "A computer that only does BIOS will not boot this disk. It needs UEFI."
+log "If the firmware menu does not list this disk, boot the file EFI/BOOT/BOOTX64.EFI on it."
+if ((${#SYSTEM_MODELS[@]})); then
+  log "Your AI models (Ollama) were left on the backup to keep this quick. \"Restore my files\" puts them back."
+fi

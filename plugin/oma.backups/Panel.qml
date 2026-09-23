@@ -16,6 +16,14 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
+  // The theme's own accent rather than a colour of our own, so this follows
+  // whatever Omarchy is wearing. Not `urgent` — nothing is wrong with a kept
+  // restore point. On a theme where accent sits close to the ordinary text
+  // the row still reads as different: it is the only one carrying buttons.
+  readonly property color kept: Color.accent
+  // Which restore point has been asked about: letting one go is not something
+  // a stray click should do.
+  property string releaseAsk: ""
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
@@ -34,21 +42,62 @@ Panel {
   property bool ctrlHeld: false
   property bool forceAsked: false
   property bool forceConfirmed: false
+  // Named categories rather than a size rule, and close to the set Pika
+  // Backup offers, so anyone who has met one of these tools recognises them.
+  // Each is something that can be downloaded or made again. `paths` are skip
+  // list entries (relative to /home); `restorePaths` say the same thing
+  // relative to one home folder inside a restore point, which is what
+  // "Restore my files" copies from.
   readonly property var quickSkips: [
-    { label: "Downloads", paths: [svc.home + "/Downloads"], note: "" },
-    { label: "Trash", paths: ["**/.local/share/Trash", ".Trash"], note: "Recommended" },
-    { label: "Caches", paths: [".cache"], note: "Recommended" },
-    { label: "Thumbnails & system clutter", paths: [".thumbnails", "lost+found"], note: "Recommended" }
+    { label: "Downloads", note: "",
+      paths: [svc.home + "/Downloads"],
+      restorePaths: ["/Downloads"] },
+    { label: "Caches", note: "Made again whenever they're needed",
+      paths: [".cache", ".thumbnails", svc.home + "/.var/app/*/cache"],
+      restorePaths: ["/.cache", "/.thumbnails", "/.var/app/*/cache"] },
+    { label: "Trash", note: "Files you have already thrown away",
+      paths: ["**/.local/share/Trash", ".Trash", "lost+found"],
+      restorePaths: ["/.local/share/Trash", "/.Trash", "lost+found"] },
+    { label: "Flatpak apps", note: "The apps themselves — their documents and settings still come back",
+      paths: [svc.home + "/.local/share/flatpak"],
+      restorePaths: ["/.local/share/flatpak"] },
+    { label: "Virtual machines and containers", note: "May hold things kept inside them",
+      paths: [svc.home + "/.local/share/containers", svc.home + "/.local/share/docker",
+        svc.home + "/.local/share/libvirt", svc.home + "/.local/share/gnome-boxes",
+        svc.home + "/.local/share/bottles", svc.home + "/.var/app/org.gnome.Boxes",
+        svc.home + "/.var/app/com.usebottles.bottles"],
+      restorePaths: ["/.local/share/containers", "/.local/share/docker",
+        "/.local/share/libvirt", "/.local/share/gnome-boxes",
+        "/.local/share/bottles", "/.var/app/org.gnome.Boxes",
+        "/.var/app/com.usebottles.bottles"] },
+    { label: "AI models", note: "Large downloads you can fetch again",
+      paths: [svc.home + "/.lmstudio/models", svc.home + "/.ollama/models",
+        svc.home + "/.local/share/nomic.ai", svc.home + "/.local/share/Jan"],
+      restorePaths: ["/.lmstudio/models", "/.ollama/models",
+        "/.local/share/nomic.ai", "/.local/share/Jan"] },
+    { label: "Game libraries", note: "Games you can install again",
+      paths: [svc.home + "/.steam", svc.home + "/.local/share/Steam"],
+      restorePaths: ["/.steam", "/.local/share/Steam"] }
   ]
 
-  function quickSkipOn(paths) {
-    for (var i = 0; i < paths.length; i++) if (!svc.hasSkip(paths[i])) return false
+  // In restore mode the same switches drive the restore skip list instead.
+  function quickSkipPaths(entry) {
+    return root.blockedByRestore ? entry.restorePaths : entry.paths
+  }
+
+  function quickSkipOn(entry) {
+    var paths = root.quickSkipPaths(entry)
+    for (var i = 0; i < paths.length; i++) {
+      if (root.blockedByRestore ? !svc.hasRestoreSkip(paths[i]) : !svc.hasSkip(paths[i])) return false
+    }
     return true
   }
 
   function isQuickSkip(path) {
-    for (var i = 0; i < quickSkips.length; i++)
+    for (var i = 0; i < quickSkips.length; i++) {
       if (quickSkips[i].paths.indexOf(path) !== -1) return true
+      if (quickSkips[i].restorePaths.indexOf(path) !== -1) return true
+    }
     return false
   }
 
@@ -73,8 +122,9 @@ Panel {
   }
 
   readonly property int customSkipCount: {
-    var n = 0
-    for (var i = 0; i < svc.skipCount; i++) if (!isQuickSkip(svc.skipModel.get(i).path)) n++
+    var n = 0, m = root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
+    var c = root.blockedByRestore ? svc.restoreSkipCount : svc.skipCount
+    for (var i = 0; i < c; i++) if (!isQuickSkip(m.get(i).path)) n++
     return n
   }
 
@@ -297,6 +347,16 @@ Panel {
             }
 
             Text {
+              visible: svc.piBehind
+              width: parent.width
+              text: svc.piGateText
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
               visible: svc.lastError !== ""
               width: parent.width
               text: svc.lastError
@@ -407,7 +467,11 @@ Panel {
               Button {
                 id: backupBtn
                 width: parent.width
-                text: svc.backupIncomplete ? "Resume backup" : "Backup now"
+                // "Resume" belongs to a backup that was interrupted and can
+                // carry on. The only press available while a restore has this
+                // paused is a Ctrl-held forced one, which starts a fresh
+                // backup of what is here -- nothing is being resumed.
+                text: (svc.backupIncomplete && !root.blockedByRestore) ? "Resume backup" : "Backup now"
                 // Greyed out while this system is missing its files (lit again
                 // for as long as Ctrl is held), and while a restore point is
                 // open for browsing (no override — press Done).
@@ -453,7 +517,8 @@ Panel {
               visible: root.blockedByRestore && !root.forceAsked && !root.blockedByBrowse
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
-              text: "Paused until your files are back. Hold Ctrl to back up anyway."
+              text: (svc.filesDone ? "Paused until your AI models are back." : "Paused until your files are back.")
+                + " Hold Ctrl to back up anyway."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
@@ -467,7 +532,9 @@ Panel {
                 width: parent.width
                 text: "Backing up now keeps only what's on this system. Everything that "
                   + "didn't come back from " + Model.prettyStamp(svc.partialSnapshot)
-                  + " — your documents, photos and other files — is dropped from the "
+                  + (svc.filesDone ? " — your AI models — is dropped from the "
+                    : " — your documents, photos and other files"
+                      + (svc.skippedSystem > 0 ? ", and your AI models" : "") + " — is dropped from the ")
                   + "backup's current copy and won't be in any new restore point. "
                   + "Older restore points still have it."
                 color: root.urgent
@@ -509,7 +576,11 @@ Panel {
               }
             }
             Text {
+              // Automatic backups really are off until the files are back --
+              // the hourly check refuses, and says so in the log. Naming a
+              // time they will happen at is just wrong.
               visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup
+                && !root.blockedByRestore
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: svc.nextBackupText
@@ -528,7 +599,7 @@ Panel {
             }
 
             Rectangle {
-              visible: svc.browseTs !== "" && svc.browseMode === "open"
+              visible: svc.browseTs !== "" && (svc.browseMode === "open" || svc.browseMode === "pick")
               width: parent.width
               height: doneBtn.implicitHeight + Style.space(10)
               radius: Style.cornerRadius
@@ -543,7 +614,9 @@ Panel {
                 anchors.rightMargin: Style.space(8)
                 text: svc.browsePhase === "opening"
                   ? "Opening " + Model.prettyStamp(svc.browseTs) + "…"
-                  : "Browsing " + Model.prettyStamp(svc.browseTs) + "  ·  read-only"
+                  : (svc.browseMode === "pick"
+                    ? "Choosing from " + Model.prettyStamp(svc.browseTs) + "  ·  read-only"
+                    : "Browsing " + Model.prettyStamp(svc.browseTs) + "  ·  read-only")
                 elide: Text.ElideRight
                 color: root.foreground
                 font.family: root.fontFamily
@@ -585,29 +658,59 @@ Panel {
               }
               Text {
                 width: parent.width
-                text: svc.restoringFiles
+                text: svc.systemPhase === "waiting"
+                  ? "Finish in the terminal window: it's putting your AI models back. Your files come next."
+                  : svc.restoringFiles
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
-                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restoreProgress)
+                  : svc.filesDone
+                  ? "Your files are back. Your AI models are still on the backup: they live in the "
+                    + "system area, so putting them back needs your password."
                   : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
-                    + ". Your documents, photos and other files are still on the backup."
+                    + ". Your documents, photos and other files are still on the backup"
+                    + (svc.skippedSystem > 0 ? ", and so are your AI models." : ".")
                     + (svc.linked ? "" : " Link this laptop (button above) to bring them back.")
-                color: svc.restoringFiles ? root.foreground : root.dim
+                color: (svc.restoringFiles || svc.systemPhase === "waiting") ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
               Button {
-                visible: !svc.restoringFiles
+                visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
                 width: parent.width
-                text: "Restore my files"
+                text: svc.filesDone ? "Put AI models back" : "Restore my files"
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
                 enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
                 fontFamily: root.fontFamily
-                tooltipText: "Copies back everything that's missing. Never overwrites a file you've changed since."
-                onClicked: svc.restoreMyFiles()
+                tooltipText: svc.filesDone
+                  ? "Opens a terminal to put your AI models back. Asks for your password."
+                  : "Copies back everything that's missing. Never overwrites a file you've changed since."
+                onClicked: svc.filesDone ? svc.putBackModels() : svc.restoreMyFiles()
+              }
+              Button {
+                visible: !svc.restoringFiles && svc.systemPhase !== "waiting"
+                width: parent.width
+                text: svc.restoreSkipCount > 0
+                  ? "Change what's left out  ·  " + svc.restoreSkipCount
+                  : "Choose what to leave out"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "For anything too big for this disk. Picked from the backup's own copy."
+                onClicked: root.page = "settings"
+              }
+              Button {
+                visible: svc.systemPhase === "waiting"
+                width: parent.width
+                text: "Carry on without the models"
+                bordered: true
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                tooltipText: "Your files come back now. You can put the models back afterwards."
+                onClicked: svc.putBackFinished(null)
               }
               Button {
                 visible: svc.restoringFiles
@@ -636,11 +739,58 @@ Panel {
                   ? "No dated copies yet. After a backup they appear here."
                   : (svc.remoteActive && !svc.linked
                     ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
-                    : "Open a date to browse that copy.")
+                    : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
+                      ? "Smart thinning keeps every backup from the last day, one a day for a month, then one a week."
+                      : "All restore points are kept.")
+                    + (svc.keptCount > 0
+                      ? " The marked ones still hold files a restore never brought back, so they "
+                        + "are never thinned away. Press Restore on one to go and get them, or "
+                        + "tap the row itself to stop keeping it."
+                      : ""))
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
+              }
+              Column {
+                visible: root.releaseAsk !== "" && svc.isKept(root.releaseAsk)
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  width: parent.width
+                  text: {
+                    var l = svc.keptLeftOut(root.releaseAsk)
+                    return Model.prettyStamp(root.releaseAsk) + " is kept because a restore left "
+                      + (l.length ? l.join(", ") : "something")
+                      + " on it. Let it go and it can be thinned away like any other, taking "
+                      + "the last copy of that with it."
+                  }
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                Row {
+                  spacing: Style.space(8)
+                  Button {
+                    text: "Let it go"
+                    bordered: true
+                    foreground: root.urgent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                      var t = root.releaseAsk
+                      root.releaseAsk = ""
+                      svc.releaseKept(t)
+                    }
+                  }
+                  Button {
+                    text: "Keep it"
+                    bordered: true
+                    foreground: root.foreground
+                    fontFamily: root.fontFamily
+                    onClicked: root.releaseAsk = ""
+                  }
+                }
               }
               Repeater {
                 model: svc.snapModel
@@ -650,41 +800,93 @@ Panel {
                   required property string snapId
                   required property string sizeText
                   visible: root.showAllSnaps || index < 5
+                  readonly property bool rpKeptRow: svc.isKept(snapId)
                   width: column.width
-                  height: visible ? (rpTxt.implicitHeight + Style.space(10)) : 0
+                  height: visible
+                    ? (Math.max(rpTxt.implicitHeight, rpActions.implicitHeight) + Style.space(10))
+                    : 0
                   radius: Style.cornerRadius
                   color: "transparent"
-                  border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
+                  border.color: rpKeptRow
+                    ? root.kept
+                    : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.2)
                   border.width: 1
                   Text {
                     id: rpTxt
                     anchors.left: parent.left
-                    anchors.right: rpSize.visible ? rpSize.left : parent.right
+                    anchors.right: rpActions.left
                     anchors.verticalCenter: parent.verticalCenter
                     anchors.leftMargin: Style.space(8)
                     anchors.rightMargin: Style.space(6)
                     text: whenText
-                    color: root.foreground
+                    color: rpKeptRow ? root.kept : root.foreground
                     font.family: root.fontFamily
                     font.pixelSize: Style.font.body
                     elide: Text.ElideRight
                   }
-                  Text {
-                    id: rpSize
-                    visible: sizeText !== ""
-                    anchors.right: parent.right
-                    anchors.verticalCenter: parent.verticalCenter
-                    anchors.rightMargin: Style.space(8)
-                    text: sizeText
-                    color: root.dim
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
-                  }
+                  // Declared before the buttons so they take the clicks that
+                  // land on them: a plain row opens the restore point, a
+                  // marked one asks whether to stop keeping it (its own
+                  // Browse button does the opening).
                   MouseArea {
                     anchors.fill: parent
                     enabled: svc.linked || !svc.remoteActive
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: svc.openSnapshot(snapId)
+                    onClicked: {
+                      if (rpKeptRow) root.releaseAsk = (root.releaseAsk === snapId ? "" : snapId)
+                      else svc.openSnapshot(snapId)
+                    }
+                  }
+                  Row {
+                    id: rpActions
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.rightMargin: Style.space(8)
+                    spacing: Style.space(6)
+                    Text {
+                      // No anchors: Row positions its own children, and it is
+                      // centred in the row itself.
+                      visible: sizeText !== "" && !rpKeptRow
+                      text: sizeText
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.bodySmall
+                    }
+                    Button {
+                      visible: rpKeptRow
+                      text: "Browse"
+                      bordered: true
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(8)
+                      verticalPadding: Style.space(4)
+                      enabled: (svc.linked || !svc.remoteActive) && !svc.restoringFiles
+                      tooltipText: "Open this restore point read-only"
+                      onClicked: svc.openSnapshot(snapId)
+                    }
+                    Button {
+                      visible: rpKeptRow
+                      text: svc.restoreKeptTs === snapId
+                        ? (svc.browsePhase === "opening" ? "Opening…"
+                          : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
+                        : "Restore"
+                      bordered: true
+                      foreground: root.kept
+                      fontFamily: root.fontFamily
+                      fontSize: Style.font.bodySmall
+                      horizontalPadding: Style.space(8)
+                      verticalPadding: Style.space(4)
+                      enabled: svc.linked && !svc.backupRunning
+                        && (!svc.restoringFiles || svc.restoreKeptTs === snapId)
+                      tooltipText: svc.restoreKeptTs === snapId
+                        ? "Stop, and carry on another time"
+                        : "Bring back what this one still holds. Never overwrites a file you have changed since."
+                      onClicked: {
+                        if (svc.restoreKeptTs === snapId) svc.stopRestoringFiles()
+                        else svc.restoreKept(snapId)
+                      }
+                    }
                   }
                 }
               }
@@ -777,62 +979,82 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: svc.version + "  ·  skip folders, disks, Pi, erase disk"
+              meta: root.blockedByRestore
+                ? svc.version + "  ·  what to leave out of this restore"
+                : svc.version + "  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
-            PanelSectionHeader {
-              text: "AUTOMATIC BACKUPS"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-            Toggle {
+            Column {
+              // Nothing here can be acted on until a restored system has its
+              // files back, and a control that cannot be pressed is just noise.
+              // The restore card on the home page is the way through.
+              visible: !root.blockedByRestore
               width: parent.width
-              label: "Back up automatically"
-              description: svc.scheduleOn
-                ? "Skips quietly when the backup disk isn’t reachable or the battery is under 20%."
-                : (svc.hasCapsule
-                  ? "Asks for the backup disk password once, so backups can run while you’re away."
-                  : "Set up a backup disk first.")
-              checked: svc.scheduleOn
-              enabled: svc.hasCapsule || svc.scheduleOn
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: {
-                if (svc.scheduleOn) svc.setSchedule("enabled", "false")
-                else svc.enableSchedule()
+              spacing: Style.space(12)
+              PanelSectionHeader {
+                text: "AUTOMATIC BACKUPS"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
               }
-            }
-            ButtonGroup {
-              visible: svc.scheduleOn
-              options: [
-                { value: "hourly", label: "Hourly" },
-                { value: "daily", label: "Daily" },
-                { value: "weekly", label: "Weekly" }
-              ]
-              value: svc.schedule.every
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onChanged: function (v) { svc.setSchedule("every", v) }
-            }
-            Toggle {
-              width: parent.width
-              label: "Smart thinning"
-              description: svc.schedule.retention === "smart"
-                ? "Recommended. Keeps every backup from the last day, one a day for a month, then one a week. Deletes the oldest when the disk is nearly full."
-                : "Never deletes restore points. Warns you when the backup disk is nearly full."
-              checked: svc.schedule.retention === "smart"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.setSchedule("retention", checked ? "keep" : "smart")
-            }
+              Toggle {
+                width: parent.width
+                label: "Back up automatically"
+                description: svc.scheduleOn
+                  ? "Skips quietly when the backup disk isn’t reachable or the battery is under 20%."
+                  : (svc.hasCapsule
+                    ? "Asks for the backup disk password once, so backups can run while you’re away."
+                    : "Set up a backup disk first.")
+                checked: svc.scheduleOn
+                enabled: svc.hasCapsule || svc.scheduleOn
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  if (svc.scheduleOn) svc.setSchedule("enabled", "false")
+                  else svc.enableSchedule()
+                }
+              }
+              ButtonGroup {
+                visible: svc.scheduleOn
+                options: [
+                  { value: "hourly", label: "Hourly" },
+                  { value: "daily", label: "Daily" },
+                  { value: "weekly", label: "Weekly" }
+                ]
+                value: svc.schedule.every
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onChanged: function (v) { svc.setSchedule("every", v) }
+              }
+              Toggle {
+                width: parent.width
+                label: "Smart thinning"
+                description: svc.schedule.retention === "smart"
+                  ? "Recommended. Keeps every backup from the last day, one a day for a month, then one a week. Deletes the oldest when the disk is nearly full."
+                  : "Never deletes restore points. Warns you when the backup disk is nearly full."
+                checked: svc.schedule.retention === "smart"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.setSchedule("retention", checked ? "keep" : "smart")
+              }
 
-            PanelSeparator { foreground: root.foreground }
+              PanelSeparator { foreground: root.foreground }
+            }
             PanelSectionHeader {
               text: "QUICK SKIPS"
               foreground: root.foreground
               fontFamily: root.fontFamily
+            }
+            Text {
+              visible: root.blockedByRestore
+              width: parent.width
+              text: "Tick anything you don't want brought back right now. It stays on the "
+                + "backup, and this restore point is kept until you come for it."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
             }
             Repeater {
               model: root.quickSkips
@@ -841,42 +1063,51 @@ Panel {
                 width: parent.width
                 label: modelData.label
                 description: modelData.note
-                checked: root.quickSkipOn(modelData.paths)
+                checked: root.quickSkipOn(modelData)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: {
-                  var on = root.quickSkipOn(modelData.paths)
-                  for (var i = 0; i < modelData.paths.length; i++) {
-                    if (on) svc.removeSkip(modelData.paths[i])
-                    else svc.addSkip(modelData.paths[i])
+                  var on = root.quickSkipOn(modelData)
+                  var paths = root.quickSkipPaths(modelData)
+                  for (var i = 0; i < paths.length; i++) {
+                    if (root.blockedByRestore) {
+                      if (on) svc.removeRestoreSkip(paths[i])
+                      else svc.addRestoreSkip(paths[i])
+                    } else {
+                      if (on) svc.removeSkip(paths[i])
+                      else svc.addSkip(paths[i])
+                    }
                   }
                 }
               }
             }
 
             PanelSectionHeader {
-              text: "SKIP"
+              text: root.blockedByRestore ? "LEAVE OUT OF THE RESTORE" : "SKIP"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
             Text {
               visible: root.customSkipCount === 0
               width: parent.width
-              text: "Nothing skipped yet."
+              text: root.blockedByRestore ? "Nothing left out — everything comes back." : "Nothing skipped yet."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               width: parent.width
-              text: "Left off every backup. Use this for anything large you don’t need on the USB."
+              text: root.blockedByRestore
+                ? "Use this for anything too big for this disk. Folder and File open the "
+                  + "backup's own copy, so you pick from what is actually waiting there."
+                : "Left off every backup. Use this for anything large you don’t need on the USB."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
             }
             Repeater {
-              model: svc.skipModel
+              model: root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
               delegate: Rectangle {
                 required property string path
                 visible: !root.isQuickSkip(path)
@@ -913,7 +1144,11 @@ Panel {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                       var p = path
-                      Qt.callLater(function () { svc.removeSkip(p) })
+                      var restoring = root.blockedByRestore
+                      Qt.callLater(function () {
+                        if (restoring) svc.removeRestoreSkip(p)
+                        else svc.removeSkip(p)
+                      })
                     }
                   }
                 }
@@ -924,20 +1159,47 @@ Panel {
               Button {
                 text: "+ Folder"
                 bordered: true
+                // Picking from the restore point means opening it first, which
+                // needs the backup disk and a linked laptop.
+                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: svc.pickFolder()
+                tooltipText: root.blockedByRestore
+                  ? "Opens the restore point so you can pick from the copy on the backup"
+                  : ""
+                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(false) : svc.pickFolder()
               }
               Button {
                 text: "+ File"
                 bordered: true
+                // Picking from the restore point means opening it first, which
+                // needs the backup disk and a linked laptop.
+                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: svc.pickFile()
+                tooltipText: root.blockedByRestore
+                  ? "Opens the restore point so you can pick from the copy on the backup"
+                  : ""
+                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(true) : svc.pickFile()
               }
             }
 
+            // Picking from the restore point has to open it first, which takes
+            // a moment and can fail. Both belong here rather than at the top of
+            // the panel: from down here a press that says nothing looks broken.
+            Text {
+              readonly property bool opening: svc.browseMode === "pick" && svc.browsePhase === "opening"
+              visible: svc.pickError !== "" || opening
+              width: parent.width
+              text: svc.pickError !== "" ? svc.pickError : "Opening the restore point…"
+              color: svc.pickError !== "" ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
             Toggle {
+              visible: !root.blockedByRestore
               width: parent.width
               label: "Show all disks"
               description: "Includes internal drives. Easy to wipe the computer’s own disk."
@@ -952,7 +1214,7 @@ Panel {
             // section stays out of the way until there is one (or until a Pi
             // is already paired, so it can still be unpaired).
             Column {
-              visible: svc.snapshotCount > 0 || svc.remote !== null
+              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.blockedByRestore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1005,7 +1267,7 @@ Panel {
 
             // Needs the Pi, something on it to restore, and a linked laptop.
             Column {
-              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.blockedByRestore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1075,7 +1337,7 @@ Panel {
             }
 
             Column {
-              visible: svc.hasCapsule
+              visible: svc.hasCapsule && !root.blockedByRestore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1146,68 +1408,76 @@ Panel {
               }
             }
 
-            PanelSeparator { foreground: root.foreground }
-            PanelSectionHeader {
-              text: "START OVER"
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-            }
-            Text {
-              width: parent.width
-              text: "Leave this off to keep every copy already on the USB."
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.bodySmall
-              wrapMode: Text.WordWrap
-            }
-            Toggle {
-              width: parent.width
-              label: "Erase this backup disk"
-              description: svc.capsule !== null
-                ? "Deletes every restore point, then sets a new encryption password."
-                : (svc.remoteActive
-                  ? "The backup USB is on " + svc.remoteHost + ". Plug it in here to erase it."
-                  : "No backup USB is set up. Go back and pick the USB on the home page.")
-              checked: svc.replaceDisk
-              enabled: svc.capsule !== null
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: {
-                if (svc.capsule === null) return
-                svc.replaceDisk = !svc.replaceDisk
-                svc.wipeConfirmed = false
-                if (svc.capsule) svc.selectedDisk = svc.capsule.path
-              }
-            }
             Column {
-              visible: svc.replaceDisk
+              // Nothing here can be acted on until a restored system has its
+              // files back, and a control that cannot be pressed is just noise.
+              // The restore card on the home page is the way through.
+              visible: !root.blockedByRestore
               width: parent.width
-              spacing: Style.space(8)
+              spacing: Style.space(12)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "START OVER"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
               Text {
                 width: parent.width
-                text: "This cannot be undone."
-                color: root.urgent
+                text: "Leave this off to keep every copy already on the USB."
+                color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
               }
               Toggle {
                 width: parent.width
-                label: "I understand every backup on this USB will be destroyed"
-                description: svc.capsule ? Model.diskLabel(svc.capsule) : svc.selectedDiskLabel
-                checked: svc.wipeConfirmed
+                label: "Erase this backup disk"
+                description: svc.capsule !== null
+                  ? "Deletes every restore point, then sets a new encryption password."
+                  : (svc.remoteActive
+                    ? "The backup USB is on " + svc.remoteHost + ". Plug it in here to erase it."
+                    : "No backup USB is set up. Go back and pick the USB on the home page.")
+                checked: svc.replaceDisk
+                enabled: svc.capsule !== null
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
+                onClicked: {
+                  if (svc.capsule === null) return
+                  svc.replaceDisk = !svc.replaceDisk
+                  svc.wipeConfirmed = false
+                  if (svc.capsule) svc.selectedDisk = svc.capsule.path
+                }
               }
-              Button {
+              Column {
+                visible: svc.replaceDisk
                 width: parent.width
-                text: "Erase USB and start over"
-                foreground: root.urgent
-                bordered: true
-                enabled: !svc.backupRunning && svc.wipeConfirmed && svc.selectedDisk !== ""
-                fontFamily: root.fontFamily
-                onClicked: svc.startFirstRun(svc.selectedDisk)
+                spacing: Style.space(8)
+                Text {
+                  width: parent.width
+                  text: "This cannot be undone."
+                  color: root.urgent
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                Toggle {
+                  width: parent.width
+                  label: "I understand every backup on this USB will be destroyed"
+                  description: svc.capsule ? Model.diskLabel(svc.capsule) : svc.selectedDiskLabel
+                  checked: svc.wipeConfirmed
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: svc.wipeConfirmed = !svc.wipeConfirmed
+                }
+                Button {
+                  width: parent.width
+                  text: "Erase USB and start over"
+                  foreground: root.urgent
+                  bordered: true
+                  enabled: !svc.backupRunning && svc.wipeConfirmed && svc.selectedDisk !== ""
+                  fontFamily: root.fontFamily
+                  onClicked: svc.startFirstRun(svc.selectedDisk)
+                }
               }
             }
           }

@@ -159,7 +159,9 @@ def split_paths(
         except ValueError:
             pass
         if s.startswith("/"):
-            os_ex.append(s.lstrip("/"))
+            # Anchored, like share/excludes-os.txt: "/opt/big" means that
+            # one folder, not every ".../opt/big" under it.
+            os_ex.append("/" + s.lstrip("/"))
         else:
             home_ex.append(s)
     return uniq(home_ex), uniq(os_ex)

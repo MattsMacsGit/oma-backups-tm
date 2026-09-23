@@ -41,6 +41,7 @@ while [[ $# -gt 0 ]]; do
     --json) LIST_JSON=1; shift ;;
     --files) MODE=files; shift; break ;;
     --copy) MODE=copy; shift; break ;;
+    --put-back-system) MODE=put_back_system; shift ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -217,6 +218,21 @@ measure_tree() {
 # Every d_* helper takes paths relative to the backup disk's top level.
 DEST_REMOTE=0
 RSYNC_RSH=()
+# Filled in once the destination is known. Whole changed files on USB and
+# LAN. Over Tailscale, keep the delta and compress: a one-byte change in a
+# big file should not cross the slow link in full.
+RSYNC_LINK=()
+# Gatekeeper 9 hands back a mark when it unlocks: one per thing using the disk.
+# It locks when the LAST mark goes, not the first, so a browse session closing
+# can no longer pull the disk out from under a models put-back. Empty against
+# an older gatekeeper, where lock still means lock.
+REMOTE_HOLD=""
+REMOTE_HOLD_PID=""
+# Whether this gatekeeper issues marks at all, which is a different question
+# from whether we are still holding one. Without it, a second remote_close --
+# an explicit one followed by the EXIT trap -- would look like "no mark" and
+# fall through to the blunt lock that takes the disk off everybody.
+REMOTE_HOLD_ISSUED=0
 
 pick_destination() {
   # "No backup disk plugged in here" also covers "a backup disk is plugged in,
@@ -235,17 +251,71 @@ remote_open() {
   local st
   st="$(rgate status 2>>"$OMARCHY_TM_LOG")" ||
     fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
+  note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
   [[ $(jq -r .present <<<"$st") == true ]] ||
     fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
-  rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" ||
-    fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Re-pair it: oma-backups remote pair $REMOTE_HOST"
+  # A gatekeeper before v8 can refuse an unlock that arrives while the lock
+  # from a restore point just closed is still queued — it decided it wouldn't
+  # need the key before it found out it would. That clears itself in seconds,
+  # so it is worth one more try before telling anyone their pairing is broken,
+  # which in that case it isn't.
+  local out
+  if ! out="$(rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG")"; then
+    sleep 5
+    out="$(rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG")" ||
+      fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Give it a moment and try again — if it keeps happening, re-pair it: oma-backups remote pair $REMOTE_HOST"
+  fi
+  # Matched whole, not filtered: anything that isn't exactly a mark means we
+  # are talking to a gatekeeper that doesn't issue them.
+  REMOTE_HOLD=""
+  if [[ $out =~ ^[0-9a-f]{16}$ ]]; then
+    REMOTE_HOLD="$out"
+    REMOTE_HOLD_ISSUED=1
+  fi
+  remote_hold_start
+}
+
+# A mark nothing refreshes for ten minutes is taken to belong to something
+# that died, so anything long-running says "still here" as it goes. The loop
+# stops of its own accord the moment the gatekeeper stops recognising it.
+remote_hold_start() {
+  [[ -n $REMOTE_HOLD ]] || return 0
+  (
+    # Not the caller's cleanup: this loop ending, or being killed, must never
+    # be mistaken for the job itself finishing.
+    trap - EXIT INT TERM
+    while sleep 120; do
+      rgate hold "$REMOTE_HOLD" >/dev/null 2>&1 || exit 0
+    done
+  ) &
+  REMOTE_HOLD_PID=$!
+}
+
+remote_hold_stop() {
+  [[ -n $REMOTE_HOLD_PID ]] || return 0
+  kill "$REMOTE_HOLD_PID" 2>/dev/null || true
+  wait "$REMOTE_HOLD_PID" 2>/dev/null || true
+  REMOTE_HOLD_PID=""
 }
 
 remote_close() {
   [[ $DEST_REMOTE == 1 ]] || return 0
-  # Gatekeepers before v6 don't queue a lock behind an unlock, so a Stop
-  # pressed while unlocking could lock nothing and leave the disk open once
-  # the unlock landed. Check, and lock again if it's still open.
+  remote_hold_stop
+  if ((REMOTE_HOLD_ISSUED)); then
+    # Let go of our own mark and nothing else. Whether the disk actually locks
+    # is the gatekeeper's call: if a backup, a browse session or a put-back is
+    # still on it, staying open is the right answer, not a failure.
+    [[ -n $REMOTE_HOLD ]] || return 0
+    local hold=$REMOTE_HOLD
+    REMOTE_HOLD=""
+    rgate lock "$hold" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+      warn "Couldn't let go of the backup disk on $REMOTE_HOST (it locks itself when nobody is using it)."
+    return 0
+  fi
+  # Gatekeeper 8 and older: no marks, so lock means lock. Those before v6 also
+  # don't queue a lock behind an unlock, so a Stop pressed while unlocking
+  # could lock nothing and leave the disk open once the unlock landed. Check,
+  # and lock again if it's still open.
   local i
   for i in 1 2 3; do
     rgate lock >/dev/null 2>>"$OMARCHY_TM_LOG" || true
@@ -352,6 +422,31 @@ announce_backup() {
   echo
 }
 
+# Whole files, or delta plus zstd, depending on how we reach the disk.
+# No --checksum-choice: two rsyncs that both know xxh128 pick it anyway,
+# and forcing it fails outright against a Pi whose rsync was built without.
+rsync_link_flags() {
+  RSYNC_LINK=()
+  # A local copy already sends whole files; rsync only deltas over a network.
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  # remote_pick_addr hands back a LAN address when one answers, and the
+  # paired name otherwise. Away from home that name is how Tailscale gets
+  # there, and it is a MagicDNS name far more often than a bare 100.x
+  # address, so "not the LAN address" is the test for the slow link.
+  if [[ -n ${REMOTE_ADDR:-} && $REMOTE_ADDR != "$REMOTE_HOST" ]]; then
+    RSYNC_LINK+=(-W)
+  elif rsync --help 2>&1 | grep -q -- '--compress-choice'; then
+    RSYNC_LINK+=(--compress --compress-choice=zstd)
+  fi
+}
+
+# Short fingerprint of an exclude file, so a remembered size is only used
+# with the skip list it was measured under. Empty when there is no file.
+skip_list_id() {
+  [[ -n ${1:-} && -r $1 ]] || return 0
+  sha256sum <"$1" | cut -c1-16
+}
+
 # Parse rsync progress2 on stderr without a PTY and without du.
 # Copy one tree. Sets TREE_SIZE to rsync's "Total file size" (the restore
 # point's size for this part), so nothing ever has to walk the tree again.
@@ -376,7 +471,7 @@ rsync_tree() {
   # knows the real total from its first progress line. Folder-by-folder it
   # reports a total that keeps growing, which is why the bar could only ever
   # say "working" through the longest step of the backup.
-  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
     --no-inc-recursive --info=progress2,name0,flist2 --stats \
     --exclude-from="$ex" "$src"/ "$dest"/ \
     2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
@@ -448,7 +543,7 @@ on_stop_signal() {
 BACKUP_FAILED=0
 fail_backup() {
   echo
-  gum style --bold --foreground 1 "Backup failed."
+  gum style --bold --foreground 1 "${FAIL_TITLE:-Backup failed.}"
   gum style --foreground 8 "$*"
   gum style --foreground 8 "See $OMARCHY_TM_LOG for details."
   # The plugin shows this; backups started without a terminal have no other
@@ -466,8 +561,14 @@ fail_backup() {
 }
 
 backup_running() {
-  local p
-  p="$(tr -d '[:space:]' <"$(pid_file)" 2>/dev/null || true)"
+  local p f
+  # Checked for readability first: a `<missing-file` redirection is reported by
+  # the shell before the command's own `2>/dev/null` can be applied, so the
+  # "No such file or directory" went to the journal on every browse stop --
+  # there is no pid file unless a backup is actually running.
+  f="$(pid_file)"
+  [[ -r $f ]] || return 1
+  p="$(tr -d '[:space:]' 2>/dev/null <"$f" || true)"
   [[ -n $p && $p != "$$" ]] && pid_alive "$p" && grep -qa backup.sh "/proc/$p/cmdline" 2>/dev/null
 }
 
@@ -509,11 +610,23 @@ refuse_if_partial_restore() {
   fi
   echo
   gum style --bold "This system isn't whole yet, so backups are paused."
-  gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
-  gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
-  gum style --foreground 8 "  up now would delete them from the backup's current copy."
-  echo
-  gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  local m="$OMARCHY_TM_STATE/partial-restore.json"
+  if [[ $(jq -r '.files_done // false' "$m" 2>/dev/null) == true ]]; then
+    gum style --foreground 8 "  Your files are back, but the AI models the quick restore left behind"
+    gum style --foreground 8 "  are still on the backup and not on this system, so backing up now"
+    gum style --foreground 8 "  would delete them from the backup's current copy."
+    echo
+    gum style --foreground 8 "  Bring them back first: open the plugin and press \"Put AI models back\"."
+  else
+    gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
+    gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
+    gum style --foreground 8 "  up now would delete them from the backup's current copy."
+    if [[ $(jq -r '.skipped_system // [] | length' "$m" 2>/dev/null || echo 0) != 0 ]]; then
+      gum style --foreground 8 "  The same goes for your AI models, which the quick restore left behind."
+    fi
+    echo
+    gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
+  fi
   gum style --foreground 8 "  To back up anyway and keep only what's here, hold Ctrl and press"
   gum style --foreground 8 "  \"Backup now\" in the plugin, or run:"
   gum style --foreground 8 "    oma-backups backup --force-after-restore"
@@ -528,7 +641,13 @@ refuse_if_partial_restore() {
 refuse_if_running() {
   local other
   exec 9>"$(pid_file).lock"
-  flock -w 10 9 || true
+  # Giving up and continuing used to let Backup now and the hourly timer
+  # both pass the check and both write the disk.
+  if ! flock -w 10 9; then
+    exec 9>&-
+    gum style --bold "A backup is already starting. Leaving it to finish."
+    exit 0
+  fi
   other="$(tr -d '[:space:]' 2>/dev/null <"$(pid_file)" || true)"
   if [[ -n $other && $other != "$$" ]] && pid_alive "$other" &&
     grep -qa backup.sh "/proc/$other/cmdline" 2>/dev/null; then
@@ -652,18 +771,32 @@ prune_restore_points() {
   local dry=${1:-0} mode plan ts n=0
   mode="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get retention)"
   if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 2 ]]; then
-    warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up. Update it by running this on the Pi:"
-    warn "  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+    warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up."
+    warn "Update it by running this on the Pi: $(pi_update_cmd)"
     return 0
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
-  # After a "system + settings" restore, the restore point it came from is the
-  # only one that still has the user's files until they're brought back.
-  local protected
-  protected="$(jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
-  if [[ -n $protected ]]; then
-    plan="$(jq --arg p "$protected" '.thin -= [$p] | .space_order -= [$p] | .keep = (.keep + [$p] | unique)' <<<"$plan")"
+  # Two kinds of restore point thinning must never touch. The one a restore
+  # is still mid-way through (partial-restore.json), and the ones earmarked
+  # because a restore deliberately left something behind on them — those are
+  # the only copy of what was left out, and the system carries on backing up
+  # around them (kept-points.json, written by the plugin).
+  local protect_json
+  protect_json="$(
+    {
+      jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --list 2>/dev/null |
+        jq -r 'keys[]?' 2>/dev/null || true
+    } | grep -E '^[0-9]{8}T[0-9]{6}Z$' | jq -R . | jq -s 'unique'
+  )"
+  if [[ $(jq 'length' <<<"$protect_json") -gt 0 ]]; then
+    # Intersect with what is actually on the disk first, or a restore point
+    # deleted by hand would inflate the "Keep:" count in the dry run for good.
+    plan="$(jq --argjson p "$protect_json" '
+      ($p - ($p - (.keep + .thin + .space_order))) as $k
+      | .thin -= $k | .space_order -= $k | .keep = (.keep + $k | unique)' <<<"$plan")"
+    log_file "thinning will not touch: $(jq -r 'join(" ")' <<<"$protect_json")"
   fi
   if [[ $dry == 1 ]]; then
     echo "Setting: $mode"
@@ -727,6 +860,7 @@ cmd_backup() {
   # still looks mounted; writing to it fails with I/O errors mid-backup.
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
+  rsync_link_flags
   announce_backup "$ts"
   open_destination
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
@@ -781,13 +915,30 @@ cmd_backup() {
   plan_progress
   progress phase "measure"
   step "Working out how much there is to copy"
+  # An incremental reuses the previous run's size and skips the dry-run
+  # walk. The copy still walks the tree once, and rsync still counts the
+  # files exactly; only the byte total is last time's. That size is only
+  # trusted with the skip list it was measured under: un-skipping a big
+  # folder would otherwise leave the bar hundreds of GB short.
+  seed_or_measure() {
+    local step=$1 src=$2 ex=$3 known=0 want had
+    want="$(skip_list_id "$ex")"
+    known="$(jq -r --arg s "$step" '.[$s] // 0' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || echo 0)"
+    had="$(jq -r --arg s "${step}_skips" '.[$s] // ""' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || true)"
+    if [[ $known =~ ^[0-9]+$ && $known -gt 0 && -n $want && $had == "$want" ]]; then
+      progress seed "$step" "$known"
+      log_file "using the last backup's size for $step ($known bytes)"
+      return 0
+    fi
+    measure_tree "$src" "$ex" "$step"
+  }
   if [[ $HOME_ONLY != 1 ]]; then
     if ! is_done os; then
-      measure_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS" os
+      seed_or_measure os "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS"
     fi
   fi
   if ! is_done home; then
-    measure_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME" home
+    seed_or_measure home "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME"
   fi
   if ! is_done esp; then
     measure_tree /boot "" esp
@@ -804,13 +955,25 @@ cmd_backup() {
   if ! is_done esp; then
     step "Backing up the boot partition"
     progress phase "esp"
-    local esp_dest=esp/current
+    local esp_dest=esp/current esp_rc=0
     [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
+    # Same rule as rsync_tree: 23 and 24 are warnings, anything else is a
+    # failed backup. The status used to be thrown away, so a broken boot
+    # copy was still saved as a valid restore point.
+    set +e
     set +o pipefail
-    rsync "${RSYNC_RSH[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
+    rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
       /boot/ "$(d_target "$esp_dest")/" \
-      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
+      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp
+    esp_rc=${PIPESTATUS[0]}
     set -o pipefail
+    set -e
+    if [[ $esp_rc -ne 0 && $esp_rc -ne 23 && $esp_rc -ne 24 ]]; then
+      fail_backup "$(rsync_failure_text "$esp_rc")"
+    fi
+    if [[ $esp_rc -ne 0 ]]; then
+      warn "rsync boot files finished with warnings (exit $esp_rc) — restore point will still be saved"
+    fi
     step_done esp
   fi
 
@@ -841,6 +1004,19 @@ cmd_backup() {
   run_quiet btrfs subvolume delete "$SRC_TOP/$SNAP_SUB/home-$ts" || true
   local size_os size_home
   size_os="$(step_size os)" size_home="$(step_size home)"
+  [[ $size_os =~ ^[0-9]+$ ]] || size_os=0
+  [[ $size_home =~ ^[0-9]+$ ]] || size_home=0
+  # Kept for the next incremental, which skips the measuring walk when a
+  # size is already here. A home-only run must not wipe a real OS size.
+  # Remembering the size is not the backup: a failure here still finishes.
+  local sizes_file="$OMARCHY_TM_STATE/last-sizes.json"
+  jq empty "$sizes_file" 2>/dev/null || echo '{}' >"$sizes_file"
+  jq --argjson os "$size_os" --argjson home "$size_home" \
+    --arg os_skips "$(skip_list_id "$EX_OS")" --arg home_skips "$(skip_list_id "$EX_HOME")" \
+    'if $os > 0 then .os = $os | .os_skips = $os_skips else . end
+     | if $home > 0 then .home = $home | .home_skips = $home_skips else . end' \
+    "$sizes_file" >"$sizes_file.tmp" && chmod 644 "$sizes_file.tmp" && mv "$sizes_file.tmp" "$sizes_file" \
+    || log_file "couldn't remember this backup's size for next time"
   # Saved as a restore point: nothing left to resume.
   rm -f "$RESUME_FILE"
 
@@ -968,8 +1144,16 @@ browse_cleanup() {
     rmdir "$mp" 2>/dev/null || true
   fi
   rm -f "$BROWSE_STATE" 2>/dev/null || true
-  # Mid-backup, the backup owns the disk and locks it itself on its way out.
-  backup_running || remote_close || true
+  # With a mark of our own, letting go is safe whatever else is going on: the
+  # gatekeeper locks the disk when the last user leaves, not the first. Without
+  # one, the old guard stands -- and it only ever asked about backups, which is
+  # exactly how closing a browse session locked the disk out from under a
+  # models put-back and threw away everything it had copied.
+  if ((${REMOTE_HOLD_ISSUED:-0})); then
+    remote_close || true
+  else
+    backup_running || remote_close || true
+  fi
 }
 
 # Open one restore point's copy of the user's home folder, read-only, until
@@ -999,9 +1183,11 @@ cmd_browse() {
     return 0
   fi
 
-  [[ $(rgate version 2>/dev/null || echo 0) -ge 3 ]] ||
-    fail_backup "The Pi needs updating to open restore points. Run this on it: curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
-  command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: oma-backups link --refresh)."
+  local gate_ver
+  gate_ver="$(rgate version 2>/dev/null || echo 0)"
+  [[ $gate_ver -ge 3 ]] ||
+    fail_backup "The Pi needs updating to open restore points. Run this on it: $(pi_update_cmd)"
+  command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: sudo oma-backups link --refresh)."
   local mp="$BROWSE_DIR/$ts" pid
   mkdir -p "$mp"
   # Leave the disk unlocked if a backup is mid-way; it locks it when done.
@@ -1021,6 +1207,83 @@ cmd_browse() {
   mountpoint -q "$mp" || fail_backup "Couldn't open that restore point on $REMOTE_HOST (see $OMARCHY_TM_LOG)."
   browse_state ready "$mp"
   wait "$pid" || true
+}
+
+# After a quick restore: put back what restore-to-disk left in the system area
+# (AI models, listed as skipped_system in partial-restore.json). The plugin's
+# "Restore my files" runs this in a terminal before bringing the files back,
+# and it needs root because those folders belong to a system service. When
+# it's done it takes them off the list, and removes the marker altogether if
+# the files are already back (files_done).
+cmd_put_back_system() {
+  local marker="$OMARCHY_TM_STATE/partial-restore.json" snap rel was_active=0 failed=0 remaining
+  local -a paths=()
+  if [[ ${EUID:-$(id -u)} -ne 0 ]]; then
+    echo
+    gum style --bold "Putting your AI models back"
+    gum style --foreground 8 "  The quick restore left your AI models on the backup so you could get"
+    gum style --foreground 8 "  going sooner. They live in the system area (Ollama keeps them there,"
+    gum style --foreground 8 "  not in your home folder), so putting them back needs your password."
+    gum style --foreground 8 "  If you'd rather not now, press Ctrl+C: your files still come back, and"
+    gum style --foreground 8 "  the panel offers \"Put AI models back\" for later."
+    echo
+  fi
+  require_root "${ORIG_ARGS[@]}"
+  snap="$(jq -r '.snapshot // empty' "$marker" 2>/dev/null || true)"
+  mapfile -t paths < <(jq -r '.skipped_system // [] | .[]' "$marker" 2>/dev/null || true)
+  if [[ -z $snap || ${#paths[@]} -eq 0 ]]; then
+    gum style --foreground 8 "  Nothing to put back: no AI models were left on the backup."
+    return 0
+  fi
+  for rel in "${paths[@]}"; do
+    # Written by restore-to-disk, but it is a file in the user's home: never
+    # let it name anything outside the system folders models live in.
+    [[ $rel =~ ^(var|usr|opt|srv)/[A-Za-z0-9._/-]+$ && $rel != *..* ]] ||
+      die "partial-restore.json lists a folder that isn't allowed: $rel"
+  done
+  [[ $snap =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "partial-restore.json names a restore point that isn't one: $snap"
+  backup_running && die "A backup is running. Try again once it has finished."
+
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't put your AI models back."
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  rsync_link_flags
+  open_destination
+  d_exists "os/$snap" || fail_backup "The restore point $snap isn't on the backup any more."
+
+  # Ollama holds its models open; stop it while they're copied.
+  if systemctl is-active --quiet ollama.service 2>/dev/null; then
+    was_active=1
+    step "Stopping Ollama while its models are copied"
+    systemctl stop ollama.service || true
+  fi
+  for rel in "${paths[@]}"; do
+    step "Copying /$rel from $snap"
+    mkdir -p "$(dirname "/$rel")"
+    if ! rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --info=progress2 \
+      "$(d_target "os/$snap/$rel")"/ "/$rel/"; then
+      warn "Couldn't copy /$rel."
+      failed=1
+    fi
+  done
+  if ((was_active)); then
+    step "Starting Ollama again"
+    systemctl start ollama.service || warn "Ollama didn't start again. Try: sudo systemctl start ollama"
+  fi
+  ((failed)) && fail_backup "Some models didn't copy. Nothing was removed; press \"Put AI models back\" to try again. Details are in $OMARCHY_TM_LOG."
+
+  # Rewritten in place so the file keeps its owner (the user's plugin clears it).
+  remaining="$(jq 'del(.skipped_system)' "$marker")"
+  if [[ $(jq -r '.files_done // false' <<<"$remaining") == true ]]; then
+    rm -f "$marker"
+    log_file "AI models put back from $snap; restore complete, partial-restore marker cleared"
+  else
+    printf '%s\n' "$remaining" >"$marker"
+    log_file "AI models put back from $snap"
+  fi
+  echo
+  gum style --bold --foreground 2 "● Your AI models are back."
 }
 
 cmd_prune() {
@@ -1087,4 +1350,5 @@ case "$MODE" in
   backup) cmd_backup ;;
   prune) cmd_prune ;;
   browse) cmd_browse "$@" ;;
+  put_back_system) cmd_put_back_system ;;
 esac
