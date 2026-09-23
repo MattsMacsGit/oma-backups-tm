@@ -1165,6 +1165,20 @@ Panel {
               }
             }
 
+            // Picking from the restore point has to open it first, which takes
+            // a moment and can fail. Both belong here rather than at the top of
+            // the panel: from down here a press that says nothing looks broken.
+            Text {
+              readonly property bool opening: svc.browseMode === "pick" && svc.browsePhase === "opening"
+              visible: svc.pickError !== "" || opening
+              width: parent.width
+              text: svc.pickError !== "" ? svc.pickError : "Opening the restore point…"
+              color: svc.pickError !== "" ? root.urgent : root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
             Toggle {
               visible: !root.blockedByRestore
               width: parent.width

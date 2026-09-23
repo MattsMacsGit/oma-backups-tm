@@ -27,7 +27,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "7"
+VERSION = "8"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -161,9 +161,13 @@ def v_status(args: list[str]) -> None:
 def v_unlock(args: list[str]) -> None:
     # Read the key before taking the turn: the client is waiting on this pipe,
     # and a slow reader shouldn't hold the lock while a lock request queues.
-    key = b""
-    if not mounted() and not mapper_open():
-        key = sys.stdin.buffer.read(MAX_KEY + 1)
+    # It is read every time, even when the disk already looks open. Deciding
+    # that on the strength of a look taken outside the turn is a race: a lock
+    # queued behind this unlock can close the disk while this call is still
+    # waiting, and the key it then needs is the one it chose not to read and
+    # can no longer ask for. Closing one restore point and opening another is
+    # all it takes.
+    key = sys.stdin.buffer.read(MAX_KEY + 1)
     started = time.time()
     with capsule_turn():
         if mounted():

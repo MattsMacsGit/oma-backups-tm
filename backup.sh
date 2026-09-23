@@ -238,8 +238,15 @@ remote_open() {
     fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
   [[ $(jq -r .present <<<"$st") == true ]] ||
     fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
+  # A gatekeeper before v8 can refuse an unlock that arrives while the lock
+  # from a restore point just closed is still queued — it decided it wouldn't
+  # need the key before it found out it would. That clears itself in seconds,
+  # so it is worth one more try before telling anyone their pairing is broken,
+  # which in that case it isn't.
+  rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" && return 0
+  sleep 5
   rgate unlock <"$OMA_CAPSULE_KEY" 2>>"$OMARCHY_TM_LOG" ||
-    fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Re-pair it: oma-backups remote pair $REMOTE_HOST"
+    fail_backup "$REMOTE_HOST couldn't unlock the backup disk. Give it a moment and try again — if it keeps happening, re-pair it: oma-backups remote pair $REMOTE_HOST"
 }
 
 remote_close() {

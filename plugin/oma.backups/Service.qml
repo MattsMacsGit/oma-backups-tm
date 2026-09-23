@@ -15,6 +15,10 @@ Item {
   readonly property var snapModel: snapList
   property string statusLine: "idle"
   property string lastError: ""
+  // The + Folder / + File buttons sit a long way below the panel's one
+  // error line, so a failure reported up there reads as the button having
+  // done nothing at all. Theirs is shown next to them.
+  property string pickError: ""
   // The last failed backup's message from the status file. Kept separately
   // so the disk-list refresh doesn't blank it and make the panel jump.
   property string backupError: ""
@@ -312,6 +316,13 @@ Item {
     if (root.remoteActive)
       Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Opening " + Model.prettyStamp(ts),
         "From " + root.remoteHost + ". This can take a few seconds over the network."])
+  }
+
+  // Opening a restore point is something two different buttons ask for, and
+  // the answer belongs where it was asked.
+  function browseFailed(msg) {
+    if (root.browseMode === "pick") root.pickError = msg
+    else root.lastError = msg
   }
 
   function closeBrowse() {
@@ -710,6 +721,7 @@ Item {
   // picking three folders should not unlock the disk three times.
   function pickInRestorePoint(wantFile) {
     if (root.partialSnapshot === "") return
+    root.pickError = ""
     root.pickWantFile = wantFile === true
     if (root.browseTs === root.partialSnapshot && root.browsePhase === "open" && root.browsePath !== "") {
       root.launchRestorePicker()
@@ -751,13 +763,13 @@ Item {
         return
       }
       if (code === 3) {
-        root.lastError = "That isn't inside the restore point. Pick something from the backup's own copy."
+        root.pickError = "That isn't inside the restore point. Pick something from the backup's own copy."
         return
       }
       // 1 is "cancelled", which needs no comment. 2 is the picker not being
       // installed — the button did nothing at all and said nothing either.
       if (code === 2)
-        root.lastError = "Couldn't open the file chooser. Install it with:  sudo pacman -S python-gobject gtk3"
+        root.pickError = "Couldn't open the file chooser. Install it with:  sudo pacman -S python-gobject gtk3"
     }
   }
 
@@ -975,7 +987,7 @@ Item {
     id: browseStartProc
     onExited: function (code) {
       if (code !== 0 && root.browsePhase === "opening") {
-        root.lastError = "Couldn't open that restore point."
+        root.browseFailed("Couldn't open that restore point.")
         browsePoll.stop()
         root.browseTs = ""
         root.browsePhase = ""
@@ -1036,7 +1048,7 @@ Item {
           Quickshell.execDetached(["xdg-open", String(j.path)])
         }
       } else if (j.state === "error") {
-        root.lastError = String(j.message || "Couldn't open that restore point.")
+        root.browseFailed(String(j.message || "Couldn't open that restore point."))
         root.restoringFiles = false
         root.closeBrowse()
       }
@@ -1187,7 +1199,7 @@ Item {
       if (root.browsePhase === "opening") {
         root.browseWaited += 1
         if (root.browseWaited > 120) {
-          root.lastError = "Opening that restore point timed out."
+          root.browseFailed("Opening that restore point timed out.")
           root.closeBrowse()
           return
         }
