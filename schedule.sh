@@ -155,7 +155,10 @@ cmd_run() {
     :
   elif remote_configured; then
     remote_load
-    if [[ $(rgate status 2>/dev/null | jq -r .present 2>/dev/null) != true ]]; then
+    local st
+    st="$(rgate status 2>/dev/null || true)"
+    note_pi_gate "$(jq -r '.version // 0' <<<"$st" 2>/dev/null || echo 0)"
+    if [[ $(jq -r '.present // false' <<<"$st" 2>/dev/null) != true ]]; then
       why="The backup disk on $REMOTE_HOST couldn't be reached."
     fi
   else

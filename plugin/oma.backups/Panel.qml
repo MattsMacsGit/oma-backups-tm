@@ -347,6 +347,16 @@ Panel {
             }
 
             Text {
+              visible: svc.piBehind
+              width: parent.width
+              text: svc.piGateText
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            Text {
               visible: svc.lastError !== ""
               width: parent.width
               text: svc.lastError

@@ -247,6 +247,7 @@ remote_open() {
   local st
   st="$(rgate status 2>>"$OMARCHY_TM_LOG")" ||
     fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
+  note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
   [[ $(jq -r .present <<<"$st") == true ]] ||
     fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
   # A gatekeeper before v8 can refuse an unlock that arrives while the lock
@@ -741,8 +742,8 @@ prune_restore_points() {
   local dry=${1:-0} mode plan ts n=0
   mode="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get retention)"
   if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 2 ]]; then
-    warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up. Update it by running this on the Pi:"
-    warn "  curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+    warn "The Pi's gatekeeper is out of date, so old restore points weren't tidied up."
+    warn "On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update"
     return 0
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
@@ -1122,8 +1123,10 @@ cmd_browse() {
     return 0
   fi
 
-  [[ $(rgate version 2>/dev/null || echo 0) -ge 3 ]] ||
-    fail_backup "The Pi needs updating to open restore points. Run this on it: curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --update"
+  local gate_ver
+  gate_ver="$(rgate version 2>/dev/null || echo 0)"
+  [[ $gate_ver -ge 3 ]] ||
+    fail_backup "The Pi needs updating to open restore points. On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update"
   command -v sshfs >/dev/null || fail_backup "sshfs isn't installed (run: sudo oma-backups link --refresh)."
   local mp="$BROWSE_DIR/$ts" pid
   mkdir -p "$mp"

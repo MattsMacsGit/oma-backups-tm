@@ -105,6 +105,31 @@ remote_refresh_addresses() {
   chmod 644 "$tmp" && mv "$tmp" "$OMA_REMOTE_CONF"
 }
 
+# What this laptop's copy of the gatekeeper speaks. Older Pis still work,
+# but they lock the disk when the first session finishes, not the last.
+OMA_GATE_WANT=9
+
+# Remember the version where the panel and doctor can read it. The SSH key
+# is root-only, so a user-level poll cannot ask the Pi itself.
+note_pi_gate() {
+  local v=${1:-0} f="$OMARCHY_TM_STATE/pi-gate.json" behind=false
+  [[ $v =~ ^[0-9]+$ ]] || v=0
+  # 0 means we never heard a version (Pi off, SSH down). That is not
+  # "the Pi is old", and saying so every hour would be a false alarm.
+  ((v > 0)) || return 0
+  ((v >= OMA_GATE_WANT)) || behind=true
+  mkdir -p "$(dirname "$f")"
+  jq -n --argjson v "$v" --argjson want "$OMA_GATE_WANT" --argjson behind "$behind" \
+    '{version: $v, want: $want, behind: $behind}' >"$f.tmp"
+  chmod 644 "$f.tmp"
+  mv "$f.tmp" "$f"
+  ((behind)) || return 0
+  warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}. One session can still lock the disk out from under another." || true
+  gum style --foreground 8 "  On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update" || true
+  gum style --foreground 8 "  The curl command installs main, which is older than this tree." || true
+  return 0
+}
+
 # Run one gatekeeper verb on the Pi, e.g. `rgate snapshot home/current home/TS`.
 rgate() {
   "${REMOTE_SSH[@]}" "${REMOTE_ADDR:-$REMOTE_HOST}" "$@"

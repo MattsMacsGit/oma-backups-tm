@@ -163,10 +163,12 @@ and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
 and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
 address is used, the Pi's key is still checked under the name you paired it as.
 
-After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
+After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing).
+Do that from a copy of this same tree, on the Pi. The old curl one-liner
+installs main, which can be older than the laptop.
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
+sudo ./pi/pi-setup.sh --update
 ```
 
 Unpairing (`oma-backups remote forget`) removes the Pi connection but keeps the
@@ -193,7 +195,7 @@ You need:
 - a paired Pi with the backup disk plugged in, at least one restore point on
   it, and a linked laptop (the Settings section only shows up once all of
   these are true)
-- the Pi's gatekeeper at version 7 or newer (run the `--update` command above)
+- the Pi's gatekeeper at version 9 or newer (run the `--update` command above)
 - a USB of 8 GB or bigger, and an Omarchy ISO (the same one the backup disk's
   rescue uses)
 - for away-from-home restores: Tailscale already working on the laptop and the
@@ -303,10 +305,10 @@ start rather than quietly bringing back folders you once skipped.
 
 ### Removing it from the Pi
 
-If you paired a Raspberry Pi, clean that up separately — run this **on the Pi**:
+If you paired a Raspberry Pi, clean that up separately — from a copy of this same tree, **on the Pi**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --uninstall
+sudo ./pi/pi-setup.sh --uninstall
 ```
 
 It locks the backup disk, deletes the `omabackups` account and its home, and

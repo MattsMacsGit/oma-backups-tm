@@ -148,6 +148,10 @@ Item {
   property var remote: null
   readonly property bool remoteActive: remote !== null && capsule === null
   readonly property string remoteHost: remote ? String(remote.host || "") : ""
+  // Written by a root backup or `remote status` once the Pi has answered.
+  // The panel cannot ask the Pi itself: the SSH key is root-only.
+  property bool piBehind: false
+  property string piGateText: ""
   readonly property bool hasCapsule: capsule !== null || remote !== null
 
   // Automatic backups: settings live in the user's schedule.json; the root
@@ -1190,6 +1194,29 @@ Item {
     onLoaded: {
       var rc = parseInt(String(text()).trim(), 10)
       root.putBackFinished(isNaN(rc) ? null : rc)
+    }
+  }
+
+  FileView {
+    id: piGateFile
+    path: root.home + "/.local/state/omarchy-backups/pi-gate.json"
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.piBehind = j.behind === true
+        root.piGateText = root.piBehind
+          ? ("The Pi's gatekeeper is v" + j.version + ". This laptop wants v" + j.want
+            + ". One session can still lock the disk out from under another. On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update")
+          : ""
+      } catch (e) {
+        root.piBehind = false
+        root.piGateText = ""
+      }
+    }
+    onLoadFailed: {
+      root.piBehind = false
+      root.piGateText = ""
     }
   }
 
