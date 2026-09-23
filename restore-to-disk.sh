@@ -375,12 +375,42 @@ rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
   --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp "${os_skip[@]}" \
   "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
 log "rsync home snapshot ($LEVEL)"
+# What a quick restore leaves in each home for "Restore my files" to bring
+# back later. This used to be --max-size=100M, which read as a sensible
+# "skip the big stuff" rule and quietly gutted every tool installed under a
+# hidden folder: a 234 MB `claude` binary left behind as its 115-byte shim,
+# node, codex, the lot. A restored system came up with its programs broken
+# for no gain. Named categories instead, the way Pika Backup does it — each
+# one is something that can be downloaded or made again, whatever it weighs,
+# and everything else comes back however big it is.
+HOME_LATER=(
+  # Caches
+  '.cache' '.thumbnails' '.var/app/*/cache'
+  # Already thrown away
+  '.local/share/Trash' '.Trash' 'lost+found'
+  # Flatpak apps themselves (their documents and settings are not in here)
+  '.local/share/flatpak'
+  # Virtual machines and containers
+  '.local/share/containers' '.local/share/docker' '.local/share/libvirt'
+  '.local/share/gnome-boxes' '.local/share/bottles'
+  '.var/app/org.gnome.Boxes' '.var/app/org.gnome.BoxesDevel'
+  '.var/app/com.usebottles.bottles'
+  # AI models
+  '.lmstudio/models' '.ollama/models' '.local/share/nomic.ai' '.local/share/Jan'
+  # Game libraries
+  '.steam' '.local/share/Steam'
+)
 home_filter=()
 if [[ $LEVEL == settings ]]; then
-  # Hidden files and folders at the top of each home (.config, .local, ...)
-  # come back; visible folders (Documents, Pictures, ...) come back empty;
-  # anything over 100 MB is left for "Restore my files" (games, AI models).
-  home_filter=(--max-size=100M --include='/*/' --include='/*/.*' --include='/*/.*/**'
+  # Excludes first: rsync takes the first rule that matches, so they have to
+  # come before the includes below or they never get a say.
+  for rel in "${HOME_LATER[@]}"; do
+    home_filter+=(--exclude="/*/$rel")
+  done
+  # Then: hidden files and folders at the top of each home (.config, .local,
+  # ...) come back, and visible ones (Documents, Pictures, ...) come back
+  # empty, ready for "Restore my files".
+  home_filter+=(--include='/*/' --include='/*/.*' --include='/*/.*/**'
     --include='/*/*/' --exclude='/*/**')
 fi
 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
