@@ -509,20 +509,30 @@ fi
 rewrite_crypttab() {
   local file=$1
   [[ -f $file ]] || return 0
-  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_LUKS_UUID" <<'PY' || die "crypttab root entry still names the old disk. Restore aborted."
+  "$OMARCHY_TM_PYTHON" - "$file" "$NEW_LUKS_UUID" "$NEW_PARTUUID" <<'PY' || die "crypttab root entry still names the old disk. Restore aborted."
 import re, sys
-path, luks = sys.argv[1], sys.argv[2]
+path, luks, partuuid = sys.argv[1], sys.argv[2], sys.argv[3]
 text = open(path, encoding="utf-8", errors="replace").read()
+HEX = r"[0-9a-fA-F-]+"
+# PARTUUID first, and UUID= must not match the tail of PARTUUID=: the
+# partition's id and the LUKS header's id are different numbers.
+forms = [
+    (rf"\bPARTUUID={HEX}", f"PARTUUID={partuuid}"),
+    (rf"/dev/disk/by-partuuid/{HEX}", f"/dev/disk/by-partuuid/{partuuid}"),
+    (rf"(?<![A-Za-z])UUID={HEX}", f"UUID={luks}"),
+    (rf"/dev/disk/by-uuid/{HEX}", f"/dev/disk/by-uuid/{luks}"),
+]
 out = []
 for line in text.splitlines(True):
     raw = line.strip()
     if not raw or raw.startswith("#") or raw.split()[0] != "root":
         out.append(line)
         continue
-    new, n = re.subn(r"UUID=[0-9a-fA-F-]+", f"UUID={luks}", line, count=1)
-    if n == 0:
-        new, n = re.subn(r"/dev/disk/by-uuid/[0-9a-fA-F-]+", f"/dev/disk/by-uuid/{luks}", line, count=1)
-    if n == 0 or luks.lower() not in new.lower():
+    for pat, rep in forms:
+        new, n = re.subn(pat, rep, line, count=1)
+        if n:
+            break
+    else:
         print("crypttab root entry has no UUID to point at this disk", file=sys.stderr)
         sys.exit(1)
     out.append(new)
@@ -633,9 +643,12 @@ log "boot cmdline verified PARTUUID=$NEW_PARTUUID"
 
 # The entry lives in this computer's firmware, not on the disk. Another PC
 # uses EFI/BOOT/BOOTX64.EFI. Failure here does not undo a checked UKI.
+# limine-install above normally registers "Limine" for this partition
+# already; any entry for it will do, so each restore doesn't leave the
+# firmware one more entry to carry.
 if [[ -d /sys/firmware/efi ]] && command -v efibootmgr >/dev/null; then
   esp_partuuid="$(blkid -s PARTUUID -o value "$P1" 2>/dev/null || true)"
-  if [[ -n $esp_partuuid ]] && efibootmgr | grep -Fi "$esp_partuuid" | grep -Fqi 'BOOTX64.EFI'; then
+  if [[ -n $esp_partuuid ]] && efibootmgr | grep -Fqi "$esp_partuuid"; then
     log "firmware already has a boot entry for this disk"
   elif efibootmgr --create --disk "$TARGET" --part 1 --label "Omarchy" --loader '\EFI\BOOT\BOOTX64.EFI' >/dev/null; then
     log "firmware boot entry created for EFI/BOOT/BOOTX64.EFI"
