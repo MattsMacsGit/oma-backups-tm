@@ -423,18 +423,28 @@ announce_backup() {
 }
 
 # Whole files, or delta plus zstd, depending on how we reach the disk.
+# No --checksum-choice: two rsyncs that both know xxh128 pick it anyway,
+# and forcing it fails outright against a Pi whose rsync was built without.
 rsync_link_flags() {
   RSYNC_LINK=()
-  if rsync --help 2>&1 | grep -q -- '--checksum-choice'; then
-    RSYNC_LINK+=(--checksum-choice=xxh128)
-  fi
-  if [[ $DEST_REMOTE == 1 && ${REMOTE_ADDR:-} =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]]; then
-    if rsync --help 2>&1 | grep -q -- '--compress-choice'; then
-      RSYNC_LINK+=(--compress --compress-choice=zstd)
-    fi
-  else
+  # A local copy already sends whole files; rsync only deltas over a network.
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  # remote_pick_addr hands back a LAN address when one answers, and the
+  # paired name otherwise. Away from home that name is how Tailscale gets
+  # there, and it is a MagicDNS name far more often than a bare 100.x
+  # address, so "not the LAN address" is the test for the slow link.
+  if [[ -n ${REMOTE_ADDR:-} && $REMOTE_ADDR != "$REMOTE_HOST" ]]; then
     RSYNC_LINK+=(-W)
+  elif rsync --help 2>&1 | grep -q -- '--compress-choice'; then
+    RSYNC_LINK+=(--compress --compress-choice=zstd)
   fi
+}
+
+# Short fingerprint of an exclude file, so a remembered size is only used
+# with the skip list it was measured under. Empty when there is no file.
+skip_list_id() {
+  [[ -n ${1:-} && -r $1 ]] || return 0
+  sha256sum <"$1" | cut -c1-16
 }
 
 # Parse rsync progress2 on stderr without a PTY and without du.
@@ -906,12 +916,16 @@ cmd_backup() {
   progress phase "measure"
   step "Working out how much there is to copy"
   # An incremental reuses the previous run's size and skips the dry-run
-  # walk. The copy still walks the tree once. The bar's total is that
-  # older size, so a much bigger home can pass 100%.
+  # walk. The copy still walks the tree once, and rsync still counts the
+  # files exactly; only the byte total is last time's. That size is only
+  # trusted with the skip list it was measured under: un-skipping a big
+  # folder would otherwise leave the bar hundreds of GB short.
   seed_or_measure() {
-    local step=$1 src=$2 ex=$3 known=0
+    local step=$1 src=$2 ex=$3 known=0 want had
+    want="$(skip_list_id "$ex")"
     known="$(jq -r --arg s "$step" '.[$s] // 0' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || echo 0)"
-    if [[ $known =~ ^[0-9]+$ && $known -gt 0 ]]; then
+    had="$(jq -r --arg s "${step}_skips" '.[$s] // ""' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || true)"
+    if [[ $known =~ ^[0-9]+$ && $known -gt 0 && -n $want && $had == "$want" ]]; then
       progress seed "$step" "$known"
       log_file "using the last backup's size for $step ($known bytes)"
       return 0
@@ -996,9 +1010,11 @@ cmd_backup() {
   # size is already here. A home-only run must not wipe a real OS size.
   # Remembering the size is not the backup: a failure here still finishes.
   local sizes_file="$OMARCHY_TM_STATE/last-sizes.json"
-  [[ -f $sizes_file ]] || echo '{}' >"$sizes_file"
+  jq empty "$sizes_file" 2>/dev/null || echo '{}' >"$sizes_file"
   jq --argjson os "$size_os" --argjson home "$size_home" \
-    'if $os > 0 then .os = $os else . end | if $home > 0 then .home = $home else . end' \
+    --arg os_skips "$(skip_list_id "$EX_OS")" --arg home_skips "$(skip_list_id "$EX_HOME")" \
+    'if $os > 0 then .os = $os | .os_skips = $os_skips else . end
+     | if $home > 0 then .home = $home | .home_skips = $home_skips else . end' \
     "$sizes_file" >"$sizes_file.tmp" && chmod 644 "$sizes_file.tmp" && mv "$sizes_file.tmp" "$sizes_file" \
     || log_file "couldn't remember this backup's size for next time"
   # Saved as a restore point: nothing left to resume.
