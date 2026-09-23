@@ -658,30 +658,16 @@ def connect_pi() -> bool:
 
     gum_style("--foreground", "8", "Looking for your Pi...")
     # A network cable usually connects by itself within a few seconds.
-    wifi_cancelled = False
     if not wait_online(8):
         gum_style("--foreground", "8", "This computer isn't online yet.")
-        if not wifi_setup():
-            wifi_cancelled = True
-            gum_style("--foreground", "3", "Wi-Fi was cancelled, so Tailscale was not tried.")
+        wifi_setup()
     host = find_pi(tailscale_up=False)
-    skipped_tailscale = False
-    if host is None and online() and not wifi_cancelled:
-        choice = gum_choose(
-            ["Log in to Tailscale", "Not now"],
-            header="The Pi is not on this network",
-        )
-        if choice == "Log in to Tailscale" and tailscale_up():
-            host = find_pi(tailscale_up=True)
-        else:
-            skipped_tailscale = True
+    if host is None and online() and tailscale_up():
+        host = find_pi(tailscale_up=True)
     if host is None:
         gum_style("--foreground", "1", "Couldn't reach your Pi.")
-        if wifi_cancelled or skipped_tailscale:
-            gum_style("--foreground", "8", "Tailscale was not tried.")
-        else:
-            gum_style("--foreground", "8", "Check it's switched on, that this computer is online, and (away from")
-            gum_style("--foreground", "8", "home) that you logged in to Tailscale with the same account as the Pi.")
+        gum_style("--foreground", "8", "Check it's switched on, that this computer is online, and (away from")
+        gum_style("--foreground", "8", "home) that you logged in to Tailscale with the same account as the Pi.")
         return False
     PI_HOST = host
     gum_style("--foreground", "2", f"  Found your Pi at {host}.")
