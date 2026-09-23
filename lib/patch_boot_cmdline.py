@@ -11,7 +11,6 @@ objcopy is taken from the restored OS (Arch ISO rescue has no binutils).
 from __future__ import annotations
 
 import argparse
-import os
 import re
 import shutil
 import subprocess

@@ -117,7 +117,7 @@ cmd_run() {
   # flight means wait for the next tick, never elbow in alongside it.
   local pidf other
   pidf="$(pid_file)"
-  other="$(tr -d '[:space:]' <"$pidf" 2>/dev/null || true)"
+  other="$(tr -d '[:space:]' 2>/dev/null <"$pidf" || true)"
   # backup_pid_alive, not pid_alive: a recycled process number used to look
   # like a backup that never ended, and automatic backups then stopped
   # happening at all until the next reboot.

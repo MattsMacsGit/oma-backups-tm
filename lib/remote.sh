@@ -75,7 +75,7 @@ remote_pick_addr() {
   local now cached_at cached a
   now=$(date +%s)
   if [[ -r $OMA_REMOTE_PICK ]]; then
-    read -r cached_at cached <"$OMA_REMOTE_PICK" 2>/dev/null || true
+    read -r cached_at cached 2>/dev/null <"$OMA_REMOTE_PICK" || true
     if [[ -n ${cached:-} && ${cached_at:-0} =~ ^[0-9]+$ ]] &&
       ((now - cached_at < OMA_REMOTE_PICK_TTL)); then
       printf '%s' "$cached"
