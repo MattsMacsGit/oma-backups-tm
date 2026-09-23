@@ -755,6 +755,14 @@ refresh_root_copy() {
     "$OMARCHY_TM_ROOT/" "$OMA_ROOT_COPY/"
   chown -R root:root "$OMA_ROOT_COPY"
   chmod -R go-w "$OMA_ROOT_COPY"
+  # install.sh only ever put `oma-backups` in the user's own ~/.local/bin,
+  # which is not on root's PATH — so every `sudo oma-backups ...` in the
+  # README and in every set of instructions died with "command not found",
+  # while the identical command without sudo worked. Root's copy gets a name
+  # on root's PATH, so the command is the same command either way.
+  for n in oma-backups omarchy-backups; do
+    ln -sfn "$OMA_ROOT_COPY/omarchy-backups" "/usr/local/bin/$n"
+  done
 }
 
 # Desktop notification for the logged-in user, even from the root timer.

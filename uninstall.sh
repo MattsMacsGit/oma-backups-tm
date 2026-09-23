@@ -64,6 +64,10 @@ if compgen -G "/etc/systemd/system/oma-backups-*" >/dev/null || [[ -d /usr/local
     sudo rm -f /etc/udev/rules.d/99-oma-backups.rules &&
       sudo udevadm control --reload >/dev/null 2>&1 || true
   fi
+  # Only our own links, and only if that is still what they are.
+  for n in /usr/local/bin/oma-backups /usr/local/bin/omarchy-backups; do
+    [[ -L $n && $(readlink -f "$n") == /usr/local/lib/oma-backups/* ]] && sudo rm -f "$n"
+  done
   sudo rm -rf /usr/local/lib/oma-backups ||
     echo "  could not remove it — remove yourself: sudo rm -rf /usr/local/lib/oma-backups"
 fi
