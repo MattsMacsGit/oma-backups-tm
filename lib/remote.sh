@@ -117,13 +117,17 @@ note_pi_gate() {
   # 0 means we never heard a version (Pi off, SSH down). That is not
   # "the Pi is old", and saying so every hour would be a false alarm.
   ((v > 0)) || return 0
-  ((v >= OMA_GATE_WANT)) || behind=true
-  mkdir -p "$(dirname "$f")"
+  if ((v < OMA_GATE_WANT)); then
+    behind=true
+  fi
+  # A note about the Pi must never stop the backup. mkdir/jq can fail, and
+  # this function used to abort the whole run: `behind` is the word true or
+  # false, and `((behind))` with `set -u` looks that word up as a variable.
+  mkdir -p "$(dirname "$f")" 2>/dev/null || return 0
   jq -n --argjson v "$v" --argjson want "$OMA_GATE_WANT" --argjson behind "$behind" \
-    '{version: $v, want: $want, behind: $behind}' >"$f.tmp"
-  chmod 644 "$f.tmp"
-  mv "$f.tmp" "$f"
-  ((behind)) || return 0
+    '{version: $v, want: $want, behind: $behind}' >"$f.tmp" \
+    && chmod 644 "$f.tmp" && mv "$f.tmp" "$f" || return 0
+  [[ $behind == true ]] || return 0
   warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}. One session can still lock the disk out from under another." || true
   gum style --foreground 8 "  On the Pi, from a copy of this same tree: sudo ./pi/pi-setup.sh --update" || true
   gum style --foreground 8 "  The curl command installs main, which is older than this tree." || true
