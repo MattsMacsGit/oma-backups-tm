@@ -457,7 +457,11 @@ Panel {
               Button {
                 id: backupBtn
                 width: parent.width
-                text: svc.backupIncomplete ? "Resume backup" : "Backup now"
+                // "Resume" belongs to a backup that was interrupted and can
+                // carry on. The only press available while a restore has this
+                // paused is a Ctrl-held forced one, which starts a fresh
+                // backup of what is here -- nothing is being resumed.
+                text: (svc.backupIncomplete && !root.blockedByRestore) ? "Resume backup" : "Backup now"
                 // Greyed out while this system is missing its files (lit again
                 // for as long as Ctrl is held), and while a restore point is
                 // open for browsing (no override — press Done).
@@ -562,7 +566,11 @@ Panel {
               }
             }
             Text {
+              // Automatic backups really are off until the files are back --
+              // the hourly check refuses, and says so in the log. Naming a
+              // time they will happen at is just wrong.
               visible: svc.nextBackupText !== "" && !svc.backupRunning && !svc.launchedBackup
+                && !root.blockedByRestore
               width: parent.width
               horizontalAlignment: Text.AlignHCenter
               text: svc.nextBackupText
@@ -645,7 +653,7 @@ Panel {
                   : svc.restoringFiles
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
-                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restoreProgress)
                   : svc.filesDone
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
@@ -850,7 +858,8 @@ Panel {
                     Button {
                       visible: rpKeptRow
                       text: svc.restoreKeptTs === snapId
-                        ? (svc.browsePhase === "opening" ? "Opening…" : svc.restorePercent + "%")
+                        ? (svc.browsePhase === "opening" ? "Opening…"
+                          : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
                         : "Restore"
                       bordered: true
                       foreground: root.kept

@@ -237,6 +237,17 @@ Item {
   property string partialSnapshot: ""
   property bool restoringFiles: false
   property int restorePercent: 0
+  // rsync says nothing at all while it works out what it has to fetch, and on
+  // a big restore that is minutes of the panel reading "0%" as though it were
+  // stuck. Saying so is honest, and --no-inc-recursive below means the figure
+  // that follows is a share of the WHOLE job rather than of however much it
+  // happened to have looked at by then.
+  property bool restoreCounting: false
+  property string restoreCopied: ""
+  readonly property string restoreProgress: root.restoreCounting
+    ? "working out how much to bring back…"
+    : root.restorePercent + "%"
+      + (root.restoreCopied === "" ? "" : "  ·  " + root.restoreCopied + " so far")
   // What the quick restore left in the system area (AI models), still to put
   // back, and whether the files themselves are back already.
   property int skippedSystem: 0
@@ -257,7 +268,7 @@ Item {
     }
     if (root.filesDone) return
     root.restoringFiles = true
-    root.restorePercent = 0
+    root.restoreReset()
     browse(root.partialSnapshot, "restore")
   }
 
@@ -289,9 +300,16 @@ Item {
     // Straight on to the files, unless they're already back.
     if (!root.filesDone && root.partialSnapshot !== "") {
       root.restoringFiles = true
-      root.restorePercent = 0
+      root.restoreReset()
       browse(root.partialSnapshot, "restore")
     }
+  }
+
+  // Everything the panel shows about a restore in flight, back to the start.
+  function restoreReset() {
+    root.restorePercent = 0
+    root.restoreCounting = true
+    root.restoreCopied = ""
   }
 
   function stopRestoringFiles() {
@@ -378,7 +396,7 @@ Item {
     if (!root.isKept(ts) || !root.linked || root.restoringFiles) return
     root.restoreKeptTs = ts
     root.restoringFiles = true
-    root.restorePercent = 0
+    root.restoreReset()
     root.browse(ts, "restore")
   }
 
@@ -1033,7 +1051,10 @@ Item {
         browsePoll.interval = 2000
         if (root.browseMode === "restore") {
           // Only what's missing: never overwrite anything changed since.
-          var cmd = ["rsync", "-a", "--ignore-existing", "--info=progress2"]
+          // --no-inc-recursive: count the whole job before starting it, so the
+          // percentage means what someone watching it assumes it means.
+          var cmd = ["rsync", "-a", "--ignore-existing", "--no-inc-recursive",
+            "--info=progress2"]
           // Going back for what was left behind leaves nothing out — that is
           // the whole point of the trip.
           if (root.restoreKeptTs === "")
@@ -1060,8 +1081,12 @@ Item {
     stdout: SplitParser {
       splitMarker: "\r"
       onRead: function (line) {
-        var m = /\s(\d{1,3})%\s/.exec(line)
-        if (m) root.restorePercent = parseInt(m[1], 10)
+        // "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
+        var m = /^\s*([\d,]+)\s+(\d{1,3})%/.exec(line)
+        if (!m) return
+        root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
+        root.restorePercent = parseInt(m[2], 10)
+        root.restoreCounting = false
       }
     }
     onExited: function (code) {
