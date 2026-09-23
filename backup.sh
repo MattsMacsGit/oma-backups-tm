@@ -901,13 +901,25 @@ cmd_backup() {
   if ! is_done esp; then
     step "Backing up the boot partition"
     progress phase "esp"
-    local esp_dest=esp/current
+    local esp_dest=esp/current esp_rc=0
     [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
+    # Same rule as rsync_tree: 23 and 24 are warnings, anything else is a
+    # failed backup. The status used to be thrown away, so a broken boot
+    # copy was still saved as a valid restore point.
+    set +e
     set +o pipefail
     rsync "${RSYNC_RSH[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
       /boot/ "$(d_target "$esp_dest")/" \
-      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp || true
+      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp
+    esp_rc=${PIPESTATUS[0]}
     set -o pipefail
+    set -e
+    if [[ $esp_rc -ne 0 && $esp_rc -ne 23 && $esp_rc -ne 24 ]]; then
+      fail_backup "$(rsync_failure_text "$esp_rc")"
+    fi
+    if [[ $esp_rc -ne 0 ]]; then
+      warn "rsync boot files finished with warnings (exit $esp_rc) — restore point will still be saved"
+    fi
     step_done esp
   fi
 
