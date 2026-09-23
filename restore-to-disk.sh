@@ -372,7 +372,7 @@ fi
 
 log "rsync OS snapshot"
 rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
-  --exclude=swap --exclude=swapfile --exclude=tmp --exclude=var/tmp "${os_skip[@]}" \
+  --exclude=/swap --exclude=/swapfile --exclude=/tmp --exclude=/var/tmp "${os_skip[@]}" \
   "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
 log "rsync home snapshot ($LEVEL)"
 # What a quick restore leaves in each home for "Restore my files" to bring
