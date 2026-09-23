@@ -547,6 +547,37 @@ else
   log "WARNING: limine-mkinitcpio failed — will patch UKI/limine.conf in place"
 fi
 
+# limine-install takes no disk path. A path makes it print usage and exit 0,
+# having changed nothing. Run on the machine you booted, it installs onto
+# that machine's own boot partition — the rescue stick — so it only runs
+# inside the new system, where /boot is this disk. It can rewrite boot
+# files (and its own hooks can rebuild the UKI), so the check below is
+# the last thing that writes the UKI and limine.conf.
+log "installing Limine onto the new disk"
+if arch-chroot "$NEW_ROOT" limine-install; then
+  log "limine-install finished"
+else
+  log "limine-install did not finish — the fallback boot file still has to be in place"
+fi
+
+mkdir -p "$NEW_ESP/EFI/BOOT" "$NEW_ESP/EFI/limine"
+if [[ ! -f $NEW_ESP/EFI/BOOT/BOOTX64.EFI ]]; then
+  for efi_src in \
+    "$NEW_ROOT/usr/share/limine/BOOTX64.EFI" \
+    /usr/share/limine/BOOTX64.EFI \
+    "$NEW_ROOT/usr/share/limine/limine-uefi.efi" \
+    /usr/share/limine/limine-uefi.efi
+  do
+    if [[ -f $efi_src ]]; then
+      cp "$efi_src" "$NEW_ESP/EFI/BOOT/BOOTX64.EFI"
+      cp "$efi_src" "$NEW_ESP/EFI/limine/limine-uefi.efi" 2>/dev/null || true
+      break
+    fi
+  done
+fi
+[[ -f $NEW_ESP/EFI/BOOT/BOOTX64.EFI ]] ||
+  die "restored disk has no EFI/BOOT/BOOTX64.EFI, so a normal UEFI PC would not boot it. Restore aborted."
+
 # Boot reads the UKI .cmdline and ESP limine.conf, not /etc/default/limine.
 # Official Arch ISO rescue has no binutils; objcopy comes from this chroot.
 # Run unconditionally. As well as pointing the boot entry at this disk's
@@ -564,22 +595,20 @@ if ! "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/patch_boot_cmdline.py" \
 fi
 log "boot cmdline verified PARTUUID=$NEW_PARTUUID"
 
-if command -v limine-install >/dev/null; then
-  limine-install "$TARGET" || true
-fi
-arch-chroot "$NEW_ROOT" bash -lc "limine-install $TARGET || limine bios-install $TARGET || true" || true
-mkdir -p "$NEW_ESP/EFI/BOOT" "$NEW_ESP/EFI/limine"
-for efi_src in \
-  /usr/share/limine/BOOTX64.EFI \
-  "$NEW_ROOT/usr/share/limine/BOOTX64.EFI" \
-  /usr/share/limine/limine-uefi.efi
-do
-  if [[ -f $efi_src ]]; then
-    cp "$efi_src" "$NEW_ESP/EFI/BOOT/BOOTX64.EFI"
-    cp "$efi_src" "$NEW_ESP/EFI/limine/limine-uefi.efi" 2>/dev/null || true
-    break
+# The entry lives in this computer's firmware, not on the disk. Another PC
+# uses EFI/BOOT/BOOTX64.EFI. Failure here does not undo a checked UKI.
+if [[ -d /sys/firmware/efi ]] && command -v efibootmgr >/dev/null; then
+  esp_partuuid="$(blkid -s PARTUUID -o value "$P1" 2>/dev/null || true)"
+  if [[ -n $esp_partuuid ]] && efibootmgr | grep -Fi "$esp_partuuid" | grep -Fqi 'BOOTX64.EFI'; then
+    log "firmware already has a boot entry for this disk"
+  elif efibootmgr --create --disk "$TARGET" --part 1 --label "Omarchy" --loader '\EFI\BOOT\BOOTX64.EFI' >/dev/null; then
+    log "firmware boot entry created for EFI/BOOT/BOOTX64.EFI"
+  else
+    log "Firmware boot entry was not created. In the firmware menu, boot EFI/BOOT/BOOTX64.EFI on this disk."
   fi
-done
+else
+  log "This computer offered no firmware boot list. In the firmware menu, boot EFI/BOOT/BOOTX64.EFI on this disk."
+fi
 
 sync
 umount "$NEW_ROOT/boot" || true
@@ -593,6 +622,9 @@ cryptsetup close "$MAPPER" || true
 log "restore complete."
 log "Reboot, pick this disk in firmware, unlock LUKS with the password you just set."
 log "TPM auto-unlock is not restored — enroll it again after login if you use it."
+log "Secure Boot will refuse the patched boot file until Secure Boot is off, or the boot file is signed again."
+log "A computer that only does BIOS will not boot this disk. It needs UEFI."
+log "If the firmware menu does not list this disk, boot the file EFI/BOOT/BOOTX64.EFI on it."
 if ((${#SYSTEM_MODELS[@]})); then
   log "Your AI models (Ollama) were left on the backup to keep this quick. \"Restore my files\" puts them back."
 fi

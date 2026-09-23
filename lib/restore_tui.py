@@ -1012,6 +1012,16 @@ def finished(snap: dict, level: str) -> int:
         ):
             gum_style("--foreground", "8", line)
     out()
+    for line in (
+        "  TPM auto-unlock is not restored. Enroll it again after login if you use it.",
+        "  Secure Boot will refuse the patched boot file until Secure Boot is off,",
+        "  or the boot file is signed again.",
+        "  A computer that only does BIOS will not boot this disk. It needs UEFI.",
+        "  If the firmware menu does not list this disk, boot the file",
+        "  EFI/BOOT/BOOTX64.EFI on it.",
+    ):
+        gum_style("--foreground", "8", line)
+    out()
     restart = "Restart now (take the USB out once the screen goes black)"
     choice = gum_choose([restart, "Open a command line instead"], header="What next?")
     if choice == restart:
