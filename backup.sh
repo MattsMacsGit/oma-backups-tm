@@ -152,10 +152,15 @@ resume_start() {
   chmod 644 "$RESUME_FILE" 2>/dev/null || true
 }
 
+# A finished part keeps rsync's closing figures for the whole tree (its size
+# and file count), so a resumed backup still has them for the restore
+# point's size and its manifest.
 step_done() {
-  local name=$1 size=${2:-0}
+  local name=$1 size=${2:-0} files=${3:-0}
   [[ $size =~ ^[0-9]+$ ]] || size=0
-  jq --arg n "$name" --argjson s "$size" '.done += [$n] | .sizes[$n] = $s' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
+  [[ $files =~ ^[0-9]+$ ]] || files=0
+  jq --arg n "$name" --argjson s "$size" --argjson f "$files" \
+    '.done += [$n] | .sizes[$n] = $s | .files[$n] = $f' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
     chmod 644 "$RESUME_FILE.tmp" && mv "$RESUME_FILE.tmp" "$RESUME_FILE"
 }
 
@@ -167,51 +172,45 @@ step_size() {
   jq -r --arg n "$1" '.sizes[$n] // 0' "$RESUME_FILE" 2>/dev/null || echo 0
 }
 
-# ---- Progress ---------------------------------------------------------------
-# The panel shows two bars: the step running now, and the whole backup. The
-# overall one is weighted by how much data each step has to move, so a huge
-# "your files" step doesn't sit at "1 of 4" for hours. A resumed run marks
-# what is already finished so the bar starts where the last attempt got to.
-plan_progress() {
-  local steps=() item name finished json='[]'
-  # Getting ready and snapshotting have both happened by the time the plan is
-  # built, so they go in as finished: their share of the run is time already
-  # spent, and the overall bar should say so rather than owing it twice.
-  steps+=("prepare:1")
-  [[ $RESUMED == 1 ]] || steps+=("snapshot:1")
-  steps+=("measure:0")
-  if [[ $HOME_ONLY != 1 ]]; then
-    steps+=("os:$(is_done os && echo 1 || echo 0)")
-  fi
-  steps+=("home:$(is_done home && echo 1 || echo 0)")
-  steps+=("esp:$(is_done esp && echo 1 || echo 0)")
-  steps+=("finalize:0")
-  steps+=("tidy:0")
-  for item in "${steps[@]}"; do
-    name=${item%%:*}
-    finished=false
-    [[ ${item##*:} == 1 ]] && finished=true
-    json="$(jq -c --arg n "$name" --argjson d "$finished" '. + [{name: $n, done: $d}]' <<<"$json")"
-  done
-  progress plan "$(jq -cn --argjson s "$json" '{steps: $s}')"
+step_files() {
+  jq -r --arg n "$1" '.files[$n] // 0' "$RESUME_FILE" 2>/dev/null || echo 0
 }
 
-# How much a step has to get through, so both bars have a real denominator
-# instead of rsync's percentage against a file list it is still building.
-# A dry run against an empty folder: the source side only, no file contents
-# read, nothing sent over the network, and the same skip list the real copy
-# uses — so the total is what will actually be copied, not what du would say.
-measure_tree() {
-  local src=$1 ex=${2:-} step=$3 empty
-  is_dry_run && return 0
-  empty="$(mktemp -d)" || return 0
-  local args=(-a --dry-run --stats --info=flist2)
-  [[ -n $ex ]] && args+=(--exclude-from="$ex")
-  set +o pipefail
-  rsync "${args[@]}" "$src"/ "$empty"/ 2>&1 |
-    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" measure "$step" || true
-  set -o pipefail
-  rmdir "$empty" 2>/dev/null || true
+# ---- Progress ---------------------------------------------------------------
+# One bar at a time, numbered: "Step 4 of 9 · Copying your files". Each tree
+# is checked before it is copied -- a dry run of the very copy that follows,
+# against the real backup disk -- so the copy's bar is measured against what
+# will actually be sent, not against the size of the whole tree. Steps with
+# nothing to measure (unlocking, saving the restore point) are a spinner.
+# The list is made once, before anything is shown, so the numbering never
+# changes part way: a home-only backup has no system steps, and a resumed one
+# leaves out the parts an earlier attempt finished.
+progress_steps() {
+  local resume_ts=$1
+  local -a s=()
+  if [[ $DEST_REMOTE == 1 ]] || ! findmnt -n "$MNT" >/dev/null 2>&1; then
+    s+=(unlock)
+  fi
+  if [[ -n $resume_ts ]]; then
+    s+=("prepare=Carrying on where it stopped")
+  else
+    s+=("prepare=Taking a snapshot of this computer")
+  fi
+  # A fresh run's resume record is thrown away, so only a resumed one counts.
+  if [[ $HOME_ONLY != 1 ]] && ! { [[ -n $resume_ts ]] && is_done os; }; then
+    s+=(os-check os)
+  fi
+  [[ -n $resume_ts ]] && is_done home || s+=(home-check home)
+  # Boot files are small: their check shows under the copy step.
+  [[ -n $resume_ts ]] && is_done esp || s+=(esp)
+  rescue_refresh_wanted && s+=(rescue)
+  s+=(finalize tidy)
+  progress steps "${s[@]}"
+}
+
+# The rescue partitions can only be refreshed with the USB plugged in here.
+rescue_refresh_wanted() {
+  [[ $DEST_REMOTE != 1 && $(cfg '.backup.refresh_rescue_boot') == true ]]
 }
 
 # Where this backup goes: the backup USB plugged into this laptop, or (once
@@ -438,14 +437,16 @@ mkdir -p $SRC_TOP
 mount -o subvolid=5 $ROOT_DEV $SRC_TOP
 btrfs subvolume snapshot -r $SRC_TOP/@     $SRC_TOP/$SNAP_SUB/os-$ts
 btrfs subvolume snapshot -r $SRC_TOP/@home $SRC_TOP/$SNAP_SUB/home-$ts
-rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_OS \\
-  $SRC_TOP/$SNAP_SUB/os-$ts/   $MNT/os/current/
-rsync -aHAX --numeric-ids --delete --info=progress2 --exclude-from=$EX_HOME \\
-  $SRC_TOP/$SNAP_SUB/home-$ts/ $MNT/home/current/
-rsync -a --delete --partial --info=progress2 /boot/ $MNT/esp/current/
+# each rsync runs twice: first with -n (checking what it will send), then for real
+rsync -aHAX --numeric-ids --delete --delete-excluded --partial --exclude-from=$EX_OS \\
+  $RSYNC_PROGRESS_TEXT $SRC_TOP/$SNAP_SUB/os-$ts/   $MNT/os/current/
+rsync -aHAX --numeric-ids --delete --delete-excluded --partial --exclude-from=$EX_HOME \\
+  $RSYNC_PROGRESS_TEXT $SRC_TOP/$SNAP_SUB/home-$ts/ $MNT/home/current/
+rsync -a --delete --partial $RSYNC_PROGRESS_TEXT /boot/ $MNT/esp/current/
 btrfs subvolume snapshot -r $MNT/os/current   $MNT/os/$ts
 btrfs subvolume snapshot -r $MNT/home/current $MNT/home/$ts
 btrfs subvolume snapshot -r $MNT/esp/current  $MNT/esp/$ts
+# meta/$ts.json: each part's size and file count, for a restore's progress bars
 # also refresh rescue EFI from this /boot (so updates stay restorable)
 EOF
 }
@@ -483,55 +484,108 @@ rsync_link_flags() {
   fi
 }
 
-# Short fingerprint of an exclude file, so a remembered size is only used
-# with the skip list it was measured under. Empty when there is no file.
-skip_list_id() {
-  [[ -n ${1:-} && -r $1 ]] || return 0
-  sha256sum <"$1" | cut -c1-16
-}
-
-# Parse rsync progress2 on stderr without a PTY and without du.
-# Copy one tree. Sets TREE_SIZE to rsync's "Total file size" (the restore
-# point's size for this part), so nothing ever has to walk the tree again.
-TREE_SIZE=0
-rsync_tree() {
-  local src=$1 dest=$2 ex=$3 label=$4
-  progress phase "$label"
-  if is_dry_run; then
-    echo "[dry-run] rsync -aHAX --numeric-ids --delete --partial --info=progress2 --exclude-from=$ex $src/ $dest/"
-    return 0
-  fi
-  step "Backing up $label — live progress in the plugin panel"
-  [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
-  local stats
-  stats="$(mktemp)"
+# One rsync of a tree, through lib/progress.py. "check" is the same command
+# with -n: nothing is written, and it reports what the real one would send.
+TREE_FLAGS=()
+TREE_RC=0
+tree_rsync() {
+  local mode=$1 tree=$2 src=$3 dest=$4 stats=${5:-}
+  local -a dry_run=()
+  [[ $mode == check ]] && dry_run=(-n)
   set +e
   set +o pipefail
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
-  # --partial: a file cut off mid-copy continues next time instead of
-  # starting over (safe: `current` only becomes a restore point on success).
-  # --no-inc-recursive: build the whole file list before copying, so rsync
-  # knows the real total from its first progress line. Folder-by-folder it
-  # reports a total that keeps growing, which is why the bar could only ever
-  # say "working" through the longest step of the backup.
-  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --delete --delete-excluded --partial \
-    --no-inc-recursive --info=progress2,name0,flist2 --stats \
-    --exclude-from="$ex" "$src"/ "$dest"/ \
-    2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream "$label" "$stats"
-  local rc=${PIPESTATUS[0]}
-  TREE_SIZE="$(cat "$stats" 2>/dev/null || echo 0)"
-  rm -f "$stats"
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${TREE_FLAGS[@]}" "${dry_run[@]}" "${RSYNC_PROGRESS[@]}" \
+    "$src"/ "$dest"/ \
+    2>&1 | OMARCHY_TM_LOG="$OMARCHY_TM_LOG" \
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$mode" "$tree" ${stats:+"$stats"}
+  TREE_RC=${PIPESTATUS[0]}
   set -o pipefail
   set -e
-  # 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
-  # None of those should abort the restore point.
-  if [[ $rc -ne 0 && $rc -ne 23 && $rc -ne 24 ]]; then
-    fail_backup "$(rsync_failure_text "$rc")"
+}
+
+tree_name() {
+  case $1 in
+    os) echo "system files" ;;
+    home) echo "your files" ;;
+    esp) echo "boot files" ;;
+    *) echo "$1" ;;
+  esac
+}
+
+# 0 = ok, 23 = some files skipped (xattrs/ACLs), 24 = vanished during copy.
+# None of those should abort the restore point.
+tree_rc_ok() {
+  local tree=$1 mode=$2
+  if [[ $TREE_RC -ne 0 && $TREE_RC -ne 23 && $TREE_RC -ne 24 ]]; then
+    fail_backup "$(rsync_failure_text "$TREE_RC")"
   fi
-  if [[ $rc -ne 0 ]]; then
-    warn "rsync $label finished with warnings (exit $rc) — restore point will still be saved"
+  if [[ $TREE_RC -ne 0 && $mode == copy ]]; then
+    warn "rsync $(tree_name "$tree") finished with warnings (exit $TREE_RC) — restore point will still be saved"
+  elif [[ $TREE_RC -ne 0 ]]; then
+    log_file "checking $(tree_name "$tree") finished with warnings (exit $TREE_RC)"
   fi
-  progress set "$label" 100
+}
+
+# Check one tree, then copy it. Sets TREE_SIZE and TREE_FILES to rsync's
+# closing figures for the whole tree (the restore point's size for this part,
+# and its file count), so nothing ever has to walk the tree again.
+TREE_SIZE=0
+TREE_FILES=0
+rsync_tree() {
+  local src=$1 dest=$2 ex=$3 tree=$4
+  if [[ $tree == esp ]]; then
+    TREE_FLAGS=(-a --delete --partial)
+  else
+    # --partial: a file cut off mid-copy continues next time instead of
+    # starting over (safe: `current` only becomes a restore point on success).
+    TREE_FLAGS=(-aHAX --numeric-ids --delete --delete-excluded --partial --exclude-from="$ex")
+  fi
+  if is_dry_run; then
+    echo "[dry-run] rsync -n ${TREE_FLAGS[*]} $RSYNC_PROGRESS_TEXT $src/ $dest/"
+    echo "[dry-run] rsync ${TREE_FLAGS[*]} $RSYNC_PROGRESS_TEXT $src/ $dest/"
+    return 0
+  fi
+  [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
+  step "Checking $(tree_name "$tree") for changes"
+  tree_rsync check "$tree" "$src" "$dest"
+  tree_rc_ok "$tree" check
+  step "Backing up $(tree_name "$tree") — live progress in the plugin panel"
+  local stats
+  stats="$(mktemp)"
+  tree_rsync copy "$tree" "$src" "$dest" "$stats"
+  TREE_SIZE="$(jq -r '.bytes // 0' "$stats" 2>/dev/null || echo 0)"
+  TREE_FILES="$(jq -r '.files // 0' "$stats" 2>/dev/null || echo 0)"
+  rm -f "$stats"
+  tree_rc_ok "$tree" copy
+}
+
+# What each part of a restore point holds: {"os": {"bytes", "files"}, ...},
+# from rsync's closing figures for the whole tree (not just what changed this
+# time). A restore onto a new disk sizes its bars by it instead of walking
+# the backup first. Written with plain rsync on a Pi, which every gatekeeper
+# already allows, so an older Pi needs nothing new. Best effort: without it a
+# restore measures instead, so it never fails a backup.
+write_manifest() {
+  local ts=$1 t b f json='{}' tmp
+  for t in os home esp; do
+    is_done "$t" || continue
+    b="$(step_size "$t")" f="$(step_files "$t")"
+    [[ $b =~ ^[0-9]+$ && $b -gt 0 && $f =~ ^[0-9]+$ ]] || continue
+    json="$(jq -c --arg t "$t" --argjson b "$b" --argjson f "$f" '.[$t] = {bytes: $b, files: $f}' <<<"$json")"
+  done
+  [[ $json != '{}' ]] || return 0
+  tmp="$(mktemp)"
+  jq -n --arg ts "$ts" --argjson trees "$json" '{version: 1, timestamp: $ts, trees: $trees}' >"$tmp"
+  chmod 644 "$tmp"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rsync "${RSYNC_RSH[@]}" -p "$tmp" "$(d_target "meta/$ts.json")" 2>>"$OMARCHY_TM_LOG" ||
+      log_file "couldn't save the manifest for $ts on $REMOTE_HOST (a restore will measure instead)"
+    rm -f "$tmp"
+  else
+    mv "$tmp" "$MNT/meta/$ts.json" 2>>"$OMARCHY_TM_LOG" ||
+      { rm -f "$tmp"; log_file "couldn't save the manifest for $ts (a restore will measure instead)"; }
+  fi
 }
 
 # rsync's exit codes mean nothing to most people; say what probably
@@ -825,6 +879,7 @@ d_delete_point() {
     else
       rm -rf "${MNT:?}/esp/$ts"
     fi
+    rm -f "$MNT/meta/$ts.json"
   fi
 }
 
@@ -949,6 +1004,13 @@ cmd_backup() {
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
   rsync_link_flags
+  # Whether this carries on a stopped backup is known before anything is
+  # shown, so the steps are numbered once, for the run this really is. Only
+  # reads: the snapshots it looks for are this system's own.
+  mount_src_top
+  local resume_ts
+  resume_ts="$(resumable_ts)"
+  progress_steps "$resume_ts"
   announce_backup "$ts"
   open_destination
   [[ ${OMARCHY_TM_YES:-0} == 1 ]] || confirm "Run this backup?"
@@ -957,13 +1019,9 @@ cmd_backup() {
   trap 'fail_backup "unexpected failure"' ERR
   progress phase "prepare"
 
-  mount_src_top
-  local resume_ts
-  resume_ts="$(resumable_ts)"
   if [[ -n $resume_ts ]]; then
     ts=$resume_ts
     RESUMED=1
-    progress phase "resume"
     step "Carrying on the backup from $ts where it stopped"
   else
     rm -f "$RESUME_FILE"
@@ -989,7 +1047,6 @@ cmd_backup() {
   d_mkdir meta
 
   if [[ $RESUMED != 1 ]]; then
-    progress phase "snapshot"
     step "Snapshotting the current system"
     if [[ $HOME_ONLY != 1 ]]; then
       run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@" "$SRC_TOP/$SNAP_SUB/os-$ts"
@@ -998,75 +1055,24 @@ cmd_backup() {
     resume_start "$ts"
   fi
 
-  # Both bars need to know the size of the job before the copying starts.
-  # Steps already finished by an earlier attempt are not measured again.
-  plan_progress
-  progress phase "measure"
-  step "Working out how much there is to copy"
-  # An incremental reuses the previous run's size and skips the dry-run
-  # walk. The copy still walks the tree once, and rsync still counts the
-  # files exactly; only the byte total is last time's. That size is only
-  # trusted with the skip list it was measured under: un-skipping a big
-  # folder would otherwise leave the bar hundreds of GB short.
-  seed_or_measure() {
-    local step=$1 src=$2 ex=$3 known=0 want had
-    want="$(skip_list_id "$ex")"
-    known="$(jq -r --arg s "$step" '.[$s] // 0' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || echo 0)"
-    had="$(jq -r --arg s "${step}_skips" '.[$s] // ""' "$OMARCHY_TM_STATE/last-sizes.json" 2>/dev/null || true)"
-    if [[ $known =~ ^[0-9]+$ && $known -gt 0 && -n $want && $had == "$want" ]]; then
-      progress seed "$step" "$known"
-      log_file "using the last backup's size for $step ($known bytes)"
-      return 0
-    fi
-    measure_tree "$src" "$ex" "$step"
-  }
-  if [[ $HOME_ONLY != 1 ]]; then
-    if ! is_done os; then
-      seed_or_measure os "$SRC_TOP/$SNAP_SUB/os-$ts" "$EX_OS"
-    fi
-  fi
-  if ! is_done home; then
-    seed_or_measure home "$SRC_TOP/$SNAP_SUB/home-$ts" "$EX_HOME"
-  fi
-  if ! is_done esp; then
-    measure_tree /boot "" esp
-  fi
-
   if [[ $HOME_ONLY != 1 ]] && ! is_done os; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/os-$ts" "$(d_target os/current)" "$EX_OS" os
-    step_done os "$TREE_SIZE"
+    step_done os "$TREE_SIZE" "$TREE_FILES"
   fi
   if ! is_done home; then
     rsync_tree "$SRC_TOP/$SNAP_SUB/home-$ts" "$(d_target home/current)" "$EX_HOME" home
-    step_done home "$TREE_SIZE"
+    step_done home "$TREE_SIZE" "$TREE_FILES"
   fi
   if ! is_done esp; then
-    step "Backing up the boot partition"
-    progress phase "esp"
-    local esp_dest=esp/current esp_rc=0
+    local esp_dest=esp/current
     [[ $esp_subvol == 1 ]] || { esp_dest="esp/$ts"; d_mkdir "$esp_dest"; }
-    # Same rule as rsync_tree: 23 and 24 are warnings, anything else is a
-    # failed backup. The status used to be thrown away, so a broken boot
-    # copy was still saved as a valid restore point.
-    set +e
-    set +o pipefail
-    rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -a --delete --partial --no-inc-recursive --info=progress2 \
-      /boot/ "$(d_target "$esp_dest")/" \
-      2>&1 | "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" stream esp
-    esp_rc=${PIPESTATUS[0]}
-    set -o pipefail
-    set -e
-    if [[ $esp_rc -ne 0 && $esp_rc -ne 23 && $esp_rc -ne 24 ]]; then
-      fail_backup "$(rsync_failure_text "$esp_rc")"
-    fi
-    if [[ $esp_rc -ne 0 ]]; then
-      warn "rsync boot files finished with warnings (exit $esp_rc) — restore point will still be saved"
-    fi
-    step_done esp
+    # Same rule as the other trees: 23 and 24 are warnings, anything else is
+    # a failed backup, so a broken boot copy is never saved as a restore point.
+    rsync_tree /boot "$(d_target "$esp_dest")" "" esp
+    step_done esp "$TREE_SIZE" "$TREE_FILES"
   fi
 
-  # The rescue partitions can only be refreshed with the USB plugged in here.
-  if [[ $DEST_REMOTE != 1 && $(cfg '.backup.refresh_rescue_boot') == true ]]; then
+  if rescue_refresh_wanted; then
     progress phase "rescue"
     if [[ -x $OMARCHY_TM_ROOT/refresh-rescue.sh ]]; then
       step "Refreshing the rescue USB's boot files"
@@ -1094,17 +1100,9 @@ cmd_backup() {
   size_os="$(step_size os)" size_home="$(step_size home)"
   [[ $size_os =~ ^[0-9]+$ ]] || size_os=0
   [[ $size_home =~ ^[0-9]+$ ]] || size_home=0
-  # Kept for the next incremental, which skips the measuring walk when a
-  # size is already here. A home-only run must not wipe a real OS size.
-  # Remembering the size is not the backup: a failure here still finishes.
-  local sizes_file="$OMARCHY_TM_STATE/last-sizes.json"
-  jq empty "$sizes_file" 2>/dev/null || echo '{}' >"$sizes_file"
-  jq --argjson os "$size_os" --argjson home "$size_home" \
-    --arg os_skips "$(skip_list_id "$EX_OS")" --arg home_skips "$(skip_list_id "$EX_HOME")" \
-    'if $os > 0 then .os = $os | .os_skips = $os_skips else . end
-     | if $home > 0 then .home = $home | .home_skips = $home_skips else . end' \
-    "$sizes_file" >"$sizes_file.tmp" && chmod 644 "$sizes_file.tmp" && mv "$sizes_file.tmp" "$sizes_file" \
-    || log_file "couldn't remember this backup's size for next time"
+  write_manifest "$ts"
+  # Last backup's sizes used to seed the bars; each tree is checked now.
+  rm -f "$OMARCHY_TM_STATE/last-sizes.json"
   # Saved as a restore point: nothing left to resume.
   rm -f "$RESUME_FILE"
 
@@ -1319,11 +1317,11 @@ cmd_browse() {
 #
 # The plugin writes what to leave out to restore-request.json in the user's
 # state folder, starts the unit, and polls $RESTORE_DIR/TS.json:
-#   {"state": "opening"|"copying"|"done"|"error"|"stopped", "line": ..., ...}
-# "line" is rsync's latest progress line, parsed there exactly as before.
+#   {"state": "opening"|"copying"|"done"|"error"|"stopped", "id": ..., ...}
+# While copying, the rest is lib/progress.py's event, the same one a backup
+# shows: step, label, percent, detail.
 RESTORE_DIR="$OMA_RESTORE_DIR"
 RESTORE_STATE=""
-RESTORE_LINE=""
 # The panel's id for this run, echoed back so it never mistakes the last
 # run's "done" for this one's.
 RESTORE_ID=""
@@ -1331,8 +1329,8 @@ RESTORE_ID=""
 restore_state() {
   local state=$1 msg=${2:-} rc=${3:-}
   [[ -n $RESTORE_STATE ]] || return 0
-  jq -n --arg s "$state" --arg l "$RESTORE_LINE" --arg m "$msg" --arg r "$rc" --arg i "$RESTORE_ID" \
-    '{state: $s, line: $l, id: $i} + (if $m != "" then {message: $m} else {} end)
+  jq -n --arg s "$state" --arg m "$msg" --arg r "$rc" --arg i "$RESTORE_ID" \
+    '{state: $s, id: $i} + (if $m != "" then {message: $m} else {} end)
       + (if $r != "" then {rc: ($r | tonumber)} else {} end)' >"$RESTORE_STATE.tmp" 2>/dev/null || return 0
   chmod 644 "$RESTORE_STATE.tmp"
   mv "$RESTORE_STATE.tmp" "$RESTORE_STATE"
@@ -1355,7 +1353,7 @@ restore_cleanup() {
 
 cmd_restore_files() {
   local ts=${1:-} user=${SUDO_USER:-} home group req n i
-  local -a ex=() args=()
+  local -a ex=()
   [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups restore-files TIMESTAMP"
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose files to bring back"
@@ -1401,35 +1399,30 @@ cmd_restore_files() {
     [[ -d $MNT/home/$ts/$user ]] || fail_backup "No copy of your home folder in that restore point."
   fi
 
-  args=(-a --ignore-existing --no-inc-recursive --info=progress2,flist2
-    # As the user, the way the plugin's own copy always came back: never
-    # root's, and never an old uid that means someone else on this machine.
-    --chown="$user:$group")
-  for i in "${ex[@]}"; do [[ -n $i ]] && args+=("--exclude=$i"); done
+  # As the user, the way the plugin's own copy always came back: never
+  # root's, and never an old uid that means someone else on this machine.
+  TREE_FLAGS=(-a --ignore-existing --chown="$user:$group")
+  for i in "${ex[@]}"; do [[ -n $i ]] && TREE_FLAGS+=("--exclude=$i"); done
 
   restore_state copying
   log_file "restoring files from $ts for $user (${#ex[@]} left out)"
-  local last=0 now rc
-  set +e
-  # progress2 rewrites one line with \r; hand the panel the latest of them,
-  # a few times a second rather than for every hundred files counted.
-  stdbuf -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${args[@]}" \
-    "$(d_target "home/$ts/$user")/" "$home/" 2>>"$OMARCHY_TM_LOG" |
-    stdbuf -o0 tr '\r' '\n' | {
-      local l
-      # read empties its variable at the end of input, so the last line is
-      # kept in its own.
-      while IFS= read -r l; do
-        [[ -n $l ]] || continue
-        RESTORE_LINE=$l
-        now=${EPOCHREALTIME/./}
-        if ((now - last >= 300000)); then restore_state copying; last=$now; fi
-      done
-      restore_state copying
-    }
-  rc=${PIPESTATUS[0]}
-  set -e
-  RESTORE_LINE="$(jq -r '.line // empty' "$RESTORE_STATE" 2>/dev/null || true)"
+  # The same two steps as a backup's, and the same bar: a check of what is
+  # missing here (the home folder isn't empty), then the copy, measured
+  # against it. Written into the file the panel polls, carrying its state
+  # and id along.
+  local -x OMARCHY_TM_STATUS_FILE="$RESTORE_STATE" OMA_PROGRESS_EXTRA
+  OMA_PROGRESS_EXTRA="$(jq -cn --arg i "$RESTORE_ID" '{state: "copying", id: $i}')"
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" steps \
+    "files-check=Checking what's missing" "files=Bringing your files back" || true
+  local from rc
+  from="$(d_target "home/$ts/$user")"
+  tree_rsync check files "$from" "$home"
+  rc=$TREE_RC
+  if ((rc == 0 || rc == 23 || rc == 24)); then
+    tree_rsync copy files "$from" "$home"
+    rc=$TREE_RC
+  fi
+  rm -f "$RESTORE_DIR/$ts.plan"
   if ((rc == 0)); then
     restore_state done "" 0
     log_file "files restored from $ts"
@@ -1489,15 +1482,34 @@ cmd_put_back_system() {
     step "Stopping Ollama while its models are copied"
     systemctl stop ollama.service || true
   fi
+  # Checked, then copied, one folder at a time, with the same bar a backup
+  # has, drawn in this terminal. Its own status file: this isn't a backup,
+  # and the panel's must not say one is running.
+  local pdir n=0
+  local -a steps=()
+  pdir="$(mktemp -d)"
+  local -x OMARCHY_TM_STATUS_FILE="$pdir/models.status"
   for rel in "${paths[@]}"; do
-    step "Copying /$rel from $snap"
+    n=$((n + 1))
+    steps+=("m$n-check=Checking /$rel" "m$n=Copying /$rel")
+  done
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" steps "${steps[@]}" || true
+  TREE_FLAGS=(-aHAX --numeric-ids)
+  n=0
+  for rel in "${paths[@]}"; do
+    n=$((n + 1))
+    log_file "copying /$rel from $snap"
     mkdir -p "$(dirname "/$rel")"
-    if ! rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" -aHAX --numeric-ids --info=progress2 \
-      "$(d_target "os/$snap/$rel")"/ "/$rel/"; then
+    tree_rsync check "m$n" "$(d_target "os/$snap/$rel")" "/$rel"
+    if ((TREE_RC == 0 || TREE_RC == 23 || TREE_RC == 24)); then
+      tree_rsync copy "m$n" "$(d_target "os/$snap/$rel")" "/$rel"
+    fi
+    if ((TREE_RC != 0)); then
       warn "Couldn't copy /$rel."
       failed=1
     fi
   done
+  rm -rf "$pdir"
   if ((was_active)); then
     step "Starting Ollama again"
     systemctl start ollama.service || warn "Ollama didn't start again. Try: sudo systemctl start ollama"

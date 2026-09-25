@@ -70,9 +70,13 @@ ready and empty: go through Settings first (what to skip, how often to back up),
 then press **Backup now** when you are ready. The first one copies everything
 and takes a while; later ones only copy what changed.
 
-While it runs, the panel shows two bars: the step running now — how much data
-of how much, how many files of how many, and how long that step has left — and
-underneath, the whole backup, weighted by how much data each step has to move.
+While it runs, the panel shows one step at a time, e.g. "Step 5 of 9 · Copying
+your files", with a bar and the figures under it ("3.2 GB of 11.8 GB"). Before
+each part is copied it is checked against the backup: that works out exactly
+what needs sending, so the copy's bar measures what really moves, not the size
+of everything. Steps with nothing to measure, like unlocking the disk or saving
+the restore point, show a moving bar instead of a made-up number. Restoring
+shows the same steps and bar, in the panel or on the rescue stick's screen.
 
 ## Automatic backups
 

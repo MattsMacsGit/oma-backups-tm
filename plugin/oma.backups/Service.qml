@@ -32,47 +32,30 @@ Item {
     || root.systemPhase === "waiting" || root.browsePhase === "opening"
   readonly property string busyText: root.backupRunning ? root.progressText
     : root.restoringFiles
-    ? (root.restoreOpening ? "Opening the restore point"
-      : root.restoreCounting ? "Working out what to bring back"
-      : "Bringing your files back · " + root.restorePercent + "%")
+    ? (root.restoreOpening ? "Opening the restore point" : root.restoreText)
     : root.systemPhase === "waiting" ? "Putting your AI models back"
     : root.browsePhase === "opening" ? "Opening the restore point"
     : ""
   property bool launchedBackup: false
   property bool sawBackupStatus: false
+  // One step at a time, exactly as lib/progress.py's event says it: which
+  // step of how many, its heading, a bar (or a spinner when there is nothing
+  // to measure) and the line under it ("3.2 GB of 11.8 GB"). Nothing here is
+  // worked out; the panel only draws it.
   property int progressPercent: 0
-  property string progressEta: ""
-  property string progressSpeed: ""
   property string progressPhase: ""
-  // One step at a time (see lib/progress.py): its name, whether it has a real
-  // percentage or is just "working", and a details line (copied / speed / ETA).
+  property int progressStep: 0
+  property int progressOf: 0
   property string progressLabel: ""
   property bool progressBusy: false
   property string progressDetail: ""
-  // The second bar: the whole backup, weighted by how much data each step has
-  // to move (see lib/progress.py), plus what it thinks is left.
-  property int overallPercent: 0
-  property int overallStep: 0
-  property int overallSteps: 0
-  property string overallEta: ""
-  property string overallTotalTime: ""
-  property string elapsedText: ""
-  readonly property bool hasOverall: overallSteps > 0
-  readonly property string overallText: {
-    if (!hasOverall) return ""
-    var s = "Overall  ·  " + overallPercent + "%"
-    if (overallStep > 0) s += "  ·  step " + overallStep + " of " + overallSteps
-    return s
-  }
-  readonly property string overallDetail: {
-    if (overallEta === "") return elapsedText !== "" ? elapsedText + " so far" : ""
-    var s = "about " + overallEta + " left"
-    if (overallTotalTime !== "") s += " of about " + overallTotalTime
-    return s
+  readonly property string progressHeading: {
+    var l = progressLabel || Model.phaseLabel(progressPhase)
+    return progressStep > 0 ? "Step " + progressStep + " of " + progressOf + "  ·  " + l : l
   }
   readonly property string progressText: progressBusy || progressLabel === ""
-    ? (progressLabel || Model.phaseLabel(progressPhase))
-    : progressLabel + "  " + progressPercent + "%"
+    ? progressHeading
+    : progressHeading + "  ·  " + progressPercent + "%"
   property string selectedDisk: ""
   property bool wipeConfirmed: false
   property bool skipLoaded: false
@@ -261,28 +244,29 @@ Item {
   property string partialSource: ""
   readonly property bool partialSourceHere: sourceReachable(partialSource)
   property bool restoringFiles: false
+  // The same event a backup shows (lib/progress.py): "Step 1 of 2 ·
+  // Checking what's missing", then "Step 2 of 2 · Bringing your files back",
+  // each with its own bar and the line under it. A spinner until there is a
+  // real figure (rsync still listing the restore point).
   property int restorePercent: 0
-  // rsync says nothing at all while it works out what it has to fetch, and on
-  // a big restore that is minutes of the panel reading "0%" as though it were
-  // stuck. Saying so is honest, and --no-inc-recursive below means the figure
-  // that follows is a share of the WHOLE job rather than of however much it
-  // happened to have looked at by then.
   property bool restoreCounting: false
-  // ...but "working out" alone, for minutes, read as stuck: from a Pi every
-  // file is a network round trip. rsync's flist2 counts as it goes, so say it.
-  property int restoreChecked: 0
-  property string restoreCopied: ""
-  property string restoreSpeed: ""
-  property string restoreEta: ""
-  // Nothing to measure yet (opening the restore point, or rsync still
-  // counting): the bar moves instead of showing a made-up number, as the
-  // backup's does.
+  property int restoreStep: 0
+  property int restoreOf: 0
+  property string restoreLabel: ""
+  property string restorePhase: ""
+  property string restoreDetailText: ""
   readonly property bool restoreBusy: root.restoreOpening || root.restoreCounting
-  readonly property string restoreDetail: root.restoreOpening ? ""
-    : root.restoreCounting
-    ? (root.restoreChecked > 0 ? root.restoreChecked.toLocaleString(Qt.locale(), "f", 0) + " files checked" : "")
-    : [root.restoreCopied !== "" ? root.restoreCopied + " so far" : "", root.restoreSpeed,
-        root.restoreEta !== "" ? "ETA " + root.restoreEta : ""].filter(function (s) { return s !== "" }).join("   ")
+  readonly property string restoreDetail: root.restoreOpening ? "" : root.restoreDetailText
+  readonly property string restoreText: {
+    var l = root.restoreLabel || "Working out what to bring back"
+    if (root.restoreStep > 0) l = "Step " + root.restoreStep + " of " + root.restoreOf + "  ·  " + l
+    return root.restoreCounting ? l : l + "  ·  " + root.restorePercent + "%"
+  }
+  // For the small Restore buttons: which half it's in, and how far.
+  readonly property string restoreShort: root.restoreOpening ? "Opening…"
+    : root.restoreCounting ? "Checking…"
+    : root.restorePhase === "files-check" ? "Checking " + root.restorePercent + "%"
+    : root.restorePercent + "%"
   // What the quick restore left in the system area (AI models), still to put
   // back, and whether the files themselves are back already.
   property int skippedSystem: 0
@@ -367,10 +351,11 @@ Item {
   function restoreReset() {
     root.restorePercent = 0
     root.restoreCounting = true
-    root.restoreChecked = 0
-    root.restoreCopied = ""
-    root.restoreSpeed = ""
-    root.restoreEta = ""
+    root.restoreStep = 0
+    root.restoreOf = 0
+    root.restoreLabel = ""
+    root.restorePhase = ""
+    root.restoreDetailText = ""
   }
 
   function stopRestoringFiles() {
@@ -476,32 +461,23 @@ Item {
       }
       root.restoreMissed = 0
       root.restoreOpening = j.state === "opening"
-      if (j.line) root.applyRestoreLine(String(j.line))
+      root.applyRestoreEvent(j)
       if (j.state === "done") root.restoreFinished(0, "")
       else if (j.state === "error") root.restoreFinished(j.rc || 1, String(j.message || ""))
       else if (j.state === "stopped") root.restoreFinished(143, "")
     }
   }
 
-  function applyRestoreLine(line) {
-    // " 12300 files..." while it counts (flist2), then
-    // "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
-    var c = /^\s*(\d+) files\.\.\./.exec(line)
-    if (c) {
-      root.restoreChecked = parseInt(c[1], 10)
-      return
-    }
-    var m = /^\s*([\d,]+)\s+(\d{1,3})%(?:\s+(\S+\/s)\s+(\d+:\d{2}:\d{2}))?/.exec(line)
-    if (!m) return
-    root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
-    root.restorePercent = parseInt(m[2], 10)
-    // rsync's own speed and time left, as it sees them; its
-    // "0.00kB/s  0:00:00" before anything has moved means nothing.
-    if (m[3] !== undefined) {
-      root.restoreSpeed = /^0(\.0+)?[kMG]?B\/s$/.test(m[3]) ? "" : m[3]
-      root.restoreEta = (m[4] === "0:00:00" || root.restorePercent >= 100) ? "" : m[4]
-    }
-    root.restoreCounting = false
+  function applyRestoreEvent(j) {
+    // Only progress has a label; "opening", "done" and the rest don't.
+    if (!j.label) return
+    root.restoreStep = typeof j.step === "number" ? j.step : 0
+    root.restoreOf = typeof j.of === "number" ? j.of : 0
+    root.restoreLabel = String(j.label)
+    root.restorePhase = j.phase ? String(j.phase) : ""
+    root.restoreCounting = j.spinner === true
+    root.restorePercent = typeof j.percent === "number" ? j.percent : 0
+    root.restoreDetailText = j.detail ? String(j.detail) : ""
   }
 
   function browse(ts, mode) {
@@ -965,6 +941,7 @@ Item {
     progressLabel = "Stopping and locking the backup disk"
     progressBusy = true
     progressDetail = ""
+    progressStep = 0
     if (root.linked)
       Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service", "oma-backups-scheduled.service"])
     else
@@ -1142,6 +1119,7 @@ Item {
         root.progressLabel = "Stopping and locking the backup disk"
         root.progressBusy = true
         root.progressDetail = ""
+        root.progressStep = 0
         return
       }
       root.stopping = false
@@ -1204,21 +1182,14 @@ Item {
       root._incompleteFlag = j.incomplete
       root._resumeFor = j.hasOwnProperty("resume") ? j.resume : undefined
     }
-    if (typeof j.percent === "number" || (j.percent && String(j.percent).length))
-      root.progressPercent = parseInt(j.percent, 10) || 0
-    root.progressEta = j.eta || ""
-    root.progressSpeed = j.speed || ""
+    root.progressPercent = typeof j.percent === "number" ? j.percent : 0
     if (j.phase) root.progressPhase = j.phase
+    root.progressStep = typeof j.step === "number" ? j.step : 0
+    root.progressOf = typeof j.of === "number" ? j.of : 0
     root.progressLabel = j.label ? String(j.label) : ""
-    root.progressBusy = j.busy === true
+    root.progressBusy = j.spinner === true
     root.progressDetail = j.detail ? String(j.detail) : ""
-    root.overallPercent = typeof j.overall_percent === "number" ? j.overall_percent : 0
-    root.overallStep = typeof j.overall_step === "number" ? j.overall_step : 0
-    root.overallSteps = typeof j.overall_steps === "number" ? j.overall_steps : 0
-    root.overallEta = j.overall_eta ? String(j.overall_eta) : ""
-    root.overallTotalTime = j.overall_total_time ? String(j.overall_total_time) : ""
-    root.elapsedText = j.elapsed ? String(j.elapsed) : ""
-    if (j.phase) root.statusLine = Model.phaseLabel(j.phase) + "  " + root.progressPercent + "%"
+    if (j.phase) root.statusLine = root.progressText
   }
 
   FileView {

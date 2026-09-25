@@ -120,6 +120,69 @@ src_exists() {
   if [[ $FROM_PI == 1 ]]; then rgate exists "$1" 2>/dev/null; else [[ -d $MNT/$1 ]]; fi
 }
 
+# Progress: the same numbered steps and bar as a backup (lib/progress.py),
+# drawn in this terminal. Its own status file: the panel reads the backup's,
+# and a restore run from a laptop must not look like a backup there.
+export OMARCHY_TM_STATUS_FILE=/run/oma-backups-restore-disk.status
+progress_py() {
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$@" || true
+}
+progress_clear() {
+  rm -f "$OMARCHY_TM_STATUS_FILE" "${OMARCHY_TM_STATUS_FILE%.status}.plan"
+}
+
+# The backup's note of how big each part of this restore point is
+# (meta/TS.json, written when it was made). Copied here, or nothing.
+fetch_manifest() {
+  local out=$1
+  if [[ $FROM_PI == 1 ]]; then
+    rsync "${RSYNC_RSH[@]}" "$(src "meta/$SNAPSHOT.json")" "$out" 2>/dev/null
+  else
+    cp "$MNT/meta/$SNAPSHOT.json" "$out" 2>/dev/null
+  fi
+}
+
+# A part's total from the manifest, so its bar needs no walk of the backup
+# first -- only for a part copied exactly as it was backed up. A quick
+# ("settings") restore leaves folders out, and the manifest would overstate
+# those. Without a usable total, the part is measured by a dry run into the
+# new disk, which is still empty, so it counts everything it will copy.
+declare -A KNOWN_TOTAL=()
+load_manifest() {
+  local tmp t b f
+  tmp="$(mktemp)"
+  if fetch_manifest "$tmp"; then
+    for t in "$@"; do
+      b="$(jq -r --arg t "$t" '.trees[$t].bytes // 0' "$tmp" 2>/dev/null || echo 0)"
+      f="$(jq -r --arg t "$t" '.trees[$t].files // 0' "$tmp" 2>/dev/null || echo 0)"
+      [[ $b =~ ^[0-9]+$ && $b -gt 0 && $f =~ ^[0-9]+$ ]] || continue
+      progress_py total "$t" "$b" "$f"
+      KNOWN_TOTAL[$t]=1
+    done
+  fi
+  rm -f "$tmp"
+}
+
+# One part of the restore point onto the new disk, as one step with one bar:
+# measured first when the manifest had no total for it, then copied. Returns
+# rsync's exit code.
+copy_tree() {
+  local tree=$1 from=$2 to=$3 rc
+  shift 3
+  set +e
+  set +o pipefail
+  if [[ -z ${KNOWN_TOTAL[$tree]:-} ]]; then
+    stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "$@" -n "${RSYNC_PROGRESS[@]}" "$from"/ "$to"/ 2>&1 |
+      OMARCHY_TM_LOG="$OMARCHY_TM_LOG" "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" check "$tree"
+  fi
+  stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "$@" "${RSYNC_PROGRESS[@]}" "$from"/ "$to"/ 2>&1 |
+    OMARCHY_TM_LOG="$OMARCHY_TM_LOG" "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" copy "$tree"
+  rc=${PIPESTATUS[0]}
+  set -o pipefail
+  set -e
+  return "$rc"
+}
+
 P1="$(partition_path "$TARGET" 1)"
 P2="$(partition_path "$TARGET" 2)"
 NEW_ROOT=/run/oma-backups-restore
@@ -150,9 +213,10 @@ mkfs.btrfs -L omarchy /dev/mapper/$MAPPER
 # 2. Subvolumes + rsync (not btrfs send — excludes already applied at backup)
 mount /dev/mapper/$MAPPER $NEW_ROOT
 btrfs subvolume create $NEW_ROOT/@ $NEW_ROOT/@home $NEW_ROOT/@log $NEW_ROOT/@pkg
-rsync -aHAX --numeric-ids --info=progress2 $(src os/$SNAPSHOT)/   $NEW_ROOT/@/
-rsync -aHAX --numeric-ids --info=progress2 $(src home/$SNAPSHOT)/ $NEW_ROOT/@home/
-rsync -a --info=progress2 $(src esp/$SNAPSHOT)/ $NEW_ESP/
+rsync -aHAX --numeric-ids --delete $RSYNC_PROGRESS_TEXT $(src "os/$SNAPSHOT")/   $NEW_ROOT/@/
+rsync -aHAX --numeric-ids --delete $RSYNC_PROGRESS_TEXT $(src "home/$SNAPSHOT")/ $NEW_ROOT/@home/
+rsync -a --delete-delay $RSYNC_PROGRESS_TEXT $(src "esp/$SNAPSHOT")/ $NEW_ESP/
+#    progress bars sized from $(src "meta/$SNAPSHOT.json"), or by a dry run first
 
 # 3. Rewrite fstab UUID + /etc/default/limine cryptdevice=PARTUUID
 #    drop resume_offset (swapfile is not restored as-is)
@@ -171,6 +235,13 @@ if is_dry_run; then
     echo "WARNING: $SNAPSHOT is not a VALID restore point on the mounted disk."
   else
     echo "Backup disk has os+home+esp for $SNAPSHOT — would be VALID."
+    probe="$(mktemp)"
+    if fetch_manifest "$probe" && jq -e '.trees' "$probe" >/dev/null 2>&1; then
+      echo "Progress bars: sized from the backup's manifest ($(jq -r '.trees | keys | join(", ")' "$probe"))."
+    else
+      echo "Progress bars: no manifest for $SNAPSHOT (made by an older version), so each part is measured before it is copied."
+    fi
+    rm -f "$probe"
   fi
   exit 0
 fi
@@ -234,6 +305,7 @@ restore_cleanup() {
 }
 on_restore_exit() {
   local rc=$?
+  progress_clear
   ((rc == 0)) && return 0
   ((RESTORE_FAILED)) && return 0
   RESTORE_FAILED=1
@@ -270,6 +342,14 @@ done < <(lsblk -n -o MOUNTPOINTS "$TARGET" | awk 'NF')
 # with nothing to explain why. Setting up a backup disk has always done this;
 # restoring never did.
 close_crypt_on_disk "$TARGET"
+
+if [[ $LEVEL == settings ]]; then
+  home_label="Copying your settings"
+else
+  home_label="Copying your files"
+fi
+progress_py steps "disk=Preparing the new disk" os "home=$home_label" esp "boot=Making it bootable"
+progress_py phase disk
 
 RESTORE_STARTED=1
 run wipefs -a "$TARGET" || true
@@ -370,10 +450,22 @@ if [[ $LEVEL == settings ]]; then
   ((${#SYSTEM_MODELS[@]} == 0)) || log "leaving AI models on the backup for later: ${SYSTEM_MODELS[*]}"
 fi
 
+# The system comes back exactly as backed up unless AI models were left out;
+# the boot files always do. Backups skip the same swap and tmp paths this
+# does, so the manifest's figures are this copy's.
+if [[ $LEVEL == full ]]; then
+  load_manifest os home esp
+elif ((${#SYSTEM_MODELS[@]} == 0)); then
+  load_manifest os esp
+else
+  load_manifest esp
+fi
+
 log "rsync OS snapshot"
-rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete \
-  --exclude=/swap --exclude=/swapfile --exclude=/tmp --exclude=/var/tmp "${os_skip[@]}" \
-  "$(src "os/$SNAPSHOT")"/ "$NEW_ROOT/@/"
+os_rc=0
+copy_tree os "$(src "os/$SNAPSHOT")" "$NEW_ROOT/@" -aHAX --numeric-ids --delete \
+  --exclude=/swap --exclude=/swapfile --exclude=/tmp --exclude=/var/tmp "${os_skip[@]}" || os_rc=$?
+((os_rc == 0)) || die "Couldn't copy the system files onto $TARGET (rsync code $os_rc)."
 log "rsync home snapshot ($LEVEL)"
 # What a quick restore leaves in each home for "Restore my files" to bring
 # back later. This used to be --max-size=100M, which read as a sensible
@@ -413,8 +505,10 @@ if [[ $LEVEL == settings ]]; then
   home_filter+=(--include='/*/' --include='/*/.*' --include='/*/.*/**'
     --include='/*/*/' --exclude='/*/**')
 fi
-rsync "${RSYNC_RSH[@]}" -aHAX --numeric-ids --info=progress2 --delete "${home_filter[@]}" \
-  "$(src "home/$SNAPSHOT")"/ "$NEW_ROOT/@home/"
+home_rc=0
+copy_tree home "$(src "home/$SNAPSHOT")" "$NEW_ROOT/@home" -aHAX --numeric-ids --delete "${home_filter[@]}" ||
+  home_rc=$?
+((home_rc == 0)) || die "Couldn't copy the home folders onto $TARGET (rsync code $home_rc)."
 if [[ $LEVEL == settings ]]; then
   # While this marker exists, the restored system's plugin offers "Restore my
   # files" and backups never thin away $SNAPSHOT: until the files are back,
@@ -457,10 +551,11 @@ log "rsync ESP snapshot"
 # rsync's "some attributes weren't copied" and "a file vanished", neither of
 # which matters here.
 esp_rc=0
-rsync "${RSYNC_RSH[@]}" -a --info=progress2 --delete-delay "$(src "esp/$SNAPSHOT")"/ "$NEW_ESP/" || esp_rc=$?
+copy_tree esp "$(src "esp/$SNAPSHOT")" "$NEW_ESP" -a --delete-delay || esp_rc=$?
 if ((esp_rc != 0 && esp_rc != 23 && esp_rc != 24)); then
   die "Couldn't copy the boot files onto $TARGET (rsync code $esp_rc). Without them the restored disk would not start up."
 fi
+progress_py phase boot
 
 NEW_BTRFS_UUID="$(blkid -s UUID -o value "/dev/mapper/$MAPPER")"
 NEW_ESP_UUID="$(blkid -s UUID -o value "$P1")"
@@ -683,6 +778,7 @@ umount "$NEW_ROOT" || true
 umount "$NEW_ESP" || true
 cryptsetup close "$MAPPER" || true
 
+progress_clear
 log "restore complete."
 log "Reboot, pick this disk in firmware, unlock LUKS with the password you just set."
 log "TPM auto-unlock is not restored — enroll it again after login if you use it."

@@ -1,28 +1,41 @@
 #!/usr/bin/env python3
-"""Write /run/omarchy-backups.status JSON for the plugin.
+"""Progress for the plugin panel and the terminal: one step at a time.
 
-Two bars, not one: the step running now, and the whole backup.
+Every update is one event, the same shape wherever it is shown:
 
-  progress.py plan JSON           the steps this run will do, and their sizes
-  progress.py measure STEP        rsync --dry-run --stats on stdin: how much
-                                  this step has to get through
-  progress.py phase STEP          a step with nothing to measure ("busy")
-  progress.py set STEP PCT        a step that reports its own percentage
-  progress.py stream STEP [FILE]  rsync --info=progress2 on stdin; FILE gets
-                                  rsync's "Total file size" when it finishes
+  {"step": 4, "of": 9, "label": "Copying your files", "percent": 27,
+   "unit": "bytes", "done": 3435973837, "total": 12670153523,
+   "detail": "3.2 GB of 11.8 GB"}
+  {"step": 1, "of": 9, "label": "Unlocking the backup disk", "spinner": true}
+
+"step" and "of" are left out for something that isn't one of this run's
+steps (stopping, setting up a disk). The panel and the terminal draw what the
+event says and work nothing out for themselves. Around the event sit the few
+fields the panel's own bookkeeping reads: running, phase, at, line, dest.
+
+  progress.py steps ID[=LABEL] ...   this run's steps, in order: the numbering
+  progress.py phase ID [LABEL]       a step with nothing to measure: a spinner
+  progress.py check TREE             rsync --dry-run on stdin: works out what
+                                     the copy will send, and shows the checking
+  progress.py total TREE BYTES       a total known another way (the manifest)
+  progress.py copy TREE [STATS]      the real rsync on stdin; STATS gets the
+                                     tree's {"bytes", "files"} once it's done
+  progress.py set ID PCT             a step that reports its own percentage
   progress.py done | idle | fail MESSAGE
 
-Each of those is a separate process, so the run's shape lives in a plan file
-next to the status file. The plan holds one entry per step with the bytes and
-files it has to get through (from `measure`, or from the last backup's sizes)
-and how far it has got. The overall bar is weighted by those bytes, so a huge
-"your files" step doesn't sit at "1 of 4" for hours.
+Every figure is rsync's own: nothing is estimated, and nothing calls du.
+rsync only prints a progress line when it sends a file, so on its own it says
+nothing at all while it compares an unchanged tree. With --info=name2 and
+--out-format='%i %l' it prints one line per file as it goes, with the size,
+which is what both bars count. A check ("TREE-check" in the step list) is a
+bar of files compared. The copy's bar is bytes sent against what the check
+said there was to send, or how far through the unchanged files rsync has got
+when that is further: an incremental backup spends most of its copy comparing
+files it doesn't send, and a bar of bytes alone would sit still through that.
+Neither bar ever moves backwards or passes 100.
 
-For the step bar rsync gives the larger of files-checked and bytes-copied,
-held so it never moves backwards: on an incremental backup bytes-copied barely
-moves (almost nothing changed) while files-checked does, and switching between
-the two made the bar jump around. The overall bar never moves backwards
-either. Never calls du: the only walks of the tree are rsync's own.
+Each call is its own process, so the run's shape (the step list, and what
+each check found) lives in a plan file next to the status file.
 """
 
 from __future__ import annotations
@@ -30,43 +43,50 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
 
 STATUS = Path(os.environ.get("OMARCHY_TM_STATUS_FILE", "/run/omarchy-backups.status"))
-PLAN = Path(re.sub(r"\.status$", "", str(STATUS)) + ".plan")
+PLAN = Path(re.sub(r"\.(status|json)$", "", str(STATUS)) + ".plan")
+# Fields a caller wants on every write, e.g. "Restore my files" keeps its own
+# state and id in the same file the panel polls.
+try:
+    EXTRA = json.loads(os.environ.get("OMA_PROGRESS_EXTRA") or "{}")
+    if not isinstance(EXTRA, dict):
+        EXTRA = {}
+except ValueError:
+    EXTRA = {}
 
-RSYNC_RE = re.compile(
-    r"^\s*(?P<bytes>\d+)\s+(?P<pct>\d+)%(?:\s+(?P<speed>\S+/s))?(?:\s+(?P<eta>\d+:\d+(?::\d+)?))?"
-)
+# "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
+BYTES_RE = re.compile(r"^\s*(?P<bytes>\d+)\s+\d+%")
 TOCHK_RE = re.compile(r"to-chk=(?P<left>\d+)/(?P<total>\d+)")
-# Folder-by-folder mode: "ir-chk" while rsync is still finding files (the
-# total keeps growing, so no honest percentage yet); "to-chk" once it knows.
-# backup.sh asks rsync for the whole list up front, so this is a fallback now.
-IRCHK_RE = re.compile(r"ir-chk=(?P<left>\d+)/(?P<total>\d+)")
-# "(xfr#1234, to-chk=...)" — how many files rsync has actually sent, as
-# against how many it has looked at. That ratio, not the byte count, is what
-# says whether a step is copying or just checking: it holds however the file
-# sizes fall.
-XFR_RE = re.compile(r"xfr#(?P<n>\d+)")
+# --info=flist2 while rsync lists the tree, then once it has the whole list.
+LISTED_RE = re.compile(r"^\s*(?P<n>\d+) files\.\.\.")
+CONSIDER_RE = re.compile(r"^\s*(?P<n>\d+) files to consider")
+# --out-format='%i %l': ">f+++++++++ 5000000", ".f          7", "cd+++++++++ 4096".
+# Y is < or > for a file whose contents are sent, "." for one that is already
+# right, c for something created, h for a hard link, * for "deleting".
+ITEM_RE = re.compile(r"^(?P<y>[<>ch.])(?P<x>[fdLDS])(?:.{9}) (?P<size>\d+)$")
+# The same for rsyncs that print the name instead: "Documents/a.txt is uptodate".
+UPTODATE_RE = re.compile(r" is uptodate$")
+TRANSFERRED_RE = re.compile(r"^Total transferred file size:\s*(?P<n>\d+)")
 TOTAL_RE = re.compile(r"^Total file size:\s*(?P<n>\d+)")
-# rsync --info=flist2 while it lists everything before copying anything
-# (minutes for a big home on a resume or a slow Pi): "12300 files...".
-FILES_RE = re.compile(r"^\s*(?P<n>\d+) files\.\.\.")
-# `rsync --dry-run --stats`, for the measuring pass.
-STAT_FILES_RE = re.compile(r"^Number of files:\s*(?P<n>[\d,]+)")
-STAT_SIZE_RE = re.compile(r"^Total file size:\s*(?P<n>[\d,]+)")
+FILES_RE = re.compile(r"^Number of files:\s*(?P<n>\d+)")
+SENT_FILES_RE = re.compile(r"^Number of regular files transferred:\s*(?P<n>\d+)")
+# Anything rsync says went wrong goes on to the log instead of being eaten here.
+PROBLEM_RE = re.compile(r"^(rsync|rsync error|IO error|file has vanished|cannot delete|ERROR)[: ]")
 
 LABEL = {
     "unlock": "Unlocking the backup disk",
     "prepare": "Getting ready",
-    "measure": "Working out how much there is to copy",
-    "resume": "Carrying on where it stopped",
     "stopping": "Stopping and locking the backup disk",
-    "snapshot": "Taking a snapshot of this computer",
+    "os-check": "Checking system files",
     "os": "Copying system files",
+    "home-check": "Checking your files",
     "home": "Copying your files",
+    "esp-check": "Checking boot files",
     "esp": "Copying boot files",
     "rescue": "Updating the rescue USB",
     "finalize": "Saving the restore point",
@@ -74,48 +94,7 @@ LABEL = {
     "setup": "Setting up the backup disk",
     "waiting-input": "Waiting for you — enter the new disk password",
 }
-# Most of a backup is rsync working out what changed, not sending anything.
-# Saying "Copying your files" through all of that is simply wrong, so a step
-# says which of the two it is actually doing.
-CHECK_LABEL = {
-    "os": "Checking system files",
-    "home": "Checking your files",
-    "esp": "Checking boot files",
-}
-# Steps with a real percentage; every other step is shown as "working".
-BAR_STEPS = {"os", "home", "esp", "setup"}
-# What a step with nothing to measure is worth on the overall bar, as a share
-# of the copying. Saving the restore point and tidying up are quick next to
-# the copying, but they aren't instant, so the bar shouldn't sit at "done"
-# while they run.
-FIXED_WEIGHT = {
-    "prepare": 0.001,
-    "measure": 0.004,
-    "snapshot": 0.004,
-    "finalize": 0.02,
-    "rescue": 0.01,
-    "tidy": 0.01,
-}
 WRITE_EVERY = 0.5
-
-
-def write(data: dict) -> None:
-    # "at" lets the plugin tell this attempt's error from a leftover one.
-    data = dict(data, at=int(time.time()))
-    payload = json.dumps(data) + "\n"
-    STATUS.parent.mkdir(parents=True, exist_ok=True)
-    # One file, read by the plugin and by `oma-backups status`. There used to
-    # be a second copy written into the user's own state folder on every
-    # update — twice a second for the length of a backup, with a stat and a
-    # chown each time — which nothing anywhere ever read.
-    tmp = Path(str(STATUS) + ".tmp")
-    tmp.write_text(payload, encoding="utf-8")
-    os.chmod(tmp, 0o644)
-    tmp.replace(STATUS)
-
-
-def label(step: str) -> str:
-    return LABEL.get(step, step or "Backing up")
 
 
 def human(n: float) -> str:
@@ -127,27 +106,9 @@ def human(n: float) -> str:
     return f"{n:.0f} B"
 
 
-def clock(seconds: float) -> str:
-    """Seconds as something readable: "6 min", "2 h 40 min"."""
-    s = int(max(0, seconds))
-    if s < 60:
-        return f"{s} sec"
-    if s < 3600:
-        return f"{s // 60} min"
-    h, m = divmod(s // 60, 60)
-    return f"{h} h {m:02d} min" if m else f"{h} h"
-
-
-# ——— the plan: what this run has to get through, and how far it has got ———
-
-
 class Plan:
-    """The steps of this run, with the bytes and files each has to get through.
-
-    Lives in a file because every progress.py call is its own process. A
-    missing or unreadable plan is never an error: the step bar still works and
-    the overall bar simply doesn't appear.
-    """
+    """This run's steps, and what each check found. Never an error to lack:
+    without one, steps simply aren't numbered."""
 
     def __init__(self, data: dict | None = None) -> None:
         self.data = data or {}
@@ -161,8 +122,6 @@ class Plan:
         return cls(data if isinstance(data, dict) else None)
 
     def save(self) -> None:
-        if not self.data:
-            return
         try:
             PLAN.parent.mkdir(parents=True, exist_ok=True)
             tmp = Path(str(PLAN) + ".tmp")
@@ -177,385 +136,360 @@ class Plan:
         steps = self.data.get("steps")
         return steps if isinstance(steps, list) else []
 
-    def step(self, name: str) -> dict | None:
+    def has(self, sid: str) -> bool:
+        return any(s.get("id") == sid for s in self.steps)
+
+    def label(self, sid: str) -> str:
         for s in self.steps:
-            if s.get("name") == name:
-                return s
-        return None
+            if s.get("id") == sid and s.get("label"):
+                return str(s["label"])
+        return LABEL.get(sid, sid or "Working")
 
-    def copy_total(self) -> float:
-        """Bytes across the steps that actually copy something."""
-        total = 0.0
-        for s in self.steps:
-            if s.get("name") in BAR_STEPS:
-                total += float(s.get("total_bytes") or s.get("weight") or 0)
-        return total
+    def number(self, sid: str) -> dict:
+        for n, s in enumerate(self.steps, start=1):
+            if s.get("id") == sid:
+                return {"step": n, "of": len(self.steps)}
+        return {}
 
-    def weight(self, s: dict) -> float:
-        """What this step is worth on the overall bar, in bytes."""
-        measured = s.get("total_bytes") or 0
-        if measured:
-            return float(measured)
-        guess = s.get("weight") or 0
-        if guess:
-            return float(guess)
-        share = FIXED_WEIGHT.get(s.get("name", ""), 0.005)
-        return max(1.0, self.copy_total() * share)
+    def totals(self, tree: str) -> dict:
+        t = (self.data.get("totals") or {}).get(tree)
+        return t if isinstance(t, dict) else {}
 
-    def begin(self, name: str) -> None:
-        for s in self.steps:
-            if s.get("name") == name:
-                if s.get("state") != "done":
-                    s["state"] = "running"
-            elif s.get("state") == "running":
-                s["state"] = "done"
-                s["fraction"] = 1.0
+    def set_totals(self, tree: str, **values: int) -> None:
+        self.data.setdefault("totals", {}).setdefault(tree, {}).update(values)
 
-    def advance(self, name: str, fraction: float, copied: int = 0, files_done: int = 0) -> None:
-        s = self.step(name)
-        if s is None:
+
+def event(plan: Plan, sid: str, label: str = "", *, percent: int | None = None, unit: str = "",
+          done: int | None = None, total: int | None = None, detail: str = "") -> dict:
+    e: dict = {"running": True, "phase": sid}
+    e.update(plan.number(sid))
+    e["label"] = label or plan.label(sid)
+    if percent is None:
+        e["spinner"] = True
+    else:
+        e["percent"] = max(0, min(100, int(percent)))
+        if unit:
+            e["unit"] = unit
+        if done is not None:
+            e["done"] = int(done)
+        if total is not None:
+            e["total"] = int(total)
+    if detail:
+        e["detail"] = detail
+    return e
+
+
+def write(data: dict) -> None:
+    # "at" lets the plugin tell this attempt's error from a leftover one.
+    data = dict(data, **EXTRA, at=int(time.time()))
+    STATUS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = Path(str(STATUS) + ".tmp")
+    tmp.write_text(json.dumps(data) + "\n", encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    tmp.replace(STATUS)
+
+
+# ——— the terminal: the same event, drawn as one line ———
+
+
+def tty_line(e: dict) -> str:
+    head = e.get("label", "")
+    if e.get("step"):
+        head = f"Step {e['step']} of {e['of']} · {head}"
+    if e.get("spinner"):
+        return f"{head}…" + (f"  {e['detail']}" if e.get("detail") else "")
+    pct = e.get("percent", 0)
+    width = 20
+    filled = width * pct // 100
+    bar = "#" * filled + "." * (width - filled)
+    tail = f"  {e['detail']}" if e.get("detail") else ""
+    return f"{head}  [{bar}] {pct:3d}%{tail}"
+
+
+class Terminal:
+    """Draws events on stderr when a person is watching it; silent otherwise
+    (a service's output would only fill the system log)."""
+
+    def __init__(self) -> None:
+        self.on = sys.stderr.isatty()
+        self.open = False
+
+    def show(self, e: dict, final: bool = False) -> None:
+        if not self.on:
             return
-        s["state"] = "running"
-        s["fraction"] = max(float(s.get("fraction") or 0.0), min(1.0, max(0.0, fraction)))
-        if copied:
-            s["copied"] = copied
-        if files_done:
-            s["files_done"] = files_done
+        cols = shutil.get_terminal_size((100, 24)).columns
+        text = "  " + tty_line(e)
+        if len(text) > cols - 1:
+            text = text[: cols - 2] + "…"
+        # One line per step, rewritten in place. A line left open at the end
+        # of a call is picked up by the next: a measuring spinner turns into
+        # its copy's bar on the same line.
+        try:
+            sys.stderr.write("\r\033[K" + text)
+            self.open = True
+            if final:
+                sys.stderr.write("\n")
+                self.open = False
+            sys.stderr.flush()
+        except OSError:
+            pass
 
-    def finish(self, name: str) -> None:
-        s = self.step(name)
-        if s is not None:
-            s["state"] = "done"
-            s["fraction"] = 1.0
-
-    def position(self) -> tuple[int, int]:
-        """Which copying step is running, and how many there are."""
-        copying = [s for s in self.steps if s.get("name") in BAR_STEPS]
-        total = len(copying) or len(self.steps)
-        at = 0
-        for n, s in enumerate(copying, start=1):
-            if s.get("state") == "running":
-                return n, max(1, total)
-            if not at and s.get("state") != "done":
-                at = n
-        return max(1, at or total), max(1, total)
-
-    def overall(self) -> dict:
-        """Where the whole run has got to, weighted by bytes."""
-        steps = self.steps
-        if not steps:
-            return {}
-        total = sum(self.weight(s) for s in steps) or 1.0
-        done = 0.0
-        for s in steps:
-            w = self.weight(s)
-            if s.get("state") == "done":
-                done += w
-            elif s.get("state") == "running":
-                done += w * float(s.get("fraction") or 0.0)
-        frac = min(1.0, max(0.0, done / total))
-        # Never backwards: measuring a step can make it worth more than the
-        # last backup suggested, and the bar must not drop when it does.
-        frac = max(frac, float(self.data.get("floor") or 0.0))
-        self.data["floor"] = frac
-        at, of = self.position()
-        out: dict = {
-            "overall_percent": int(frac * 100),
-            "overall_step": at,
-            "overall_steps": of,
-        }
-        started = float(self.data.get("started") or 0)
-        if started:
-            elapsed = max(0.0, time.time() - started)
-            out["elapsed"] = clock(elapsed)
-            # An estimate is only worth showing once enough has happened to
-            # make it mean anything: at 1% of a multi-hour copy it is noise.
-            if elapsed > 30 and frac > 0.02:
-                out["overall_eta"] = clock(elapsed / frac - elapsed)
-                out["overall_total_time"] = clock(elapsed / frac)
-        return out
+    def say(self, line: str) -> None:
+        """Something rsync reported, passed on without wrecking the bar."""
+        try:
+            if self.open:
+                sys.stderr.write("\n")
+                self.open = False
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
+        except OSError:
+            pass
 
 
-def status(
-    step: str,
-    pct: int | None = None,
-    detail: str = "",
-    speed: str = "",
-    eta: str = "",
-    plan: Plan | None = None,
-    extra: dict | None = None,
-    label_text: str = "",
-) -> dict:
-    busy = pct is None
-    shown = 0 if busy else max(0, min(100, pct))
-    shown_label = label_text or label(step)
-    data = {
-        "running": True,
-        "phase": step,
-        "label": shown_label,
-        "busy": busy,
-        "percent": shown,
-        "detail": detail,
-        "speed": speed,
-        "eta": eta,
-        "line": shown_label if busy else f"{shown_label}  {shown}%",
-    }
-    if extra:
-        data.update(extra)
-    if plan is not None:
-        data.update(plan.overall())
-    return data
-
-
-# ——— measuring: one dry run, so the bars have an honest denominator ———
-
-
-def measure(step: str) -> int:
-    """`rsync --dry-run --stats` on stdin: record what this step must copy.
-
-    Writes the file count as it goes so the panel shows something moving, and
-    stores the totals in the plan. Nothing here can fail the backup: if the
-    numbers don't arrive, the bars fall back to rsync's own percentage.
-    """
-    plan = Plan.load()
-    plan.begin("measure")
-    plan.save()
-    files = size = 0
-    last = 0.0
-    write(status("measure", None, "", plan=plan))
-    for raw in sys.stdin:
-        line = raw.strip()
-        m = STAT_FILES_RE.match(line)
-        if m:
-            files = int(m.group("n").replace(",", ""))
-            continue
-        m = STAT_SIZE_RE.match(line)
-        if m:
-            size = int(m.group("n").replace(",", ""))
-            continue
-        f = FILES_RE.search(line.replace(",", ""))
-        if f:
-            now = time.monotonic()
-            if now - last >= WRITE_EVERY:
-                last = now
-                write(status("measure", None, f"{int(f.group('n')):,} files so far", plan=plan))
-    s = plan.step(step)
-    if s is not None and (size or files):
-        if size:
-            s["total_bytes"] = size
-        if files:
-            s["files_total"] = files
-        plan.save()
-    return 0
-
-
-class RsyncProgress:
-    """Turns rsync --info=progress2 lines into a bar that only moves forward."""
-
-    def __init__(self, step: str, plan: Plan) -> None:
-        self.step = step
-        self.plan = plan
-        self.best = 0
+class Emitter:
+    def __init__(self) -> None:
         self.last_write = 0.0
-        self.total_size: int | None = None
-        entry = plan.step(step) or {}
-        self.known_bytes = int(entry.get("total_bytes") or 0)
-        self.known_files = int(entry.get("files_total") or 0)
-        self.started = time.monotonic()
-        self.copied = 0
-        self.files_done = 0
-        # Once sending data is what's driving the bar, the step keeps saying
-        # so. Near the end of a copy the file count can edge past the byte
-        # count for a moment, and without this the heading flipped back to
-        # "Checking your files" at 87% — after twenty minutes of copying.
-        self.copying_latched = False
+        self.term = Terminal()
+        self.last: dict | None = None
 
-    def note_mode(self, sent_files: int, seen_files: int) -> None:
-        """Decide whether this step is copying or checking, and remember it.
+    def due(self) -> bool:
+        return time.monotonic() - self.last_write >= WRITE_EVERY
 
-        A first backup sends nearly every file it looks at; every backup
-        after that looks at hundreds of thousands and sends a handful. Wait
-        for a sample worth judging — on the first line, nothing has happened
-        either way — then latch, so the heading can go from checking to
-        copying but never flaps back.
-        """
-        if self.copying_latched or seen_files < 100:
-            return
-        if sent_files and sent_files / seen_files >= 0.3:
-            self.copying_latched = True
+    def emit(self, e: dict, force: bool = False, final: bool = False) -> None:
+        if force or final or self.due():
+            self.last_write = time.monotonic()
+            write(e)
+            self.term.show(e, final=final)
 
-    def numbers(self, copied: int, files_done: int, files_total: int) -> dict:
-        """The figures under the bar, both ways of reading them.
-
-        A first backup copies nearly every byte it looks at, so "43 GB of
-        544 GB" is the useful line. Every backup after that mostly *checks*
-        files and copies a handful, and the same line would read as 2 GB of
-        544 GB while the bar said 40% — so the checking case leads with the
-        file count and says plainly how little had to be copied.
-        """
-        out: dict = {}
-        if copied:
-            self.copied = copied
-        if files_done:
-            self.files_done = files_done
-        total_bytes = self.known_bytes or self.total_size or 0
-        out["copied_bytes"] = self.copied
-        if total_bytes:
-            out["total_bytes"] = total_bytes
-            out["data_text"] = f"{human(self.copied)} of {human(total_bytes)}"
-        elif self.copied:
-            out["data_text"] = f"{human(self.copied)} copied"
-        out["copied_text"] = f"{human(self.copied)} copied" if self.copied else "nothing to copy so far"
-        total_files = files_total or self.known_files or 0
-        if total_files:
-            out["files_done"] = self.files_done
-            out["files_total"] = total_files
-            out["files_text"] = f"{self.files_done:,} of {total_files:,} files"
-            out["checked_text"] = f"{self.files_done:,} of {total_files:,} files checked"
-        elif self.files_done:
-            out["files_done"] = self.files_done
-            out["files_text"] = f"{self.files_done:,} files"
-            out["checked_text"] = f"{self.files_done:,} files checked"
-        return out
-
-    def detail(self, nums: dict, left_text: str, copying: bool = True) -> str:
-        if copying:
-            parts = [nums.get("data_text", ""), nums.get("files_text", "")]
-        else:
-            parts = [nums.get("checked_text", ""), nums.get("copied_text", "")]
-        if left_text:
-            parts.append(f"{left_text} left")
-        return "  ·  ".join(p for p in parts if p)
-
-    def time_left(self, fraction: float) -> str:
-        """What's left, from how fast the bar itself has been moving.
-
-        Whatever is driving the bar has to be what the estimate follows:
-        bytes on a first backup, files checked on every one after it. Working
-        it out from bytes alone said "1000 h" on a backup that was mostly
-        checking files it had no need to copy — a couple of GB moved, divided
-        by a transfer rate near zero, against a 544 GB tree.
-
-        rsync's own ETA is no better: it only looks at the file it is on.
-        """
-        if fraction <= 0.005 or fraction >= 1.0:
-            return ""
-        ran = time.monotonic() - self.started
-        # Early on, the rate says more about the first few folders than about
-        # the run, and a wild guess is worse than none.
-        if ran < 15:
-            return ""
-        left = ran / fraction - ran
-        # Anything past this is a number nobody can act on; say nothing.
-        if left > 48 * 3600:
-            return ""
-        return clock(left)
-
-    def feed(self, line: str) -> dict | None:
-        compact = line.replace(",", "")
-        t = TOTAL_RE.search(compact.strip())
-        if t:
-            self.total_size = int(t.group("n"))
-            return None
-        f = FILES_RE.search(compact)
-        if f:
-            n = int(f.group("n"))
-            return status(self.step, None, f"Checking for changes: {n:,} files so far",
-                          plan=self.plan)
-        m = RSYNC_RE.search(compact)
-        c = TOCHK_RE.search(compact)
-        ir = IRCHK_RE.search(compact)
-        copied = int(m.group("bytes")) if m else 0
-        speed = (m.group("speed") or "") if m else ""
-        if ir and not c:
-            # Still finding files, so rsync's own percentage is against a
-            # total that is still growing — unless the measuring pass already
-            # told us how big this step really is.
-            checked = int(ir.group("total")) - int(ir.group("left"))
-            nums = self.numbers(copied, checked, 0)
-            check_label = CHECK_LABEL.get(self.step, "")
-            if self.known_bytes:
-                self.best = max(self.best, min(99, int(100 * copied / self.known_bytes)))
-                self.plan.advance(self.step, self.best / 100, copied, checked)
-                left = self.time_left(self.best / 100)
-                return status(self.step, self.best, self.detail(nums, left, False), speed,
-                              plan=self.plan, extra=nums, label_text=check_label)
-            self.plan.begin(self.step)
-            detail = self.detail(nums, "", False)
-            return status(self.step, None, detail, speed, plan=self.plan, extra=nums,
-                          label_text=check_label)
-        if not m and not c:
-            return None
-        byte_pct = int(m.group("pct")) if m else 0
-        file_pct = 0
-        files_done = files_total = 0
-        if c and int(c.group("total")) > 0:
-            left_files, files_total = int(c.group("left")), int(c.group("total"))
-            files_done = files_total - left_files
-            file_pct = int(100 * files_done / files_total)
-        if self.known_bytes and copied:
-            byte_pct = max(byte_pct, int(100 * copied / self.known_bytes))
-        pct = max(byte_pct, file_pct)
-        # rsync reports 100% on its very last line; don't show it early.
-        if pct >= 100 and not (c and int(c.group("left")) == 0):
-            pct = 99
-        self.best = max(self.best, pct)
-        nums = self.numbers(copied, files_done, files_total)
-        # Which of the two is moving the bar: sending files, or working out
-        # which ones need sending. That decides the wording and the label.
-        x = XFR_RE.search(compact)
-        self.note_mode(int(x.group("n")) if x else 0, files_done)
-        copying = self.copying_latched
-        eta = m.group("eta") if m and copying and m.group("eta") else ""
-        if eta.strip("0:") == "":
-            eta = ""
-        left_text = self.time_left(self.best / 100)
-        self.plan.advance(self.step, self.best / 100, copied, files_done)
-        label_text = "" if copying else CHECK_LABEL.get(self.step, "")
-        return status(self.step, self.best, self.detail(nums, left_text, copying), speed, eta,
-                      plan=self.plan, extra=nums, label_text=label_text)
-
-    def maybe_write(self, data: dict, force: bool = False) -> None:
-        now = time.monotonic()
-        if force or now - self.last_write >= WRITE_EVERY:
-            write(data)
-            self.last_write = now
-
-
-def stream(step: str, stats_file: str | None) -> int:
-    plan = Plan.load()
-    plan.begin(step)
-    prog = RsyncProgress(step, plan)
-    write(status(step, None, "Checking for changes", plan=plan))
-    # Only a person at a terminal wants rsync's raw output; a service's would
-    # just fill the system log.
-    echo = sys.stderr.isatty()
-    leftover = ""
-    last = None
-    while True:
-        chunk = sys.stdin.buffer.read1(256)
-        if not chunk:
-            break
-        if echo:
+    def problem(self, line: str) -> None:
+        """An rsync error: into OmaBackups' log, and to the person watching."""
+        if self.term.on:
+            self.term.say(line)
+        log = os.environ.get("OMARCHY_TM_LOG")
+        if log:
             try:
-                sys.stderr.buffer.write(chunk)
-                sys.stderr.buffer.flush()
+                with open(log, "a", encoding="utf-8") as f:
+                    f.write(time.strftime("%Y-%m-%dT%H:%M:%SZ ", time.gmtime()) + line + "\n")
+                return
             except OSError:
                 pass
+        if not self.term.on:
+            print(line, file=sys.stderr, flush=True)
+
+
+def lines():
+    """rsync's output, a line at a time. progress2 rewrites its line with \\r."""
+    leftover = ""
+    while True:
+        chunk = sys.stdin.buffer.read1(4096)
+        if not chunk:
+            break
         leftover += chunk.decode("utf-8", "replace").replace("\r", "\n")
-        while "\n" in leftover:
-            line, leftover = leftover.split("\n", 1)
+        *done, leftover = leftover.split("\n")
+        for line in done:
             if line.strip():
-                data = prog.feed(line)
-                if data:
-                    last = data
-                    prog.maybe_write(data)
-    if last:
-        prog.maybe_write(last, force=True)
+                yield line
+    if leftover.strip():
+        yield leftover
+
+
+# ——— checking: a dry run of the copy, against the real destination ———
+
+
+def check(tree: str) -> int:
+    """`rsync -n` with the copy's own flags: a bar of files compared, and at
+    the end what the copy will actually send.
+
+    Without its own "TREE-check" step (a restore onto an empty disk measuring
+    what it will copy, or the boot files) this shows as a spinner under the
+    copy step instead of a bar of its own.
+    """
+    plan = Plan.load()
+    sid = f"{tree}-check"
+    bar = plan.has(sid)
+    if not bar:
+        sid = tree
+    out = Emitter()
+    listed = considered = checked = 0
+    to_send = files = sent_files = None
+    working = "Working out how much there is to copy"
+    out.emit(event(plan, sid, detail="" if bar else working), force=True)
+    for line in lines():
+        compact = line.replace(",", "")
+        m = ITEM_RE.match(line)
+        if m or UPTODATE_RE.search(line):
+            checked += 1
+        elif (m := LISTED_RE.match(compact)):
+            listed = int(m.group("n"))
+        elif (m := CONSIDER_RE.match(compact)):
+            considered = int(m.group("n"))
+        elif (m := TRANSFERRED_RE.match(compact)):
+            to_send = int(m.group("n"))
+            continue
+        elif (m := FILES_RE.match(compact)):
+            files = int(m.group("n"))
+            continue
+        elif (m := SENT_FILES_RE.match(compact)):
+            sent_files = int(m.group("n"))
+            continue
+        elif PROBLEM_RE.match(line):
+            out.problem(line)
+            continue
+        c = TOCHK_RE.search(compact)
+        if c and int(c.group("total")):
+            considered = considered or int(c.group("total"))
+            checked = max(checked, int(c.group("total")) - int(c.group("left")))
+        if not out.due():
+            continue
+        if not bar:
+            n = considered or listed
+            out.emit(event(plan, sid, detail=f"{working}: {n:,} files" if n else working))
+        elif considered:
+            n = min(checked, considered)
+            # 100 only once rsync has said it finished (its closing figures).
+            pct = min(99, 100 * n // considered)
+            out.emit(event(plan, sid, percent=pct, unit="files", done=n, total=considered,
+                           detail=f"{n:,} of {considered:,} files checked"))
+        elif listed:
+            out.emit(event(plan, sid, detail=f"{listed:,} files found"))
+    if to_send is None:
+        # rsync stopped before the end (the caller deals with why). Leave no
+        # total behind: a wrong one is worse than none.
+        if out.term.open:
+            out.term.say("")
+        return 0
+    plan.set_totals(tree, bytes=to_send, files=files or 0, changed=sent_files or 0)
     plan.save()
-    if stats_file and prog.total_size is not None:
-        Path(stats_file).write_text(f"{prog.total_size}\n", encoding="utf-8")
+    if bar:
+        n = considered or files or checked
+        out.emit(event(plan, sid, percent=100, unit="files", done=n, total=n,
+                       detail=f"{n:,} files checked · {human(to_send)} to copy"), final=True)
     return 0
+
+
+def set_total(tree: str, size: str, files: str = "0") -> int:
+    try:
+        b, f = int(size), int(files or 0)
+    except ValueError:
+        return 0
+    plan = Plan.load()
+    plan.set_totals(tree, bytes=b, files=f)
+    plan.save()
+    return 0
+
+
+# ——— copying ———
+
+
+class Copy:
+    """Bytes sent against what the check said there was to send, or how far
+    through the files that needed nothing rsync has got, whichever is further.
+
+    "Further through the unchanged files" is counted against every file in
+    the list, not just the unchanged ones. A resumed backup meets everything
+    it already copied first; against the unchanged files alone that would put
+    the bar at nearly 100% before a byte of the rest had moved.
+    """
+
+    def __init__(self, plan: Plan, tree: str) -> None:
+        self.plan = plan
+        self.tree = tree
+        t = plan.totals(tree)
+        self.total: int | None = t.get("bytes") if isinstance(t.get("bytes"), int) else None
+        self.considered = 0
+        self.passed = 0        # files that needed nothing sent
+        self.sent = 0          # sizes of files sent in full so far
+        self.moving = 0        # rsync's own running byte count, mid-file included
+        self.best = 0
+        self.done_bytes = 0
+        self.tree_bytes: int | None = None
+        self.tree_files: int | None = None
+        self.transferred: int | None = None
+
+    def feed(self, line: str) -> bool:
+        compact = line.replace(",", "")
+        m = ITEM_RE.match(line)
+        if m:
+            if m.group("y") in "<>" and m.group("x") == "f":
+                self.sent += int(m.group("size"))
+            elif m.group("y") in ".h":
+                self.passed += 1
+            return True
+        if UPTODATE_RE.search(line):
+            self.passed += 1
+            return True
+        if (m := CONSIDER_RE.match(compact)):
+            self.considered = int(m.group("n"))
+            return True
+        if (m := TOTAL_RE.match(compact)):
+            self.tree_bytes = int(m.group("n"))
+            return False
+        if (m := FILES_RE.match(compact)):
+            self.tree_files = int(m.group("n"))
+            return False
+        if (m := TRANSFERRED_RE.match(compact)):
+            self.transferred = int(m.group("n"))
+            return False
+        b = BYTES_RE.match(compact)
+        if b:
+            # The same measure as "Total transferred file size": sizes of the
+            # files sent so far, plus how far into the one it's on.
+            self.moving = int(b.group("bytes"))
+            c = TOCHK_RE.search(compact)
+            if c and not self.considered:
+                self.considered = int(c.group("total"))
+            return True
+        return False
+
+    def figures(self, finished: bool) -> dict:
+        done = max(self.sent, self.moving)
+        if finished and self.transferred is not None:
+            done = self.transferred
+        if self.total is not None:
+            done = min(done, self.total)
+        self.done_bytes = max(self.done_bytes, done)
+        parts = []
+        if self.total:
+            parts.append(self.done_bytes / self.total)
+        if self.considered:
+            parts.append(min(self.passed, self.considered) / self.considered)
+        pct = int(100 * max(parts)) if parts else 0
+        pct = 100 if finished else min(99, pct)
+        self.best = max(self.best, pct)
+        if self.total is None:
+            detail = f"{human(self.done_bytes)} copied"
+            total = None
+        elif self.total == 0:
+            detail = "Nothing new to copy"
+            total = 0
+        else:
+            detail = f"{human(self.done_bytes)} of {human(self.total)}"
+            total = self.total
+        return event(self.plan, self.tree, percent=self.best, unit="bytes",
+                     done=self.done_bytes, total=total, detail=detail)
+
+
+def copy(tree: str, stats_file: str | None) -> int:
+    plan = Plan.load()
+    prog = Copy(plan, tree)
+    out = Emitter()
+    out.emit(prog.figures(False), force=True)
+    for line in lines():
+        if prog.feed(line):
+            if out.due():
+                out.emit(prog.figures(False))
+        elif PROBLEM_RE.match(line):
+            out.problem(line)
+    finished = prog.tree_bytes is not None
+    out.emit(prog.figures(finished), final=True)
+    if stats_file and finished:
+        Path(stats_file).write_text(
+            json.dumps({"bytes": prog.tree_bytes, "files": prog.tree_files or 0}) + "\n",
+            encoding="utf-8")
+    return 0
+
+
+# ——— the rest ———
 
 
 def clear_plan() -> None:
@@ -569,74 +503,42 @@ def main() -> int:
     if len(sys.argv) < 2:
         return 1
     cmd, args = sys.argv[1], sys.argv[2:]
-    if cmd == "idle":
-        clear_plan()
-        write({"running": False, "phase": "idle", "label": "", "busy": False, "percent": 0,
-               "detail": "", "speed": "", "eta": "", "line": ""})
-    elif cmd == "plan":
-        # One JSON argument: {"steps": [{"name": "home", "weight": 123}, ...]}
-        try:
-            data = json.loads(args[0]) if args else {}
-        except ValueError:
-            return 1
+    if cmd == "steps":
         steps = []
-        for s in data.get("steps", []):
-            if isinstance(s, dict) and s.get("name"):
-                steps.append({
-                    "name": str(s["name"]),
-                    "weight": int(s.get("weight") or 0),
-                    "total_bytes": int(s.get("total_bytes") or 0),
-                    "files_total": int(s.get("files_total") or 0),
-                    "state": "done" if s.get("done") else "pending",
-                    "fraction": 1.0 if s.get("done") else 0.0,
-                })
-        Plan({"steps": steps, "started": time.time(), "floor": 0.0}).save()
+        for a in args:
+            sid, _, text = a.partition("=")
+            if sid:
+                steps.append({"id": sid, "label": text} if text else {"id": sid})
+        Plan({"steps": steps, "started": int(time.time())}).save()
     elif cmd == "phase":
-        step = args[0] if args else ""
+        sid = args[0] if args else ""
         plan = Plan.load()
-        plan.begin(step)
-        plan.save()
-        write(status(step, 0 if step in BAR_STEPS else None, plan=plan))
+        e = event(plan, sid, args[1] if len(args) > 1 else "")
+        write(e)
+        Terminal().show(e, final=True)
     elif cmd == "set":
-        step = args[0] if args else ""
+        sid = args[0] if args else ""
         pct = int(args[1]) if len(args) > 1 and args[1].isdigit() else 0
-        plan = Plan.load()
-        if pct >= 100:
-            plan.finish(step)
-        else:
-            plan.advance(step, pct / 100)
-        plan.save()
-        write(status(step, pct, speed=args[2] if len(args) > 2 else "",
-                     eta=args[3] if len(args) > 3 else "", plan=plan))
-    elif cmd == "seed":
-        # Last backup's size, so an incremental can skip the measuring walk.
-        # The bar's total is that size: a much bigger tree can pass 100%.
-        step = args[0] if args else ""
-        try:
-            size = int(args[1]) if len(args) > 1 else 0
-        except ValueError:
-            return 0
-        plan = Plan.load()
-        entry = plan.step(step)
-        if entry is not None and size > 0:
-            entry["total_bytes"] = size
-            plan.save()
-    elif cmd == "measure":
-        return measure(args[0] if args else "home")
+        write(event(Plan.load(), sid, percent=pct, unit="percent", done=pct, total=100))
+    elif cmd == "check":
+        return check(args[0] if args else "home")
+    elif cmd == "total":
+        return set_total(*(args + ["", "", ""])[:3])
+    elif cmd == "copy":
+        return copy(args[0] if args else "home", args[1] if len(args) > 1 else None)
+    elif cmd == "idle":
+        clear_plan()
+        write({"running": False, "phase": "idle", "label": "", "line": ""})
     elif cmd == "done":
         clear_plan()
-        write({"running": False, "phase": "done", "label": "Done", "busy": False, "percent": 100,
-               "detail": "", "speed": "", "eta": "0:00", "line": "Done", "overall_percent": 100})
+        write({"running": False, "phase": "done", "label": "Done", "percent": 100, "line": "Done"})
     elif cmd == "fail":
         clear_plan()
         # Which disk it failed on (backup.sh's dest_id): "unplugged partway
         # through, press Resume" is about that disk, and stops being true the
         # moment the next backup would go somewhere else.
-        write({"running": False, "phase": "error", "label": "", "busy": False, "percent": 0,
-               "detail": "", "speed": "", "eta": "", "line": " ".join(args) or "Setup failed",
+        write({"running": False, "phase": "error", "label": "", "line": " ".join(args) or "Setup failed",
                "dest": os.environ.get("OMA_DEST_ID") or None})
-    elif cmd == "stream":
-        return stream(args[0] if args else "rsync", args[1] if len(args) > 1 else None)
     else:
         return 1
     return 0

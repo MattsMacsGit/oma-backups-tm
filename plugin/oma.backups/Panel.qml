@@ -420,51 +420,11 @@ Panel {
               Text {
                 visible: text !== ""
                 width: parent.width
-                text: svc.progressDetail !== "" ? svc.progressDetail
-                  : [svc.progressSpeed, svc.progressEta ? ("ETA " + svc.progressEta) : ""].filter(function (s) { return s && s.length }).join("   ")
+                text: svc.progressDetail
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
-              }
-
-              // The second bar: the whole backup, not just this step. Thinner
-              // and dimmer, because the step above is what's happening now.
-              Column {
-                visible: svc.hasOverall
-                width: parent.width
-                spacing: Style.space(4)
-                Item { width: 1; height: Style.space(2) }
-                Text {
-                  width: parent.width
-                  text: svc.overallText
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
-                }
-                Rectangle {
-                  width: parent.width
-                  height: 5
-                  radius: 3
-                  clip: true
-                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
-                  Rectangle {
-                    width: Math.max(5, parent.width * Math.min(100, Math.max(0, svc.overallPercent)) / 100)
-                    height: parent.height
-                    radius: 3
-                    color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.55)
-                  }
-                }
-                Text {
-                  visible: text !== ""
-                  width: parent.width
-                  text: svc.overallDetail
-                  color: root.dim
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.bodySmall
-                  elide: Text.ElideRight
-                }
               }
             }
 
@@ -671,9 +631,7 @@ Panel {
                   : svc.restoringFiles
                   ? (svc.restoreOpening
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
-                    : svc.restoreCounting
-                    ? "Working out what to bring back from " + Model.prettyStamp(svc.partialSnapshot) + "…"
-                    : "Bringing your files back from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
+                    : svc.restoreText + "  (from " + Model.prettyStamp(svc.partialSnapshot) + ")")
                   : (svc.filesDone
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
@@ -927,8 +885,7 @@ Panel {
                     Button {
                       visible: rpKeptRow
                       text: svc.restoreKeptTs === snapId
-                        ? (svc.restoreOpening ? "Opening…"
-                          : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
+                        ? svc.restoreShort
                         : "Restore"
                       bordered: true
                       foreground: root.kept
@@ -1010,8 +967,7 @@ Panel {
                   Button {
                     visible: keptAway.reachable
                     text: svc.restoreKeptTs === keptAway.modelData
-                      ? (svc.restoreOpening ? "Opening…"
-                        : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
+                      ? svc.restoreShort
                       : "Restore"
                     bordered: true
                     foreground: root.kept
