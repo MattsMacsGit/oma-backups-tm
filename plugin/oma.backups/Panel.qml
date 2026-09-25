@@ -32,6 +32,10 @@ Panel {
   // Backup now button for a one-off forced backup; automatic backups stay
   // off until the files are back or a forced backup settles it.
   readonly property bool blockedByRestore: svc.partialSnapshot !== ""
+  // The settings page is the leave-out screen: mid-restore, or on the way
+  // back to a kept restore point (which doesn't pause anything).
+  readonly property bool leaveOutMode: blockedByRestore || svc.keptChoosing !== ""
+  onPageChanged: if (page !== "settings" && svc.keptChoosing !== "") svc.cancelKeptRestore()
   // Where a restore's files are, when that disk can't be reached from here:
   // said instead of offering a button that can only fail.
   function awayText(src) {
@@ -90,13 +94,13 @@ Panel {
 
   // In restore mode the same switches drive the restore skip list instead.
   function quickSkipPaths(entry) {
-    return root.blockedByRestore ? entry.restorePaths : entry.paths
+    return root.leaveOutMode ? entry.restorePaths : entry.paths
   }
 
   function quickSkipOn(entry) {
     var paths = root.quickSkipPaths(entry)
     for (var i = 0; i < paths.length; i++) {
-      if (root.blockedByRestore ? !svc.hasRestoreSkip(paths[i]) : !svc.hasSkip(paths[i])) return false
+      if (root.leaveOutMode ? !svc.hasRestoreSkip(paths[i]) : !svc.hasSkip(paths[i])) return false
     }
     return true
   }
@@ -126,8 +130,8 @@ Panel {
   }
 
   readonly property int customSkipCount: {
-    var n = 0, m = root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
-    var c = root.blockedByRestore ? svc.restoreSkipCount : svc.skipCount
+    var n = 0, m = root.leaveOutMode ? svc.restoreSkipModel : svc.skipModel
+    var c = root.leaveOutMode ? svc.restoreSkipCount : svc.skipCount
     for (var i = 0; i < c; i++) if (!isQuickSkip(m.get(i).path)) n++
     return n
   }
@@ -936,10 +940,10 @@ Panel {
                         && (!svc.restoringFiles || svc.restoreKeptTs === snapId)
                       tooltipText: svc.restoreKeptTs === snapId
                         ? "Stop, and carry on another time"
-                        : "Bring back what this one still holds. Never overwrites a file you have changed since."
+                        : "Choose what stays on it, then bring back the rest. Never overwrites a file you have changed since."
                       onClicked: {
                         if (svc.restoreKeptTs === snapId) svc.stopRestoringFiles()
-                        else svc.restoreKept(snapId)
+                        else { svc.chooseKeptRestore(snapId); root.page = "settings" }
                       }
                     }
                   }
@@ -1016,10 +1020,10 @@ Panel {
                       && (!svc.restoringFiles || svc.restoreKeptTs === keptAway.modelData)
                     tooltipText: svc.restoreKeptTs === keptAway.modelData
                       ? "Stop, and carry on another time"
-                      : "Bring back what this one still holds. Never overwrites a file you have changed since."
+                      : "Choose what stays on it, then bring back the rest. Never overwrites a file you have changed since."
                     onClicked: {
                       if (svc.restoreKeptTs === keptAway.modelData) svc.stopRestoringFiles()
-                      else svc.restoreKept(keptAway.modelData)
+                      else { svc.chooseKeptRestore(keptAway.modelData); root.page = "settings" }
                     }
                   }
                 }
@@ -1095,18 +1099,58 @@ Panel {
             PanelHero {
               width: parent.width
               title: "Settings"
-              meta: root.blockedByRestore
+              meta: root.leaveOutMode
                 ? svc.version + "  ·  what to leave out of this restore"
                 : svc.version + "  ·  skip folders, disks, Pi, erase disk"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
 
+            // On the way back to a kept restore point: the list below is what
+            // stays on it this time, and nothing starts until Start.
+            Column {
+              visible: svc.keptChoosing !== ""
+              width: parent.width
+              spacing: Style.space(8)
+              Text {
+                width: parent.width
+                text: "Bringing back what's on " + Model.prettyStamp(svc.keptChoosing)
+                  + ". Anything ticked or listed below stays on it, and it stays kept. "
+                  + "Take off whatever you want back this time."
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Row {
+                spacing: Style.space(8)
+                Button {
+                  text: "Start restore"
+                  foreground: Color.background
+                  background: Color.accent
+                  accent: Color.accent
+                  fontFamily: root.fontFamily
+                  enabled: svc.linked && !svc.backupRunning && !svc.restoringFiles
+                    && svc.sourceReachable(svc.sourceOf(svc.keptChoosing))
+                  tooltipText: "Never overwrites a file you have changed since."
+                  onClicked: { svc.startKeptRestore(); root.page = "home" }
+                }
+                Button {
+                  text: "Cancel"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: root.page = "home"
+                }
+              }
+              PanelSeparator { foreground: root.foreground }
+            }
+
             Column {
               // Nothing here can be acted on until a restored system has its
               // files back, and a control that cannot be pressed is just noise.
               // The restore card on the home page is the way through.
-              visible: !root.blockedByRestore
+              visible: !root.leaveOutMode
               width: parent.width
               spacing: Style.space(12)
               PanelSectionHeader {
@@ -1163,7 +1207,7 @@ Panel {
               fontFamily: root.fontFamily
             }
             Text {
-              visible: root.blockedByRestore
+              visible: root.leaveOutMode
               width: parent.width
               text: "Tick anything you don't want brought back right now. It stays on the "
                 + "backup, and this restore point is kept until you come for it."
@@ -1186,7 +1230,7 @@ Panel {
                   var on = root.quickSkipOn(modelData)
                   var paths = root.quickSkipPaths(modelData)
                   for (var i = 0; i < paths.length; i++) {
-                    if (root.blockedByRestore) {
+                    if (root.leaveOutMode) {
                       if (on) svc.removeRestoreSkip(paths[i])
                       else svc.addRestoreSkip(paths[i])
                     } else {
@@ -1199,21 +1243,21 @@ Panel {
             }
 
             PanelSectionHeader {
-              text: root.blockedByRestore ? "LEAVE OUT OF THE RESTORE" : "SKIP"
+              text: root.leaveOutMode ? "LEAVE OUT OF THE RESTORE" : "SKIP"
               foreground: root.foreground
               fontFamily: root.fontFamily
             }
             Text {
               visible: root.customSkipCount === 0
               width: parent.width
-              text: root.blockedByRestore ? "Nothing left out — everything comes back." : "Nothing skipped yet."
+              text: root.leaveOutMode ? "Nothing left out — everything comes back." : "Nothing skipped yet."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
             }
             Text {
               width: parent.width
-              text: root.blockedByRestore
+              text: root.leaveOutMode
                 ? "Use this for anything too big for this disk. Folder and File open the "
                   + "backup's own copy, so you pick from what is actually waiting there."
                 : "Left off every backup. Use this for anything large you don’t need on the USB."
@@ -1223,7 +1267,7 @@ Panel {
               wrapMode: Text.WordWrap
             }
             Repeater {
-              model: root.blockedByRestore ? svc.restoreSkipModel : svc.skipModel
+              model: root.leaveOutMode ? svc.restoreSkipModel : svc.skipModel
               delegate: Rectangle {
                 required property string path
                 visible: !root.isQuickSkip(path)
@@ -1260,7 +1304,7 @@ Panel {
                     cursorShape: Qt.PointingHandCursor
                     onClicked: {
                       var p = path
-                      var restoring = root.blockedByRestore
+                      var restoring = root.leaveOutMode
                       Qt.callLater(function () {
                         if (restoring) svc.removeRestoreSkip(p)
                         else svc.removeSkip(p)
@@ -1277,26 +1321,26 @@ Panel {
                 bordered: true
                 // Picking from the restore point means opening it first, which
                 // needs the backup disk and a linked laptop.
-                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
+                enabled: !root.leaveOutMode || (svc.linked && svc.sourceReachable(svc.sourceOf(svc.leaveOutTs)))
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                tooltipText: root.blockedByRestore
+                tooltipText: root.leaveOutMode
                   ? "Opens the restore point so you can pick from the copy on the backup"
                   : ""
-                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(false) : svc.pickFolder()
+                onClicked: root.leaveOutMode ? svc.pickInRestorePoint(false) : svc.pickFolder()
               }
               Button {
                 text: "+ File"
                 bordered: true
                 // Picking from the restore point means opening it first, which
                 // needs the backup disk and a linked laptop.
-                enabled: !root.blockedByRestore || (svc.linked && svc.hasCapsule)
+                enabled: !root.leaveOutMode || (svc.linked && svc.sourceReachable(svc.sourceOf(svc.leaveOutTs)))
                 foreground: root.foreground
                 fontFamily: root.fontFamily
-                tooltipText: root.blockedByRestore
+                tooltipText: root.leaveOutMode
                   ? "Opens the restore point so you can pick from the copy on the backup"
                   : ""
-                onClicked: root.blockedByRestore ? svc.pickInRestorePoint(true) : svc.pickFile()
+                onClicked: root.leaveOutMode ? svc.pickInRestorePoint(true) : svc.pickFile()
               }
             }
 
@@ -1319,7 +1363,7 @@ Panel {
             // section stays out of the way until there is one (or until a Pi
             // is already paired, so it can still be unpaired).
             Column {
-              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.blockedByRestore
+              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1372,7 +1416,7 @@ Panel {
 
             // Needs the Pi, something on it to restore, and a linked laptop.
             Column {
-              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.blockedByRestore
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1442,7 +1486,7 @@ Panel {
             }
 
             Column {
-              visible: svc.hasCapsule && !root.blockedByRestore
+              visible: svc.hasCapsule && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1517,7 +1561,7 @@ Panel {
               // Nothing here can be acted on until a restored system has its
               // files back, and a control that cannot be pressed is just noise.
               // The restore card on the home page is the way through.
-              visible: !root.blockedByRestore
+              visible: !root.leaveOutMode
               width: parent.width
               spacing: Style.space(12)
               PanelSeparator { foreground: root.foreground }

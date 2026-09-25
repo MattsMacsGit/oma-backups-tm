@@ -487,6 +487,23 @@ Item {
   }
   property bool _afterKeep: false
 
+  // Its own process, so a save never lands on top of a --add or --remove,
+  // and ticking several switches in a row always ends with the last list.
+  property var _keptSkipNext: null
+  function runKeptSkipSave() {
+    if (root._keptSkipNext === null) return
+    keptSkipProc.command = root._keptSkipNext
+    root._keptSkipNext = null
+    keptSkipProc.running = true
+  }
+  Process {
+    id: keptSkipProc
+    onExited: {
+      if (root._keptSkipNext !== null) root.runKeptSkipSave()
+      else keptFile.reload()
+    }
+  }
+
   FileView {
     id: keptFile
     path: root.home + "/.local/state/omarchy-backups/kept-points.json"
@@ -507,14 +524,61 @@ Item {
   // this is "will it fit on the disk I am restoring onto, today". Empty by
   // default: a restore brings everything back unless told otherwise.
   ListModel { id: restoreSkipListModel }
-  readonly property var restoreSkipModel: restoreSkipListModel
-  readonly property int restoreSkipCount: restoreSkipListModel.count
+  // Going back to a kept restore point asks the same question again, on the
+  // same screen, but keeps its answer with that restore point (kept-points
+  // "skip") rather than in the list of a restore that may still be going.
+  ListModel { id: keptSkipListModel }
+  // The kept restore point whose leave-out list is on screen, before Start.
+  property string keptChoosing: ""
+  // What the kept restore now running leaves out, fixed when it started.
+  property var keptExcludes: []
+  readonly property var restoreSkipModel: root.keptChoosing !== "" ? keptSkipListModel : restoreSkipListModel
+  readonly property int restoreSkipCount: root.keptChoosing !== "" ? keptSkipListModel.count : restoreSkipListModel.count
+  // The restore point "+ Folder" and "+ File" pick from.
+  readonly property string leaveOutTs: root.keptChoosing !== "" ? root.keptChoosing : root.partialSnapshot
 
   function hasRestoreSkip(path) {
-    for (var i = 0; i < restoreSkipListModel.count; i++) {
-      if (restoreSkipListModel.get(i).path === path) return true
+    var m = root.restoreSkipModel
+    for (var i = 0; i < m.count; i++) {
+      if (m.get(i).path === path) return true
     }
     return false
+  }
+
+  function keptSkips(ts) {
+    var e = root.keptPoints[ts]
+    if (!e) return []
+    if (Array.isArray(e.skip)) return e.skip
+    // Nothing chosen for it yet: start from what was left on it, so taking
+    // an entry off the list is how you ask for that one back.
+    return (Array.isArray(e.left_out) ? e.left_out : []).filter(function (p) {
+      return String(p).indexOf("/") === 0
+    })
+  }
+
+  function chooseKeptRestore(ts) {
+    if (!root.isKept(ts) || root.restoringFiles) return
+    root.pickError = ""
+    root.keptChoosing = ts
+    keptSkipListModel.clear()
+    var l = root.keptSkips(ts)
+    for (var i = 0; i < l.length; i++) keptSkipListModel.append({ path: String(l[i]) })
+  }
+
+  function cancelKeptRestore() {
+    root.keptChoosing = ""
+    keptSkipListModel.clear()
+  }
+
+  function startKeptRestore() {
+    var ts = root.keptChoosing
+    if (ts === "") return
+    var ex = []
+    for (var i = 0; i < keptSkipListModel.count; i++) ex.push(keptSkipListModel.get(i).path)
+    root.keptChoosing = ""
+    keptSkipListModel.clear()
+    root.keptExcludes = ex
+    root.restoreKept(ts)
   }
 
   function loadRestoreSkips() {
@@ -523,6 +587,14 @@ Item {
   }
 
   function persistRestoreSkips() {
+    if (root.keptChoosing !== "") {
+      var k = ["python3", root.keptPointsCli, "--set-skip", root.keptChoosing]
+      for (var j = 0; j < keptSkipListModel.count; j++) k.push(keptSkipListModel.get(j).path)
+      // Taken now, not when it runs: Start may have cleared the screen by then.
+      root._keptSkipNext = k
+      if (!keptSkipProc.running) root.runKeptSkipSave()
+      return
+    }
     var args = ["python3", root.writeRestoreSkip]
     for (var i = 0; i < restoreSkipListModel.count; i++) args.push(restoreSkipListModel.get(i).path)
     persistRestoreSkipProc.command = args
@@ -534,17 +606,19 @@ Item {
     var p = String(path).replace(/\/+$/, "")
     if (p === "") return
     if (root.hasRestoreSkip(p)) return
+    var m = root.restoreSkipModel
     Qt.callLater(function () {
-      restoreSkipListModel.append({ path: p })
+      m.append({ path: p })
       root.persistRestoreSkips()
     })
   }
 
   function removeRestoreSkip(path) {
     var target = path
+    var m = root.restoreSkipModel
     Qt.callLater(function () {
-      for (var i = restoreSkipListModel.count - 1; i >= 0; i--) {
-        if (restoreSkipListModel.get(i).path === target) restoreSkipListModel.remove(i)
+      for (var i = m.count - 1; i >= 0; i--) {
+        if (m.get(i).path === target) m.remove(i)
       }
       root.persistRestoreSkips()
     })
@@ -817,14 +891,15 @@ Item {
   // be open before the chooser can be pointed at it. It stays open afterwards:
   // picking three folders should not unlock the disk three times.
   function pickInRestorePoint(wantFile) {
-    if (root.partialSnapshot === "") return
+    var ts = root.leaveOutTs
+    if (ts === "") return
     root.pickError = ""
     root.pickWantFile = wantFile === true
-    if (root.browseTs === root.partialSnapshot && root.browsePhase === "open" && root.browsePath !== "") {
+    if (root.browseTs === ts && root.browsePhase === "open" && root.browsePath !== "") {
       root.launchRestorePicker()
       return
     }
-    root.browse(root.partialSnapshot, "pick")
+    root.browse(ts, "pick")
   }
 
   function launchRestorePicker() {
@@ -1151,9 +1226,12 @@ Item {
           // percentage means what someone watching it assumes it means.
           var cmd = ["rsync", "-a", "--ignore-existing", "--no-inc-recursive",
             "--info=progress2,flist2"]
-          // Going back for what was left behind leaves nothing out — that is
-          // the whole point of the trip.
-          if (root.restoreKeptTs === "")
+          // A kept restore point leaves out what was chosen for it this time;
+          // otherwise it is the restore's own list.
+          if (root.restoreKeptTs !== "")
+            for (var q = 0; q < root.keptExcludes.length; q++)
+              cmd.push("--exclude=" + root.keptExcludes[q])
+          else
             for (var k = 0; k < restoreSkipListModel.count; k++)
               cmd.push("--exclude=" + restoreSkipListModel.get(k).path)
           cmd.push(String(j.path) + "/", root.home + "/")
@@ -1207,7 +1285,19 @@ Item {
       if (root.restoreKeptTs !== "") {
         var ts = root.restoreKeptTs
         root.restoreKeptTs = ""
-        if (code === 0) {
+        var ex = root.keptExcludes
+        root.keptExcludes = []
+        if (code === 0 && ex.length > 0) {
+          // Some of it was left out again, so it is still the only copy of
+          // that: stays kept, and now says exactly what it still holds.
+          var mark = ["python3", root.keptPointsCli, "--add", ts]
+          var src = root.sourceOf(ts)
+          if (src !== "") mark.push("--source", src)
+          keptPointProc.command = mark.concat(ex)
+          keptPointProc.running = true
+          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
+            "Everything but what you left out. That stays on " + Model.prettyStamp(ts) + ", which is kept for it."])
+        } else if (code === 0) {
           // Nothing is left on it now, so it goes back to being an ordinary
           // restore point that thinning may take when its turn comes.
           root.releaseKept(ts)

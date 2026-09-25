@@ -655,6 +655,14 @@ keep_forced_point() {
     ${source:+--source "$source"} "${what[@]}" >/dev/null 2>>"$OMARCHY_TM_LOG"; then
     # Written as root into the user's own folder: hand it back, so the
     # plugin can let it go later.
+    # What they had chosen to leave out of this restore goes with it, so
+    # going back for the rest starts from their answer rather than nothing.
+    local -a skips=()
+    mapfile -t skips < <(grep -v '^[[:space:]]*\(#\|$\)' "$OMARCHY_TM_STATE/restore-skips.txt" 2>/dev/null || true)
+    if ((${#skips[@]})); then
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --set-skip "$snap" "${skips[@]}" \
+        >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+    fi
     kf="$OMARCHY_TM_STATE/kept-points.json"
     chown --reference="$OMARCHY_TM_STATE" "$kf" 2>/dev/null || true
     log_file "forced backup: kept restore point $snap (still holds: ${what[*]})"
