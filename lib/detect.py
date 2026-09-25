@@ -516,7 +516,6 @@ def detect(diagnostics: bool = True) -> dict:
                 "internal": not usb,
                 "kind": kind,
                 "installer": installer,
-                "hidden_by_default": (not usb) or reason is not None,
                 "protected": reason is not None,
                 "protected_reason": reason,
                 "capsule": cap,
@@ -729,8 +728,6 @@ def print_human(d: dict) -> None:
             flags.append(f"REFUSE: {disk['protected_reason']}")
         elif disk.get("content"):
             flags.append(disk["content"])
-        elif disk.get("hidden_by_default"):
-            flags.append("internal — hidden unless --all")
         elif disk["candidate"]:
             flags.append("candidate")
         label = ",".join(disk.get("labels") or []) or "-"

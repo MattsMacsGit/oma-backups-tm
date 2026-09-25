@@ -60,7 +60,6 @@ Item {
     ? (progressLabel || Model.phaseLabel(progressPhase))
     : progressLabel + "  " + progressPercent + "%"
   property string selectedDisk: ""
-  property bool showAllDisks: false
   property bool wipeConfirmed: false
   property bool skipLoaded: false
   property bool restoreSkipLoaded: false
@@ -117,14 +116,12 @@ Item {
 
   readonly property var disks: {
     var d = detect && detect.disks ? detect.disks : []
-    var out = []
-    for (var i = 0; i < d.length; i++) {
-      var disk = d[i]
-      if (disk.protected) continue
-      if (!root.showAllDisks && disk.hidden_by_default) continue
-      out.push(disk)
-    }
-    return out
+    // Every disk, USB first. The one this computer runs from is listed too
+    // (greyed out, it can't be erased from inside the running system) so
+    // the list is the whole picture.
+    var usb = [], other = []
+    for (var i = 0; i < d.length; i++) (d[i].usb ? usb : other).push(d[i])
+    return usb.concat(other)
   }
   // The current backup disk if it's plugged in, else any backup disk (the
   // same choice backup.sh makes via capsule_luks_partition).
@@ -730,9 +727,9 @@ Item {
     privileged(["remote", "forget"])
   }
 
-  // An internal disk is only on the list when "Show all disks" is on, and is
-  // only erased after the user has picked it and ticked the confirm. That is
-  // the choice made, so the scripts are told so instead of refusing it.
+  // An internal disk is only erased after the user has picked it and ticked
+  // the confirm. That is the choice made, so the scripts are told so instead
+  // of refusing it.
   function eraseArgs(disk) {
     var d = detect && detect.disks ? detect.disks : []
     for (var i = 0; i < d.length; i++)

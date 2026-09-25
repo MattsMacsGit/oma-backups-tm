@@ -381,8 +381,7 @@ After install, `oma-backups` is on `PATH` (`~/.local/bin`).
 
 ```bash
 oma-backups detect
-oma-backups disks            # USB default
-oma-backups disks --all
+oma-backups disks            # every disk, and what is on it
 oma-backups backup --yes
 oma-backups backup --force-after-restore   # back up a part-restored system anyway
 oma-backups stop

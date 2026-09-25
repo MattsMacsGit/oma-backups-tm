@@ -15,15 +15,15 @@ echo "== OmaBackups selftest =="
 "$CLI" detect >"$WORK/detect.txt" 2>&1 || true
 if grep -q SUPPORTED "$WORK/detect.txt"; then ok "detect SUPPORTED"; else bad "detect not SUPPORTED"; cat "$WORK/detect.txt"; fi
 
-usb="$("$CLI" disks | awk '{print $1}' | tr '\n' ' ')"
-echo "USB disks: $usb"
-echo "$usb" | grep -q nvme && bad "nvme shown without --all" || ok "disks USB-only (no nvme)"
-
-all="$("$CLI" disks --all)"
-echo "$all" | grep -E 'nvme|internal' >/dev/null && ok "disks --all lists internal" || bad "disks --all missing internal"
+all="$("$CLI" disks)"
+echo "$all" | awk '{print $1}' | tr '\n' ' '; echo
+echo "$all" | grep -E 'nvme|internal|live-root' >/dev/null && ok "disks lists internal drives too" || bad "disks missing internal drives"
+live="$("$CLI" detect --json | jq -r '.live_root_disk // empty')"
+if [[ -n $live ]]; then
+  echo "$all" | grep "^$live\s" | grep -q REFUSE && ok "running disk marked REFUSE" || bad "running disk not marked REFUSE"
+fi
 # A Ventoy stick is the owner's USB: listed with a warning, never refused.
 if echo "$all" | grep -qi ventoy; then
-  "$CLI" disks | grep -qi ventoy && ok "Ventoy listed by default" || bad "Ventoy hidden from the disk list"
   if echo "$all" | grep -i ventoy | grep -q REFUSE; then
     bad "Ventoy refused"
   else

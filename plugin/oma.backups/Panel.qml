@@ -109,6 +109,12 @@ Panel {
   // Disks that could become a network rescue stick: all of them. Anything
   // already on one (a backup disk, a Ventoy stick) is named in its label.
   readonly property var stickDisks: svc.disks
+  // The running disk is always listed but can't be picked, so "is anything
+  // plugged in?" has to skip it.
+  function anyPickable(list) {
+    for (var i = 0; i < list.length; i++) if (!list[i].protected) return true
+    return false
+  }
   readonly property var otherDisks: {
     var out = []
     var cur = svc.capsule ? svc.capsule.path : ""
@@ -925,6 +931,8 @@ Panel {
                   width: column.width
                   text: Model.diskLabel(modelData)
                   bordered: true
+                  enabled: !modelData.protected
+                  opacity: modelData.protected ? 0.5 : 1
                   selected: svc.selectedDisk === modelData.path
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1194,17 +1202,6 @@ Panel {
               wrapMode: Text.WordWrap
             }
 
-            Toggle {
-              visible: !root.blockedByRestore
-              width: parent.width
-              label: "Show all disks"
-              description: "Includes internal drives. Easy to wipe the computer’s own disk."
-              checked: svc.showAllDisks
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.showAllDisks = !svc.showAllDisks
-            }
-
             // Not part of setting up: moving the disk to a Pi only makes
             // sense once this laptop has made a backup on it, so the whole
             // section stays out of the way until there is one (or until a Pi
@@ -1282,7 +1279,7 @@ Panel {
                 wrapMode: Text.WordWrap
               }
               Text {
-                visible: root.stickDisks.length === 0
+                visible: !root.anyPickable(root.stickDisks)
                 width: parent.width
                 text: "Plug in the USB you want to use."
                 color: root.dim
@@ -1296,6 +1293,8 @@ Panel {
                   width: column.width
                   text: Model.diskLabel(modelData)
                   bordered: true
+                  enabled: !modelData.protected
+                  opacity: modelData.protected ? 0.5 : 1
                   selected: root.stickDisk === modelData.path
                   foreground: root.foreground
                   fontFamily: root.fontFamily
@@ -1352,7 +1351,7 @@ Panel {
                 wrapMode: Text.WordWrap
               }
               Text {
-                visible: root.otherDisks.length === 0
+                visible: !root.anyPickable(root.otherDisks)
                 width: parent.width
                 text: "Plug in the USB you want to use."
                 color: root.dim
@@ -1366,6 +1365,8 @@ Panel {
                   width: column.width
                   text: Model.diskLabel(modelData)
                   bordered: true
+                  enabled: !modelData.protected
+                  opacity: modelData.protected ? 0.5 : 1
                   selected: root.newDisk === modelData.path
                   foreground: root.foreground
                   fontFamily: root.fontFamily

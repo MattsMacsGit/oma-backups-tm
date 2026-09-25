@@ -6,9 +6,9 @@ function diskLabel(d) {
   var bits = [d.path, d.size || "", d.model || ""].filter(function (x) { return x && String(x).length })
   if (d.tran) bits.push(d.tran)
   if (labels.length) bits.push(labels.join(","))
-  if (d.protected) bits.push("live system — cannot use")
+  if (d.protected) bits.push("this computer’s own disk — can’t be erased while running")
   else {
-    if (d.kind === "internal") bits.push("internal")
+    if (d.kind === "internal") bits.push("internal drive")
     // What is already on it (backup disk, rescue stick, a system). Advisory:
     // the disk is still offered, it just stops looking blank.
     if (d.content) bits.push(d.content)

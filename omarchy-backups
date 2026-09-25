@@ -31,7 +31,7 @@ Every day
                           automatic backups
 
 Setting up
-  disks [--all] [--json]  disks that could be used
+  disks [--json]          every disk, and what is on it
   first-run /dev/sdX      set up a disk, ready for its first backup
   format-disk /dev/sdX [--yes] [--force] [--skip-live] [--iso PATH]
                           set up a disk and nothing else
@@ -71,7 +71,7 @@ With any of the above
   --force                 go ahead on a disk that already holds backups
   --home-only             back up your home folder and not the system
 
-USB disks only by default; an internal disk needs --all or --allow-internal.
+An internal disk needs --allow-internal on the commands that erase it.
 The disk this computer is running from is always refused.
 EOF
 }
@@ -91,10 +91,10 @@ init_config() {
 }
 
 disks_cmd() {
-  local all=0 json=0
+  local json=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --all) all=1; shift ;;
+      --all) shift ;; # every disk is always listed now; kept so old commands still run
       --json) json=1; shift ;;
       *) die "unknown argument: $1" ;;
     esac
@@ -102,27 +102,13 @@ disks_cmd() {
   local raw
   raw="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/detect.py" --json)"
   if [[ $json == 1 ]]; then
-    if [[ $all == 1 ]]; then
-      printf '%s\n' "$raw" | jq '{hostname, live_root_disk, disks}'
-    else
-      printf '%s\n' "$raw" | jq '{
-        hostname, live_root_disk,
-        disks: [.disks[] | select(.hidden_by_default != true)]
-      }'
-    fi
+    printf '%s\n' "$raw" | jq '{hostname, live_root_disk, disks}'
     return 0
   fi
-  if [[ $all == 1 ]]; then
-    printf '%s\n' "$raw" | jq -r '
-      .disks[] |
-      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .protected then "\tREFUSE:"+(.protected_reason // "") elif .content then "\t"+.content else "" end)"
-    '
-  else
-    printf '%s\n' "$raw" | jq -r '
-      .disks[] | select(.hidden_by_default != true) |
-      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .content then "\t"+.content else "" end)"
-    '
-  fi
+  printf '%s\n' "$raw" | jq -r '
+    .disks[] |
+    "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .protected then "\tREFUSE:"+(.protected_reason // "") elif .content then "\t"+.content else "" end)"
+  '
 }
 
 while [[ $# -gt 0 ]]; do
