@@ -100,31 +100,11 @@ Item {
   readonly property string cli: shareRoot + "/omarchy-backups"
   readonly property string listSnaps: shareRoot + "/lib/list_snapshots.py"
   readonly property string skipFile: home + "/.config/omarchy-backups/skip-paths.txt"
-  readonly property string picker: {
-    var r = detect && detect._root
-    if (r) return r + "/lib/pick_path.py"
-    return shareRoot + "/lib/pick_path.py"
-  }
-  readonly property string writeSkip: {
-    var r = detect && detect._root
-    if (r) return r + "/lib/write_skip_paths.py"
-    return shareRoot + "/lib/write_skip_paths.py"
-  }
-  readonly property string keptPointsCli: {
-    var r = detect && detect._root
-    if (r) return r + "/lib/kept_points.py"
-    return shareRoot + "/lib/kept_points.py"
-  }
-  readonly property string writeRestoreSkip: {
-    var r = detect && detect._root
-    if (r) return r + "/lib/write_restore_skips.py"
-    return shareRoot + "/lib/write_restore_skips.py"
-  }
-  readonly property string seedSkip: {
-    var r = detect && detect._root
-    if (r) return r + "/lib/skip_defaults.py"
-    return shareRoot + "/lib/skip_defaults.py"
-  }
+  readonly property string picker: shareRoot + "/lib/pick_path.py"
+  readonly property string writeSkip: shareRoot + "/lib/write_skip_paths.py"
+  readonly property string keptPointsCli: shareRoot + "/lib/kept_points.py"
+  readonly property string writeRestoreSkip: shareRoot + "/lib/write_restore_skips.py"
+  readonly property string seedSkip: shareRoot + "/lib/skip_defaults.py"
 
   readonly property var disks: {
     var d = detect && detect.disks ? detect.disks : []
@@ -180,10 +160,7 @@ Item {
   property var schedule: ({ enabled: false, every: "daily", retention: "smart" })
   property bool scheduleInstalled: false
   readonly property bool scheduleOn: schedule.enabled === true && scheduleInstalled
-  readonly property string scheduleTool: {
-    var r = detect && detect._root
-    return (r || shareRoot) + "/lib/schedule.py"
-  }
+  readonly property string scheduleTool: shareRoot + "/lib/schedule.py"
 
   // When the hourly check will next run a backup: due one interval after the
   // last successful one (a little early, like schedule.sh), at the first
@@ -864,10 +841,14 @@ Item {
         root.pickError = "That isn't inside the restore point. Pick something from the backup's own copy."
         return
       }
-      // 1 is "cancelled", which needs no comment. 2 is the picker not being
-      // installed — the button did nothing at all and said nothing either.
-      if (code === 2)
+      // 1 is "cancelled", which needs no comment. 4 is GTK missing. Anything
+      // else is the chooser not starting at all — Python itself exits 2 when
+      // the script isn't there, which once read as "install GTK" on a
+      // machine that had it.
+      if (code === 4)
         root.pickError = "Couldn't open the file chooser. Install it with:  sudo pacman -S python-gobject gtk3"
+      else if (code !== 1)
+        root.pickError = "Couldn't start the file chooser (" + root.picker + " exited " + code + ")."
     }
   }
 
@@ -881,7 +862,6 @@ Item {
     onExited: function () {
       try {
         var parsed = JSON.parse(root._detectOut)
-        parsed._root = root.home + "/.local/share/oma-backups"
         root.detect = parsed
         var cap = false
         var disks = parsed.disks || []

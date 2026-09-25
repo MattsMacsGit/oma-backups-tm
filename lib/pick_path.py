@@ -23,7 +23,9 @@ def main() -> int:
         from gi.repository import Gtk
     except Exception as e:
         print(f"picker unavailable: {e}", file=sys.stderr)
-        return 2
+        # Not 2: Python and argparse both exit 2 on their own errors, and the
+        # panel must tell "GTK is missing" apart from "this didn't run".
+        return 4
 
     action = Gtk.FileChooserAction.OPEN if args.file else Gtk.FileChooserAction.SELECT_FOLDER
     title = args.title or ("Skip this file in backups" if args.file else "Skip this folder in backups")
