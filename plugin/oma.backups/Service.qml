@@ -254,9 +254,13 @@ Item {
   // that follows is a share of the WHOLE job rather than of however much it
   // happened to have looked at by then.
   property bool restoreCounting: false
+  // ...but "working out" alone, for minutes, read as stuck: from a Pi every
+  // file is a network round trip. rsync's flist2 counts as it goes, so say it.
+  property int restoreChecked: 0
   property string restoreCopied: ""
   readonly property string restoreProgress: root.restoreCounting
     ? "working out how much to bring back…"
+      + (root.restoreChecked > 0 ? "  ·  " + root.restoreChecked.toLocaleString(Qt.locale(), "f", 0) + " files checked" : "")
     : root.restorePercent + "%"
       + (root.restoreCopied === "" ? "" : "  ·  " + root.restoreCopied + " so far")
   // What the quick restore left in the system area (AI models), still to put
@@ -348,6 +352,7 @@ Item {
   function restoreReset() {
     root.restorePercent = 0
     root.restoreCounting = true
+    root.restoreChecked = 0
     root.restoreCopied = ""
   }
 
@@ -1137,7 +1142,7 @@ Item {
           // --no-inc-recursive: count the whole job before starting it, so the
           // percentage means what someone watching it assumes it means.
           var cmd = ["rsync", "-a", "--ignore-existing", "--no-inc-recursive",
-            "--info=progress2"]
+            "--info=progress2,flist2"]
           // Going back for what was left behind leaves nothing out — that is
           // the whole point of the trip.
           if (root.restoreKeptTs === "")
@@ -1164,7 +1169,13 @@ Item {
     stdout: SplitParser {
       splitMarker: "\r"
       onRead: function (line) {
+        // " 12300 files..." while it counts (flist2), then
         // "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
+        var c = /^\s*(\d+) files\.\.\./.exec(line)
+        if (c) {
+          root.restoreChecked = parseInt(c[1], 10)
+          return
+        }
         var m = /^\s*([\d,]+)\s+(\d{1,3})%/.exec(line)
         if (!m) return
         root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
