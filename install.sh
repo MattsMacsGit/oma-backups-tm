@@ -52,6 +52,10 @@ fi
 
 "$SHARE/omarchy-backups" compile-excludes >/dev/null 2>&1 || true
 
+# Plugging the backup disk in shouldn't pop up a password window: OmaBackups
+# unlocks it itself. See lib/udiskie-rule.sh.
+"$ROOT/lib/udiskie-rule.sh" install || true
+
 # Password-free and automatic backups run from a root-owned copy; bring it
 # up to date with this install.
 if [[ -f /etc/omarchy-backups/linked.json ]]; then
