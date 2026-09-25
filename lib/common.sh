@@ -902,12 +902,18 @@ stop_backup() {
 
 status_json() {
   local f="${OMARCHY_TM_STATUS_FILE:-/run/omarchy-backups.status}"
-  local pidf pid raw incomplete
+  local pidf pid raw incomplete resume
   pidf="$(pid_file)"
   pid=""
   [[ -f $pidf ]] && pid="$(tr -d '[:space:]' <"$pidf")"
   incomplete=false
   [[ -f $(incomplete_flag) ]] && incomplete=true
+  # Which disk a stopped backup can carry on to, and since when. backup.sh
+  # only resumes onto that same disk within a day, so the panel only offers
+  # "Resume" while that disk is the one a backup would use.
+  resume="$(jq -c '{dest: (.dest // ""), started: (.started // 0)}' \
+    "$OMARCHY_TM_STATE/in-progress.json" 2>/dev/null || true)"
+  [[ -n $resume ]] || resume=null
   if [[ -f $f ]]; then
     raw="$(cat "$f" 2>/dev/null || true)"
   else
@@ -915,20 +921,20 @@ status_json() {
   fi
   if printf '%s' "$raw" | jq -e . >/dev/null 2>&1; then
     if [[ -n $pid ]] && backup_pid_alive "$pid"; then
-      printf '%s\n' "$raw" | jq -c --arg pid "$pid" --argjson incomplete "$incomplete" \
-        '.pid=$pid | .stale=false | .incomplete=$incomplete'
+      printf '%s\n' "$raw" | jq -c --arg pid "$pid" --argjson incomplete "$incomplete" --argjson resume "$resume" \
+        '.pid=$pid | .stale=false | .incomplete=$incomplete | .resume=$resume'
       return 0
     fi
-    printf '%s\n' "$raw" | jq -c --argjson incomplete "$incomplete" \
-      '.running=false | .stale=true | .pid=null | .incomplete=$incomplete'
+    printf '%s\n' "$raw" | jq -c --argjson incomplete "$incomplete" --argjson resume "$resume" \
+      '.running=false | .stale=true | .pid=null | .incomplete=$incomplete | .resume=$resume'
     return 0
   fi
   if [[ -n $pid ]] && backup_pid_alive "$pid"; then
-    jq -n -c --arg line "$raw" --arg pid "$pid" --argjson incomplete "$incomplete" \
-      '{running:true, phase:"unknown", percent:0, speed:"", eta:"", line:$line, pid:$pid, stale:false, incomplete:$incomplete}'
+    jq -n -c --arg line "$raw" --arg pid "$pid" --argjson incomplete "$incomplete" --argjson resume "$resume" \
+      '{running:true, phase:"unknown", percent:0, speed:"", eta:"", line:$line, pid:$pid, stale:false, incomplete:$incomplete, resume:$resume}'
   else
-    jq -n -c --arg line "$raw" --argjson incomplete "$incomplete" \
-      '{running:false, phase:"idle", percent:0, speed:"", eta:"", line:$line, stale:true, incomplete:$incomplete}'
+    jq -n -c --arg line "$raw" --argjson incomplete "$incomplete" --argjson resume "$resume" \
+      '{running:false, phase:"idle", percent:0, speed:"", eta:"", line:$line, stale:true, incomplete:$incomplete, resume:$resume}'
   fi
 }
 

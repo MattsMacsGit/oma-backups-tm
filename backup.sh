@@ -553,7 +553,7 @@ fail_backup() {
   if [[ -n ${BROWSE_STATE:-} ]]; then
     browse_state error "$*"
   else
-    progress fail "Backup failed: $*"
+    OMA_DEST_ID="$(dest_id 2>/dev/null || true)" progress fail "Backup failed: $*"
   fi
   # 1, not 130: by convention 130 means "the user pressed Ctrl-C", which is a
   # different thing from "this failed". 143 (asked to stop) stays as it is.

@@ -416,6 +416,47 @@ def cached_capsule_disk(path: Path) -> dict | None:
     return {"total": total, "used": total - free, "free": free}
 
 
+def remote_conf() -> dict | None:
+    try:
+        j = json.loads(Path("/etc/omarchy-backups/remote.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return j if isinstance(j, dict) else None
+
+
+def backup_destination(disks: list[dict], mnt: Path | None, recorded: str | None,
+                       rkey: str | None, rconf: dict | None):
+    """Where the next backup goes, decided exactly as backup.sh's
+    pick_destination does: the Pi, unless the backup disk that was set up is
+    plugged in here (or open). The list, the free space and "Resume" all belong
+    to that disk and no other. Returns (kind, dest_id, plugged uuid, mounted
+    uuid, mount); dest_id matches backup.sh's dest_id."""
+    plugged = []
+    mounted_uuid = None
+    for d in disks:
+        cap = d.get("capsule")
+        if d.get("kind") != "capsule" or d.get("protected") or not cap or not cap.get("luks_uuid"):
+            continue
+        plugged.append(cap["luks_uuid"])
+        if mnt is not None and str(mnt) in (d.get("mountpoints") or []):
+            mounted_uuid = cap["luks_uuid"]
+    # A mount no plugged-in disk holds is what a pulled-out USB leaves behind:
+    # its folder listing can still read back from memory, restore points and
+    # all. backup.sh clears it (close_stale_mapper) before choosing; so does
+    # this.
+    if mounted_uuid is None:
+        mnt = None
+    # The one set up, if it's plugged in, else the first (capsule_luks_partition).
+    here = recorded if recorded in plugged else (plugged[0] if plugged else None)
+    own_mount = mnt is not None and not str(mnt).startswith("/run/media/")
+    if rkey and not own_mount and (here is None or (recorded and here != recorded)):
+        rc = rconf or {}
+        return "remote", f"remote:{rc.get('host') or ''}:{rc.get('luks_uuid') or ''}", here, mounted_uuid, mnt
+    if here or mnt is not None:
+        return "local", f"local:{mounted_uuid or here or ''}", here, mounted_uuid, mnt
+    return None, None, here, mounted_uuid, mnt
+
+
 def detect(diagnostics: bool = True) -> dict:
     """diagnostics=False leaves out the fields only `oma-backups detect`'s own
     printout uses: the tool inventory and `btrfs subvolume list`. The plugin
@@ -577,16 +618,36 @@ def detect(diagnostics: bool = True) -> dict:
     optional_missing = [k for k, v in tool_status.items() if not v and k in {"pv", "arch-chroot"}]
 
     snapshots = []
+    snapshots_known = True
     backup_mounted = False
     capsule_disk = None
+    destination = None
+    destination_id = None
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
-        from list_snapshots import cache_path, find_mount, scan, write_cache
+        from list_snapshots import (cache_path, disk_key, find_mount, load_saved, remote_key,
+                                    save_list, scan, write_cache)
 
-        mnt = find_mount()
+        rkey = remote_key()
+        destination, destination_id, here, mounted_uuid, mnt = backup_destination(
+            disks, find_mount(), current_capsule_uuid(), rkey, remote_conf())
         backup_mounted = mnt is not None
+
         if mnt is not None:
-            snapshots = scan(mnt)
+            # A mounted disk is read as it is now (a directory listing, cheap
+            # enough for every poll) and remembered as that disk's list.
+            rows = scan(mnt)
+            save_list(disk_key(mounted_uuid), rows)
+        if destination == "remote":
+            # The Pi can't be asked from here (its key is root's), so its list
+            # is the one its last backup or tidy-up saved.
+            saved = load_saved(rkey)
+            snapshots_known = saved is not None
+            snapshots = saved or []
+            write_cache(snapshots)
+            capsule_disk = cached_capsule_disk(cache_path().parent / "capsule-disk.json")
+        elif mnt is not None:
+            snapshots = rows
             write_cache(snapshots)
             # Whole-filesystem stat, not a tree walk — cheap enough for
             # every detect() poll. Per-snapshot sizes are a different
@@ -596,11 +657,13 @@ def detect(diagnostics: bool = True) -> dict:
                 capsule_disk = {"total": du.total, "used": du.used, "free": du.free}
             except OSError:
                 capsule_disk = None
-        elif Path("/etc/omarchy-backups/remote.json").is_file():
-            # With a paired Pi the disk is never mounted here; its restore
-            # points and free space come from what the last remote backup
-            # cached.
-            capsule_disk = cached_capsule_disk(cache_path().parent / "capsule-disk.json")
+        elif here:
+            # Plugged in but locked: what was on it when it was last open.
+            # Nothing writes to it without unlocking it here first.
+            saved = load_saved(disk_key(here))
+            snapshots_known = saved is not None
+            snapshots = saved or []
+            write_cache(snapshots)
         else:
             write_cache([])
     except Exception:
@@ -649,7 +712,10 @@ def detect(diagnostics: bool = True) -> dict:
         "live_root_disk": live_root_disk,
         "disks": disks,
         "snapshots": snapshots,
+        "snapshots_known": snapshots_known,
         "backup_mounted": backup_mounted,
+        "destination": destination,
+        "destination_id": destination_id,
         "capsule_disk": capsule_disk,
         "current_capsule_uuid": current_capsule_uuid(),
         "limine": limine_info(),

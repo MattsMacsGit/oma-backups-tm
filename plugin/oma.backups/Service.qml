@@ -64,7 +64,19 @@ Item {
   property bool skipLoaded: false
   property bool restoreSkipLoaded: false
   property int _leftOutAtFinish: 0
-  property bool backupIncomplete: false
+  // "Resume" is only true of the disk the stopped backup was going to, and
+  // backup.sh only carries on there within a day. Plug a different disk in,
+  // or unplug the USB so the Pi takes over, and the next backup starts fresh
+  // — so that is what the button says.
+  property bool _incompleteFlag: false
+  property var _resumeFor: undefined
+  readonly property bool backupIncomplete: {
+    if (!_incompleteFlag) return false
+    // A root copy older than the panel doesn't say which disk; trust the flag.
+    if (_resumeFor === undefined) return true
+    if (!_resumeFor || !destinationId || _resumeFor.dest !== destinationId) return false
+    return nowSec - Number(_resumeFor.started || 0) < 86400
+  }
   // Set by the Panel: the disk scan only needs to run while someone is looking.
   property bool panelOpen: false
 
@@ -143,7 +155,16 @@ Item {
   // A paired Pi holding the backup USB (see remote.sh). It counts as the
   // backup disk whenever the USB isn't plugged in here, like backup.sh.
   property var remote: null
-  readonly property bool remoteActive: remote !== null && capsule === null
+  // Worked out by `detect` the way backup.sh picks where a backup goes: the
+  // Pi, unless the disk that was set up is plugged in here (a second backup
+  // USB doesn't divert anything). Until detect has answered, the old guess.
+  readonly property bool remoteActive: remote !== null
+    && (detect && detect.destination !== undefined ? detect.destination === "remote" : capsule === null)
+  // backup.sh's dest_id for that disk: what "Resume" and a failure belong to.
+  readonly property string destinationId: (detect && detect.destination_id) || ""
+  // False when the next backup's disk has never been read on this laptop, so
+  // an empty list means "not known yet", not "no restore points".
+  readonly property bool snapshotsKnown: !(detect && detect.snapshots_known === false)
   readonly property string remoteHost: remote ? String(remote.host || "") : ""
   // Written by a root backup or `remote status` once the Pi has answered.
   // The panel cannot ask the Pi itself: the SSH key is root-only.
@@ -878,7 +899,16 @@ Item {
       root.launchedBackup = false
       root.sawBackupStatus = false
     }
-    if (j.phase === "error") {
+    // A failure on a disk that's no longer where backups go (the USB came
+    // out, and the Pi took over) isn't this disk's news. The status file
+    // still holds it, so it is set aside on every reading, not just once.
+    var otherDisk = j.phase === "error" && j.dest && root.destinationId !== "" && j.dest !== root.destinationId
+    if (otherDisk) {
+      root.backupError = ""
+      if (!root.backupRunning) root.lastError = ""
+      // Same as a leftover error: a backup just launched is still starting.
+      if (!root.launchedBackup) root.backupRunning = false
+    } else if (j.phase === "error") {
       // If we just launched this attempt and haven't seen it report
       // running yet, an "error" here is leftover from a *previous*,
       // unrelated failure that hasn't been overwritten on disk yet (e.g.
@@ -919,7 +949,11 @@ Item {
     } else if (typeof j.running === "boolean") {
       root.backupRunning = j.running
     }
-    if (typeof j.incomplete === "boolean") root.backupIncomplete = j.incomplete
+    // Only `oma-backups status` says these; the raw status file never does.
+    if (typeof j.incomplete === "boolean") {
+      root._incompleteFlag = j.incomplete
+      root._resumeFor = j.hasOwnProperty("resume") ? j.resume : undefined
+    }
     if (typeof j.percent === "number" || (j.percent && String(j.percent).length))
       root.progressPercent = parseInt(j.percent, 10) || 0
     root.progressEta = j.eta || ""

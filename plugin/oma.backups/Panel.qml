@@ -738,7 +738,11 @@ Panel {
               Text {
                 width: parent.width
                 text: svc.snapshotCount === 0
-                  ? "No dated copies yet. After a backup they appear here."
+                  ? (!svc.snapshotsKnown
+                    ? (svc.remoteActive
+                      ? "Not read from " + svc.remoteHost + " yet. Its restore points appear here after the next backup to it."
+                      : "Not read from this disk yet. Its restore points appear here once it's unlocked or backed up to.")
+                    : "No dated copies yet. After a backup they appear here.")
                   : (svc.remoteActive && !svc.linked
                     ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
                     : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
