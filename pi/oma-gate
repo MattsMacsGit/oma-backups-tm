@@ -28,7 +28,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "9"
+VERSION = "10"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -292,6 +292,14 @@ def lock_wanted_since(started: float) -> bool:
     return fresh
 
 
+def sweep_armed() -> bool:
+    """Leaving the disk open is only safe while something will close it."""
+    if TEST:
+        return os.environ.get("OMA_GATE_SWEEP", "1") == "1"
+    r = subprocess.run(["systemctl", "is-active", "--quiet", "oma-gate-sweep.timer"])
+    return r.returncode == 0
+
+
 def do_lock() -> None:
     if mounted():
         run("sync")
@@ -303,10 +311,14 @@ def do_lock() -> None:
 def v_lock(args: list[str]) -> None:
     """lock [HOLD] -- let go of one mark, or of everything.
 
-    With a hold id this only lets go of that one caller: the disk is locked
-    when the last mark goes, and not before. Without one it is the blunt
-    "everybody off" that the rescue stick and a person clearing up by hand
-    need.
+    With a hold id this only lets go of that one caller. When it was the
+    last, the disk still stays open: the sweep locks it after IDLE_LOCK of
+    nobody holding it and nothing moving. Unlocking costs ~20 seconds of
+    key stretching on a Pi (no AES instructions), and picking what to
+    leave out, then restoring, then browsing used to pay that three times
+    over in as many minutes. Without an id it is the blunt "everybody off"
+    that the rescue stick and a person clearing up by hand need, and that
+    still locks at once.
     """
     hid = args[0] if args else ""
     if hid and not HOLD_ID.match(hid):
@@ -326,6 +338,13 @@ def v_lock(args: list[str]) -> None:
             if still:
                 log(f"let go of {hid}; {len(still)} still using the disk")
                 return
+            if sweep_armed():
+                # Start the quiet clock from now, not from whenever the sweep
+                # last looked.
+                IO_STAMP.unlink(missing_ok=True)
+                log(f"let go of {hid}; nobody on the disk, it locks after {IDLE_LOCK // 60} quiet minutes")
+                return
+            # No idle lock running: nothing would ever close it, so close it now.
         else:
             hold_drop_all()
         do_lock()
