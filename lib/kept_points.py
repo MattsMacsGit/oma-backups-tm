@@ -8,7 +8,9 @@ and smart thinning would eventually take it. So it gets earmarked here and
 prune_restore_points leaves it alone, for as long as the user wants it.
 
   kept_points.py --list                       print the file as JSON
-  kept_points.py --add TS [ENTRY...]          earmark TS, noting what is on it
+  kept_points.py --add TS [--source ID] [ENTRY...]
+                                              earmark TS, noting what is on it
+                                              and which disk it is on
   kept_points.py --remove TS                  let TS be thinned again
 
 Lives beside partial-restore.json in the user's own state folder, so the
@@ -74,15 +76,24 @@ def main() -> int:
     if cmd == "--add":
         from datetime import datetime, timezone
 
+        rest = argv[2:]
+        source = ""
+        # Entries are paths (they start with "/"), so the flag can't be one.
+        if len(rest) >= 2 and rest[0] == "--source":
+            source, rest = rest[1], rest[2:]
         data[ts] = {
             "since": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "reason": "left-out",
-            "left_out": [a for a in argv[2:] if a],
+            "left_out": [a for a in rest if a],
         }
+        # Which disk it is on (backup.sh's dest_id), so going back for what
+        # was left out reads from that disk, wherever backups go by then.
+        if re.match(r"^(local|remote):", source):
+            data[ts]["source"] = source
     elif cmd == "--remove":
         data.pop(ts, None)
     else:
-        print("usage: kept_points.py --list | --add TS [ENTRY...] | --remove TS", file=sys.stderr)
+        print("usage: kept_points.py --list | --add TS [--source ID] [ENTRY...] | --remove TS", file=sys.stderr)
         return 2
     save(p, data)
     return 0

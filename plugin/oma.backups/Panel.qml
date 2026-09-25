@@ -32,6 +32,14 @@ Panel {
   // Backup now button for a one-off forced backup; automatic backups stay
   // off until the files are back or a forced backup settles it.
   readonly property bool blockedByRestore: svc.partialSnapshot !== ""
+  // Where a restore's files are, when that disk can't be reached from here:
+  // said instead of offering a button that can only fail.
+  function awayText(src) {
+    if (src === "") return "Plug in your backup disk to bring them back."
+    if (src.indexOf("remote:") === 0)
+      return "They're on the backup disk of " + svc.sourceWhere(src) + ", which this laptop isn't paired with any more."
+    return "They're on " + svc.sourceWhere(src) + ", which isn't plugged in. Plug it in to bring them back."
+  }
   // A restore point open for browsing keeps the backup disk (or the Pi's)
   // unlocked, and a backup would lock it again on its way out — from under the
   // window still being read. Same device as blockedByRestore: the button goes
@@ -660,13 +668,14 @@ Panel {
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
                     : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restoreProgress)
-                  : svc.filesDone
+                  : (svc.filesDone
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
                   : "Only your settings came back from " + Model.prettyStamp(svc.partialSnapshot)
                     + ". Your documents, photos and other files are still on the backup"
                     + (svc.skippedSystem > 0 ? ", and so are your AI models." : ".")
-                    + (svc.linked ? "" : " Link this laptop (button above) to bring them back.")
+                    + (svc.linked ? "" : " Link this laptop (button above) to bring them back."))
+                    + (svc.partialSourceHere ? "" : " " + root.awayText(svc.partialSource))
                 color: (svc.restoringFiles || svc.systemPhase === "waiting") ? root.foreground : root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -679,7 +688,7 @@ Panel {
                 foreground: Color.background
                 background: Color.accent
                 accent: Color.accent
-                enabled: svc.linked && svc.hasCapsule && !svc.backupRunning
+                enabled: svc.linked && svc.partialSourceHere && !svc.backupRunning
                 fontFamily: root.fontFamily
                 tooltipText: svc.filesDone
                   ? "Opens a terminal to put your AI models back. Asks for your password."
@@ -742,7 +751,7 @@ Panel {
                     : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
                       ? "Smart thinning keeps every backup from the last day, one a day for a month, then one a week."
                       : "All restore points are kept.")
-                    + (svc.keptCount > 0
+                    + (svc.keptHereCount > 0
                       ? " The marked ones still hold files a restore never brought back, so they "
                         + "are never thinned away. Press Restore on one to go and get them, or "
                         + "tap the row itself to stop keeping it."
@@ -907,6 +916,67 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: root.showAllSnaps = false
+              }
+            }
+
+            // Restore points holding things a restore left out, on a disk other
+            // than the one listed above: an older backup USB, or the Pi while a
+            // USB is where backups go. Still reachable, just not in that list.
+            Column {
+              visible: svc.keptElsewhere.length > 0 && !svc.backupRunning && !svc.launchedBackup
+              width: parent.width
+              spacing: Style.space(8)
+              PanelSectionHeader {
+                text: "LEFT OUT OF A RESTORE"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Repeater {
+                model: svc.keptElsewhere
+                delegate: Column {
+                  id: keptAway
+                  required property string modelData
+                  readonly property string src: svc.sourceOf(modelData)
+                  // No record of which disk: all that is known is that it
+                  // isn't the one listed above.
+                  readonly property bool reachable: src !== "" && svc.sourceReachable(src)
+                  width: parent.width
+                  spacing: Style.space(6)
+                  Text {
+                    width: parent.width
+                    text: {
+                      var l = svc.keptLeftOut(keptAway.modelData)
+                      return Model.prettyStamp(keptAway.modelData) + " still holds "
+                        + (l.length ? l.join(", ") : "things a restore left out") + ". "
+                        + (keptAway.reachable ? "It's on " + svc.sourceWhere(keptAway.src) + "."
+                          : keptAway.src === "" ? "It isn't on the backup disk listed above. Plug in the one it came from."
+                          : root.awayText(keptAway.src))
+                    }
+                    color: root.kept
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.bodySmall
+                    wrapMode: Text.WordWrap
+                  }
+                  Button {
+                    visible: keptAway.reachable
+                    text: svc.restoreKeptTs === keptAway.modelData
+                      ? (svc.browsePhase === "opening" ? "Opening…"
+                        : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
+                      : "Restore"
+                    bordered: true
+                    foreground: root.kept
+                    fontFamily: root.fontFamily
+                    enabled: svc.linked && !svc.backupRunning
+                      && (!svc.restoringFiles || svc.restoreKeptTs === keptAway.modelData)
+                    tooltipText: svc.restoreKeptTs === keptAway.modelData
+                      ? "Stop, and carry on another time"
+                      : "Bring back what this one still holds. Never overwrites a file you have changed since."
+                    onClicked: {
+                      if (svc.restoreKeptTs === keptAway.modelData) svc.stopRestoringFiles()
+                      else svc.restoreKept(keptAway.modelData)
+                    }
+                  }
+                }
               }
             }
 

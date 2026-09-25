@@ -843,6 +843,19 @@ clear_pid() {
   rm -f "$(pid_file)"
 }
 
+# The disk a restore point was restored from, as backup.sh's dest_id writes it
+# (local:<luks uuid> or remote:<host>:<luks uuid>), when a restore recorded
+# one: the files a quick restore hasn't brought back yet, or things a restore
+# left out on purpose. Empty for any other restore point.
+source_for_ts() {
+  local ts=$1 s
+  s="$(jq -r --arg t "$ts" 'select(.snapshot == $t) | .source // empty' \
+    "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
+  [[ -n $s ]] || s="$(jq -r --arg t "$ts" '.[$t].source // empty' \
+    "$OMARCHY_TM_STATE/kept-points.json" 2>/dev/null || true)"
+  printf '%s\n' "$s"
+}
+
 # Marks whether the last backup attempt ran to completion. Set once a
 # backup genuinely starts (write_pid time); cleared only on a clean
 # finish. Lets the plugin offer "Resume backup" instead of "Backup now"

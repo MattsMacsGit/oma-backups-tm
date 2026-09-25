@@ -247,6 +247,48 @@ pick_destination() {
   fi
 }
 
+# Reading back (a restore's files, its AI models, things a restore left out)
+# comes from the disk those files are on, recorded when the restore was made —
+# not from wherever the next backup would go. Backups write to one disk; a
+# restore point can be on another: the Pi, or an older backup USB. Restore
+# points without a record (anything opened from the list) are on the disk the
+# list came from, which is the destination.
+SOURCE_PART=""
+pick_source() {
+  local ts=$1 want uuid
+  want="$(source_for_ts "$ts")"
+  case $want in
+    remote:*)
+      remote_configured ||
+        fail_backup "That restore point is on a Pi this laptop isn't paired with any more. Pair it again (Settings → Back up to a Pi), then try again."
+      [[ $want == "remote:$(jq -r '.host // ""' "$OMA_REMOTE_CONF"):$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF")" ]] ||
+        fail_backup "That restore point is on the backup disk of a Pi this laptop was paired with before. Pair with that one again to bring it back."
+      DEST_REMOTE=1
+      remote_load
+      RSYNC_RSH=(-e "$(remote_rsh)")
+      ;;
+    local:?*)
+      uuid=${want#local:}
+      SOURCE_PART="$(lsblk -nrp -o PATH,FSTYPE,UUID 2>/dev/null |
+        awk -v u="$uuid" '$2=="crypto_LUKS" && $3==u {print $1; exit}')"
+      [[ -n $SOURCE_PART ]] ||
+        fail_backup "That restore point is on a backup USB that isn't plugged in (the one it was restored from). Plug it in and try again."
+      DEST_REMOTE=0
+      ;;
+    *) pick_destination ;;
+  esac
+}
+
+# A disk opened only to read from (pick_source) is locked again afterwards,
+# unless it is the backup disk anyway. Left open, it sits where backups look,
+# and the next one refuses it as "not the backup disk you set up".
+release_source() {
+  [[ -n $SOURCE_PART ]] || return 0
+  [[ $(luks_uuid_of "$SOURCE_PART") == "$(current_capsule_uuid)" ]] && return 0
+  backup_running && return 0
+  "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
+}
+
 remote_open() {
   local st
   st="$(rgate status 2>>"$OMARCHY_TM_LOG")" ||
@@ -675,26 +717,35 @@ open_destination() {
   fi
   # Local destination: whatever is plugged in has to be the disk that was set
   # up. With a Pi paired, pick_destination has already sent us there instead.
-  refuse_other_capsule
+  # Reading from the disk a restore came from (pick_source) is the exception:
+  # nothing is written to it, so it needn't be the one set up.
+  [[ -n $SOURCE_PART ]] || refuse_other_capsule
   local want mapper
-  want="$(capsule_luks_partition 2>/dev/null || true)"
+  want="${SOURCE_PART:-$(capsule_luks_partition 2>/dev/null || true)}"
   if [[ -n $want ]] && findmnt -n "$MNT" >/dev/null 2>&1; then
     mapper="$(backup_mapper "$MNT")"
     if ! lsblk -nr -o NAME,TYPE "$want" 2>/dev/null | awk '$2=="crypt"{print $1}' | grep -qx "$mapper"; then
-      step "Switching to the current backup disk"
+      # Never pull the disk out from under a backup that is writing to it.
+      [[ -n $SOURCE_PART ]] && backup_running &&
+        fail_backup "A backup is using the other backup disk. Try again once it has finished."
+      step "Switching to the $([[ -n $SOURCE_PART ]] && echo "backup disk it came from" || echo "current backup disk")"
       "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
     fi
   fi
   if ! findmnt -n "$MNT" >/dev/null 2>&1; then
     step "Backup disk not mounted — unlocking"
     progress phase "unlock"
-    "$OMARCHY_TM_ROOT/mount.sh" mount
+    if [[ -n $SOURCE_PART ]]; then
+      "$OMARCHY_TM_ROOT/mount.sh" mount --disk "/dev/$(lsblk -n -o PKNAME "$SOURCE_PART" | head -1)"
+    else
+      "$OMARCHY_TM_ROOT/mount.sh" mount
+    fi
   fi
   ensure_rw_mount "$MNT"
   findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "The backup disk isn't mounted. Unplug it, plug it back in, and try again."
   { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
     fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
-  if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want ]]; then
+  if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want && -z $SOURCE_PART ]]; then
     set_current_capsule "$(luks_uuid_of "$want")"
   fi
 }
@@ -1144,6 +1195,7 @@ browse_cleanup() {
     rmdir "$mp" 2>/dev/null || true
   fi
   rm -f "$BROWSE_STATE" 2>/dev/null || true
+  release_source
   # With a mark of our own, letting go is safe whatever else is going on: the
   # gatekeeper locks the disk when the last user leaves, not the first. Without
   # one, the old guard stands -- and it only ever asked about backups, which is
@@ -1169,12 +1221,14 @@ cmd_browse() {
   rm -f "$BROWSE_STATE"
 
   close_stale_mapper "$LUKS_MAPPER"
-  pick_destination
+  pick_source "$ts"
   open_destination
 
   if [[ $DEST_REMOTE != 1 ]]; then
     local path="$MNT/home/$ts/$user"
-    [[ -d $path ]] || fail_backup "No copy of your home folder in that restore point."
+    # Not through browse_cleanup: that takes the error away with it, before
+    # the panel has read it.
+    [[ -d $path ]] || { release_source; fail_backup "No copy of your home folder in that restore point."; }
     trap 'browse_cleanup' EXIT
     browse_state ready "$path"
     # Nothing to hold open for a plugged-in disk; just wait to be stopped.
@@ -1247,9 +1301,10 @@ cmd_put_back_system() {
   NOT_A_BACKUP=1
   FAIL_TITLE="Couldn't put your AI models back."
   close_stale_mapper "$LUKS_MAPPER"
-  pick_destination
+  pick_source "$snap"
   rsync_link_flags
   open_destination
+  if [[ -n $SOURCE_PART ]]; then trap release_source EXIT; fi
   d_exists "os/$snap" || fail_backup "The restore point $snap isn't on the backup any more."
 
   # Ollama holds its models open; stop it while they're copied.

@@ -268,6 +268,13 @@ my files** puts them back first, in a terminal, because that needs your
 password. Skip it and your files still come back; the panel then offers **Put
 AI models back** for later, and backups stay paused until they are.
 
+All of these read from the disk the restore came from, even when backups now
+go somewhere else: restored from the Pi with a backup USB plugged in, they still
+come from the Pi, and restored from an older USB, they come from that USB. If
+that disk isn't here, the panel says which one to plug in rather than offering
+a button that can't work. A USB opened just to read from is locked again
+afterwards.
+
 ### Backups pause until the system is whole again
 
 A system restored with **Quick System Rescue** is missing files that are still in

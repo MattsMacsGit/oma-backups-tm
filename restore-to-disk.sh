@@ -420,14 +420,27 @@ if [[ $LEVEL == settings ]]; then
   # files" and backups never thin away $SNAPSHOT: until the files are back,
   # it's the only restore point that still has them. It lives in each user's
   # own state folder so the plugin (running as that user) can clear it.
+  # source: which disk the files are still on, in backup.sh's dest_id form,
+  # so bringing them back reads from that disk even once another one (or
+  # the Pi) is where backups go.
+  if [[ $FROM_PI == 1 ]]; then
+    restore_source="remote:$REMOTE_HOST:$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true)"
+  else
+    # Best effort: not knowing only means reading from the usual disk later,
+    # which is no reason to stop a restore this far in.
+    restore_source="$({ lsblk -nrs -o UUID,FSTYPE "$(findmnt -n -o SOURCE "$MNT" 2>/dev/null || true)" 2>/dev/null || true; } |
+      awk '$2=="crypto_LUKS"{print $1; exit}')"
+    [[ -n $restore_source ]] && restore_source="local:$restore_source"
+  fi
   for h in "$NEW_ROOT/@home"/*/; do
     [[ -d $h ]] || continue
     d="$h.local/state/omarchy-backups"
     mkdir -p "$d"
     # skipped_system: what put-back-system brings back. Recorded here rather
     # than worked out again later, when the settings may have changed.
-    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" --args \
-      '{snapshot: $s, level: "settings", restored_at: $at, skipped_system: $ARGS.positional}' \
+    jq -n --arg s "$SNAPSHOT" --arg at "$(ts)" --arg src "${restore_source:-}" --args \
+      '{snapshot: $s, level: "settings", restored_at: $at, skipped_system: $ARGS.positional}
+       + (if $src == "" then {} else {source: $src} end)' \
       "${SYSTEM_MODELS[@]}" >"$d/partial-restore.json"
     chown --reference="$h" "$h.local" "$h.local/state" "$d" "$d/partial-restore.json" 2>/dev/null || true
   done

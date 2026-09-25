@@ -260,6 +260,11 @@ Item {
   // After a "system + settings" restore: which restore point still has the
   // user's files (written by restore-to-disk.sh into their state folder).
   property string partialSnapshot: ""
+  // Which disk those files are on (backup.sh's dest_id form), recorded by the
+  // restore. Bringing them back reads from that disk, not from wherever the
+  // next backup would go. Empty for a restore made before this was recorded.
+  property string partialSource: ""
+  readonly property bool partialSourceHere: sourceReachable(partialSource)
   property bool restoringFiles: false
   property int restorePercent: 0
   // rsync says nothing at all while it works out what it has to fetch, and on
@@ -284,8 +289,31 @@ Item {
   property bool systemAsked: false
   readonly property string putBackNote: root.home + "/.local/state/omarchy-backups/put-back-system.done"
 
+  // Reading back works from any disk this laptop can reach: a backup USB
+  // plugged in here (they all take this laptop's key), or the paired Pi.
+  // Without a record, the backup disk as ever.
+  function sourceReachable(id) {
+    if (!id) return root.hasCapsule
+    var r = (detect && detect.reachable) || []
+    return r.indexOf(id) >= 0
+  }
+
+  // Where a restore point that a restore recorded is, in words.
+  function sourceWhere(id) {
+    var s = String(id || "")
+    if (s.indexOf("remote:") === 0) return root.remoteHost !== "" ? root.remoteHost : "the Pi"
+    if (s !== "" && s === root.destinationId) return "your backup USB"
+    return "the backup USB it came from"
+  }
+
+  function sourceOf(ts) {
+    if (ts !== "" && ts === root.partialSnapshot) return root.partialSource
+    var e = root.keptPoints[ts]
+    return (e && e.source) ? String(e.source) : ""
+  }
+
   function restoreMyFiles() {
-    if (root.partialSnapshot === "" || !root.linked) return
+    if (root.partialSnapshot === "" || !root.linked || !root.partialSourceHere) return
     // The models first, while someone is here to type the password.
     if (root.skippedSystem > 0 && !root.systemAsked) {
       putBackModels()
@@ -356,7 +384,8 @@ Item {
     browseStartProc.command = ["systemctl", "start", "oma-backups-browse@" + ts + ".service"]
     browseStartProc.running = true
     browsePoll.start()
-    if (root.remoteActive)
+    var src = root.sourceOf(ts)
+    if (src !== "" ? src.indexOf("remote:") === 0 : root.remoteActive)
       Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "Opening " + Model.prettyStamp(ts),
         "From " + root.remoteHost + ". This can take a few seconds over the network."])
   }
@@ -403,6 +432,20 @@ Item {
   // than pausing everything until the user comes back for it.
   property var keptPoints: ({})
   readonly property int keptCount: Object.keys(root.keptPoints).length
+  // Kept points in the list on screen, and the ones on some other disk (an
+  // older backup USB, or the Pi while a USB is where backups go). Those are
+  // still reachable to go and get, just not in this list.
+  readonly property int keptHereCount: {
+    var n = 0
+    for (var i = 0; i < root.snapshots.length; i++)
+      if (root.isKept(String(root.snapshots[i].timestamp || ""))) n++
+    return n
+  }
+  readonly property var keptElsewhere: {
+    var here = {}
+    for (var i = 0; i < root.snapshots.length; i++) here[String(root.snapshots[i].timestamp || "")] = true
+    return Object.keys(root.keptPoints).filter(function (ts) { return !here[ts] }).sort().reverse()
+  }
 
   function isKept(ts) { return root.keptPoints.hasOwnProperty(ts) }
 
@@ -419,6 +462,7 @@ Item {
 
   function restoreKept(ts) {
     if (!root.isKept(ts) || !root.linked || root.restoringFiles) return
+    if (!root.sourceReachable(root.sourceOf(ts))) return
     root.restoreKeptTs = ts
     root.restoringFiles = true
     root.restoreReset()
@@ -1171,6 +1215,7 @@ Item {
         root._leftOutAtFinish = root.restoreSkipCount
         if (root.restoreSkipCount > 0 && root.partialSnapshot !== "") {
           var mark = ["python3", root.keptPointsCli, "--add", root.partialSnapshot]
+          if (root.partialSource !== "") mark.push("--source", root.partialSource)
           for (var n = 0; n < restoreSkipListModel.count; n++)
             mark.push(restoreSkipListModel.get(n).path)
           root._afterKeep = true
@@ -1273,16 +1318,19 @@ Item {
       try {
         var j = JSON.parse(text())
         root.partialSnapshot = /^\d{8}T\d{6}Z$/.test(j.snapshot || "") ? j.snapshot : ""
+        root.partialSource = /^(local|remote):/.test(j.source || "") ? String(j.source) : ""
         root.skippedSystem = Array.isArray(j.skipped_system) ? j.skipped_system.length : 0
         root.filesDone = j.files_done === true
       } catch (e) {
         root.partialSnapshot = ""
+        root.partialSource = ""
         root.skippedSystem = 0
         root.filesDone = false
       }
     }
     onLoadFailed: {
       root.partialSnapshot = ""
+      root.partialSource = ""
       root.skippedSystem = 0
       root.filesDone = false
     }
