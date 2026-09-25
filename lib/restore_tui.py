@@ -672,21 +672,28 @@ def connect_pi() -> bool:
     PI_HOST = host
     gum_style("--foreground", "2", f"  Found your Pi at {host}.")
 
-    # restore-to-disk --from-pi reads this, through lib/remote.sh.
+    gum_style("--foreground", "8", "Unlocking the backup disk on the Pi...")
+    st = pi("status")
+    status: dict = {}
+    try:
+        status = json.loads(st.stdout or b"{}")
+        if not status.get("present"):
+            gum_style("--foreground", "1", "The backup disk isn't plugged into the Pi (or its USB hub has no power).")
+            return False
+    except (json.JSONDecodeError, AttributeError):
+        status = {}
+
+    # restore-to-disk --from-pi reads this, through lib/remote.sh. host is the
+    # address that answered, to connect to. paired_host and luks_uuid are what
+    # the restored laptop knows the Pi by: the restore records them, and
+    # "Restore my files" only reads from a Pi that matches.
     REMOTE_CONF.write_text(json.dumps({
         "host": host,
+        "paired_host": str(NET_CONF.get("host") or ""),
+        "luks_uuid": str(status.get("uuid") or ""),
         "port": NET_CONF.get("port", 22),
         "host_key_alias": NET_CONF.get("host_key_alias", "oma-pi"),
     }) + "\n", encoding="utf-8")
-
-    gum_style("--foreground", "8", "Unlocking the backup disk on the Pi...")
-    st = pi("status")
-    try:
-        if not json.loads(st.stdout or b"{}").get("present"):
-            gum_style("--foreground", "1", "The backup disk isn't plugged into the Pi (or its USB hub has no power).")
-            return False
-    except json.JSONDecodeError:
-        pass
     proc = pi("unlock", stdin=password)
     password = b""
     if proc.returncode != 0:

@@ -424,7 +424,9 @@ if [[ $LEVEL == settings ]]; then
   # so bringing them back reads from that disk even once another one (or
   # the Pi) is where backups go.
   if [[ $FROM_PI == 1 ]]; then
-    restore_source="remote:$REMOTE_HOST:$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true)"
+    # A rescue stick connects by address; paired_host is the name the laptop
+    # was paired under, which is what it will look for.
+    restore_source="remote:$(jq -r '(.paired_host // "" | select(. != "")) // .host // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true):$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true)"
   else
     # Best effort: not knowing only means reading from the usual disk later,
     # which is no reason to stop a restore this far in.

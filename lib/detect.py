@@ -424,6 +424,18 @@ def remote_conf() -> dict | None:
     return j if isinstance(j, dict) else None
 
 
+def remote_source_ids(rconf: dict) -> list[str]:
+    """Every way a restore can have written down the paired Pi's disk, as
+    lib/remote.sh's remote_source_ids: the name it was paired under plus its
+    disk, then the bare addresses older rescue sticks wrote."""
+    ids = [f"remote:{rconf.get('host') or ''}:{rconf.get('luks_uuid') or ''}"]
+    lan = rconf.get("lan")
+    for a in [rconf.get("host")] + (lan if isinstance(lan, list) else []):
+        if isinstance(a, str) and a:
+            ids.append(f"remote:{a}:")
+    return ids
+
+
 def backup_destination(disks: list[dict], mnt: Path | None, recorded: str | None,
                        rkey: str | None, rconf: dict | None):
     """Where the next backup goes, decided exactly as backup.sh's
@@ -642,7 +654,7 @@ def detect(diagnostics: bool = True) -> dict:
             if d["kind"] == "capsule" and not d["protected"] and cap and cap.get("luks_uuid"):
                 reachable.append(f"local:{cap['luks_uuid']}")
         if rkey and rconf:
-            reachable.append(f"remote:{rconf.get('host') or ''}:{rconf.get('luks_uuid') or ''}")
+            reachable.extend(remote_source_ids(rconf))
         backup_mounted = mnt is not None
 
         if mnt is not None:

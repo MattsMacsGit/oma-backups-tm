@@ -261,7 +261,7 @@ pick_source() {
     remote:*)
       remote_configured ||
         fail_backup "That restore point is on a Pi this laptop isn't paired with any more. Pair it again (Settings → Back up to a Pi), then try again."
-      [[ $want == "remote:$(jq -r '.host // ""' "$OMA_REMOTE_CONF"):$(jq -r '.luks_uuid // ""' "$OMA_REMOTE_CONF")" ]] ||
+      grep -qxF -- "$want" <<<"$(remote_source_ids)" ||
         fail_backup "That restore point is on the backup disk of a Pi this laptop was paired with before. Pair with that one again to bring it back."
       DEST_REMOTE=1
       remote_load

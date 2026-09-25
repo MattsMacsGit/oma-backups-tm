@@ -27,6 +27,17 @@ remote_configured() {
   [[ -f $OMA_REMOTE_CONF && -f $OMA_REMOTE_KEY ]] && capsule_key_present
 }
 
+# Every way a restore can have written down the paired Pi's disk (the dest_id
+# form, one per line). The proper one is the name it was paired under plus
+# its disk. Rescue sticks before 1.4.3 wrote whichever address they reached
+# the Pi at, and no disk: those count when the address is one the Pi reported
+# about itself. detect.py's remote_source_ids says the same.
+remote_source_ids() {
+  jq -r '"remote:\(.host // ""):\(.luks_uuid // "")",
+    ([.host] + (.lan // []) | .[] | select(type == "string" and . != "") | "remote:\(.):")' \
+    "$OMA_REMOTE_CONF" 2>/dev/null
+}
+
 remote_load() {
   REMOTE_HOST="$(jq -r '.host // empty' "$OMA_REMOTE_CONF")"
   local port
