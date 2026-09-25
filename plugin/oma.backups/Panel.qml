@@ -667,7 +667,9 @@ Panel {
                   : svc.restoringFiles
                   ? (svc.browsePhase === "opening"
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
-                    : "Restoring your files from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restoreProgress)
+                    : svc.restoreCounting
+                    ? "Working out what to bring back from " + Model.prettyStamp(svc.partialSnapshot) + "…"
+                    : "Bringing your files back from " + Model.prettyStamp(svc.partialSnapshot) + "  ·  " + svc.restorePercent + "%")
                   : (svc.filesDone
                   ? "Your files are back. Your AI models are still on the backup: they live in the "
                     + "system area, so putting them back needs your password."
@@ -680,6 +682,50 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
                 wrapMode: Text.WordWrap
+              }
+              // The backup's bar, the other way round: the same track, a real
+              // percentage once rsync has one, and a moving segment until then.
+              Column {
+                visible: svc.restoringFiles && svc.restoreKeptTs === ""
+                width: parent.width
+                spacing: Style.space(6)
+                Rectangle {
+                  id: restoreTrack
+                  width: parent.width
+                  height: 8
+                  radius: 4
+                  clip: true
+                  color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.15)
+                  Rectangle {
+                    visible: !svc.restoreBusy
+                    width: Math.max(8, parent.width * Math.min(100, Math.max(0, svc.restorePercent)) / 100)
+                    height: parent.height
+                    radius: 4
+                    color: Color.accent
+                  }
+                  Rectangle {
+                    id: restoreBusySegment
+                    visible: svc.restoreBusy
+                    width: parent.width * 0.3
+                    height: parent.height
+                    radius: 4
+                    color: Color.accent
+                    SequentialAnimation on x {
+                      running: restoreBusySegment.visible
+                      loops: Animation.Infinite
+                      NumberAnimation { from: -restoreBusySegment.width; to: restoreTrack.width; duration: 1400; easing.type: Easing.InOutQuad }
+                    }
+                  }
+                }
+                Text {
+                  visible: text !== ""
+                  width: parent.width
+                  text: svc.restoreDetail
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  elide: Text.ElideRight
+                }
               }
               Button {
                 visible: !svc.restoringFiles && svc.systemPhase !== "waiting"

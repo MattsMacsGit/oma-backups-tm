@@ -258,11 +258,17 @@ Item {
   // file is a network round trip. rsync's flist2 counts as it goes, so say it.
   property int restoreChecked: 0
   property string restoreCopied: ""
-  readonly property string restoreProgress: root.restoreCounting
-    ? "working out how much to bring back…"
-      + (root.restoreChecked > 0 ? "  ·  " + root.restoreChecked.toLocaleString(Qt.locale(), "f", 0) + " files checked" : "")
-    : root.restorePercent + "%"
-      + (root.restoreCopied === "" ? "" : "  ·  " + root.restoreCopied + " so far")
+  property string restoreSpeed: ""
+  property string restoreEta: ""
+  // Nothing to measure yet (opening the restore point, or rsync still
+  // counting): the bar moves instead of showing a made-up number, as the
+  // backup's does.
+  readonly property bool restoreBusy: root.browsePhase === "opening" || root.restoreCounting
+  readonly property string restoreDetail: root.browsePhase === "opening" ? ""
+    : root.restoreCounting
+    ? (root.restoreChecked > 0 ? root.restoreChecked.toLocaleString(Qt.locale(), "f", 0) + " files checked" : "")
+    : [root.restoreCopied !== "" ? root.restoreCopied + " so far" : "", root.restoreSpeed,
+        root.restoreEta !== "" ? "ETA " + root.restoreEta : ""].filter(function (s) { return s !== "" }).join("   ")
   // What the quick restore left in the system area (AI models), still to put
   // back, and whether the files themselves are back already.
   property int skippedSystem: 0
@@ -354,6 +360,8 @@ Item {
     root.restoreCounting = true
     root.restoreChecked = 0
     root.restoreCopied = ""
+    root.restoreSpeed = ""
+    root.restoreEta = ""
   }
 
   function stopRestoringFiles() {
@@ -1176,10 +1184,16 @@ Item {
           root.restoreChecked = parseInt(c[1], 10)
           return
         }
-        var m = /^\s*([\d,]+)\s+(\d{1,3})%/.exec(line)
+        var m = /^\s*([\d,]+)\s+(\d{1,3})%(?:\s+(\S+\/s)\s+(\d+:\d{2}:\d{2}))?/.exec(line)
         if (!m) return
         root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
         root.restorePercent = parseInt(m[2], 10)
+        // rsync's own speed and time left, as it sees them; its
+        // "0.00kB/s  0:00:00" before anything has moved means nothing.
+        if (m[3] !== undefined) {
+          root.restoreSpeed = /^0(\.0+)?[kMG]?B\/s$/.test(m[3]) ? "" : m[3]
+          root.restoreEta = (m[4] === "0:00:00" || root.restorePercent >= 100) ? "" : m[4]
+        }
         root.restoreCounting = false
       }
     }
