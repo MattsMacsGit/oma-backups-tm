@@ -637,6 +637,32 @@ take_force_note() {
   return 0
 }
 
+# A forced backup ends the restore, but not the restore point's job: what
+# never came back is still on it, and nowhere else. Clearing the marker used
+# to be all that happened, which took away the only thing stopping thinning
+# from deleting it -- and the panel's "still holds" row that says where it
+# is. Earmark it the way a restore that left things out does.
+keep_forced_point() {
+  local m="$OMARCHY_TM_STATE/partial-restore.json" snap source kf
+  local -a what=()
+  snap="$(jq -r '.snapshot // empty' "$m" 2>/dev/null || true)"
+  [[ $snap =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 0
+  source="$(jq -r '.source // empty' "$m" 2>/dev/null || true)"
+  [[ $(jq -r '.files_done // false' "$m" 2>/dev/null) == true ]] || what+=("your files")
+  [[ $(jq -r '.skipped_system // [] | length' "$m" 2>/dev/null || echo 0) == 0 ]] || what+=("your AI models")
+  ((${#what[@]})) || return 0
+  if "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --add "$snap" \
+    ${source:+--source "$source"} "${what[@]}" >/dev/null 2>>"$OMARCHY_TM_LOG"; then
+    # Written as root into the user's own folder: hand it back, so the
+    # plugin can let it go later.
+    kf="$OMARCHY_TM_STATE/kept-points.json"
+    chown --reference="$OMARCHY_TM_STATE" "$kf" 2>/dev/null || true
+    log_file "forced backup: kept restore point $snap (still holds: ${what[*]})"
+  else
+    warn "Couldn't mark $snap to be kept. It still holds ${what[*]}; thinning may take it."
+  fi
+}
+
 # Called twice: once before the sudo re-exec so a refusal costs no password
 # prompt ("peek", consumes nothing), then again as root for real.
 refuse_if_partial_restore() {
@@ -1138,6 +1164,7 @@ cmd_backup() {
     # files are still in survives this run rather than being thinned on the
     # way out.
     if [[ $FORCE_AFTER_RESTORE == 1 && -f $OMARCHY_TM_STATE/partial-restore.json ]]; then
+      keep_forced_point
       rm -f "$OMARCHY_TM_STATE/partial-restore.json"
       log_file "partial-restore marker cleared by a forced backup"
     fi
