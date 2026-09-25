@@ -1,6 +1,6 @@
 # OmaBackups
 
-**v1.5.0** — Time Machine-style **encrypted backups** for
+**v1.5.1** — Time Machine-style **encrypted backups** for
 [Omarchy](https://omarchy.org/).
 
 A USB disk keeps dated copies of your system and your home folder. Click a
