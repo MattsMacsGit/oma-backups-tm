@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --files) MODE=files; shift; break ;;
     --copy) MODE=copy; shift; break ;;
     --put-back-system) MODE=put_back_system; shift ;;
+    --restore-files) MODE=restore_files; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -592,7 +593,9 @@ fail_backup() {
   # way to say why they stopped.
   [[ $STOPPED == 1 ]] && exit 143
   BACKUP_FAILED=1
-  if [[ -n ${BROWSE_STATE:-} ]]; then
+  if [[ -n ${RESTORE_STATE:-} ]]; then
+    restore_state error "$*"
+  elif [[ -n ${BROWSE_STATE:-} ]]; then
     browse_state error "$*"
   else
     OMA_DEST_ID="$(dest_id 2>/dev/null || true)" progress fail "Backup failed: $*"
@@ -1298,6 +1301,136 @@ cmd_browse() {
   wait "$pid" || true
 }
 
+# Bringing files back out of a restore point ("Restore my files", and going
+# back to a kept one), run by oma-backups-restore@TS. It used to be the
+# plugin's own rsync reading an sshfs mount of the restore point, and from a
+# Pi that meant one network round trip for every file it looked at: ~75,000
+# of them took eight minutes before a byte moved. Here rsync talks to the
+# other end the way a backup does, and the Pi builds the file list on its
+# own disk.
+#
+# The plugin writes what to leave out to restore-request.json in the user's
+# state folder, starts the unit, and polls $RESTORE_DIR/TS.json:
+#   {"state": "opening"|"copying"|"done"|"error"|"stopped", "line": ..., ...}
+# "line" is rsync's latest progress line, parsed there exactly as before.
+RESTORE_DIR="$OMA_RESTORE_DIR"
+RESTORE_STATE=""
+RESTORE_LINE=""
+# The panel's id for this run, echoed back so it never mistakes the last
+# run's "done" for this one's.
+RESTORE_ID=""
+
+restore_state() {
+  local state=$1 msg=${2:-} rc=${3:-}
+  [[ -n $RESTORE_STATE ]] || return 0
+  jq -n --arg s "$state" --arg l "$RESTORE_LINE" --arg m "$msg" --arg r "$rc" --arg i "$RESTORE_ID" \
+    '{state: $s, line: $l, id: $i} + (if $m != "" then {message: $m} else {} end)
+      + (if $r != "" then {rc: ($r | tonumber)} else {} end)' >"$RESTORE_STATE.tmp" 2>/dev/null || return 0
+  chmod 644 "$RESTORE_STATE.tmp"
+  mv "$RESTORE_STATE.tmp" "$RESTORE_STATE"
+}
+
+restore_cleanup() {
+  local rc=$?
+  trap - EXIT
+  # Whatever ended it, the panel is told: a Stop (TERM) and a failure both
+  # leave something it can read instead of a file that says "copying" for good.
+  if [[ -n $RESTORE_STATE && -f $RESTORE_STATE ]] &&
+    [[ $(jq -r .state "$RESTORE_STATE" 2>/dev/null) =~ ^(opening|copying)$ ]]; then
+    if [[ $STOPPED == 1 || $rc == 143 ]]; then restore_state stopped "" "$rc"
+    else restore_state error "Restoring your files stopped before finishing (see $OMARCHY_TM_LOG)." "$rc"; fi
+  fi
+  release_source
+  remote_close || true
+  exit "$rc"
+}
+
+cmd_restore_files() {
+  local ts=${1:-} user=${SUDO_USER:-} home group req n i
+  local -a ex=() args=()
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups restore-files TIMESTAMP"
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose files to bring back"
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  group="$(id -gn "$user")"
+  [[ -n $home && -d $home ]] || die "no home folder for $user"
+  mkdir -p "$RESTORE_DIR"
+  chmod 755 "$RESTORE_DIR"
+  RESTORE_STATE="$RESTORE_DIR/$ts.json"
+  rm -f "$RESTORE_STATE"
+  req="$OMARCHY_TM_STATE/restore-request.json"
+  RESTORE_ID="$(jq -r '.id // empty' "$req" 2>/dev/null || true)"
+  [[ $RESTORE_ID =~ ^[a-z0-9]{1,32}$ ]] || RESTORE_ID=""
+  trap restore_cleanup EXIT
+  trap 'STOPPED=1; exit 143' TERM INT
+  restore_state opening
+
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't bring your files back."
+  backup_running && fail_backup "A backup is running. Try again once it has finished."
+
+  # What to leave out: the user's own answer, from their own folder. Only for
+  # this restore point, so a request left over from another can't be used.
+  if [[ -f $req ]]; then
+    [[ $(jq -r '.snapshot // empty' "$req" 2>/dev/null) == "$ts" ]] ||
+      fail_backup "The list of what to leave out is for a different restore point. Press Restore again."
+    n="$(jq -r '(.exclude // []) | length' "$req")"
+    ((n <= 2000)) || fail_backup "That leave-out list is too long."
+    for ((i = 0; i < n; i++)); do
+      ex+=("$(jq -r --argjson i "$i" '.exclude[$i] | tostring | gsub("[\\n\\r]"; "")' "$req")")
+    done
+  fi
+
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_source "$ts"
+  rsync_link_flags
+  open_destination
+  # The Pi's gatekeeper only answers for the restore point itself (two levels
+  # deep); a missing home folder inside it is rsync's to report.
+  if [[ $DEST_REMOTE == 1 ]]; then
+    d_exists "home/$ts" || fail_backup "That restore point isn't on the backup any more."
+  else
+    [[ -d $MNT/home/$ts/$user ]] || fail_backup "No copy of your home folder in that restore point."
+  fi
+
+  args=(-a --ignore-existing --no-inc-recursive --info=progress2,flist2
+    # As the user, the way the plugin's own copy always came back: never
+    # root's, and never an old uid that means someone else on this machine.
+    --chown="$user:$group")
+  for i in "${ex[@]}"; do [[ -n $i ]] && args+=("--exclude=$i"); done
+
+  restore_state copying
+  log_file "restoring files from $ts for $user (${#ex[@]} left out)"
+  local last=0 now rc
+  set +e
+  # progress2 rewrites one line with \r; hand the panel the latest of them,
+  # a few times a second rather than for every hundred files counted.
+  stdbuf -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${args[@]}" \
+    "$(d_target "home/$ts/$user")/" "$home/" 2>>"$OMARCHY_TM_LOG" |
+    stdbuf -o0 tr '\r' '\n' | {
+      local l
+      # read empties its variable at the end of input, so the last line is
+      # kept in its own.
+      while IFS= read -r l; do
+        [[ -n $l ]] || continue
+        RESTORE_LINE=$l
+        now=${EPOCHREALTIME/./}
+        if ((now - last >= 300000)); then restore_state copying; last=$now; fi
+      done
+      restore_state copying
+    }
+  rc=${PIPESTATUS[0]}
+  set -e
+  RESTORE_LINE="$(jq -r '.line // empty' "$RESTORE_STATE" 2>/dev/null || true)"
+  if ((rc == 0)); then
+    restore_state done "" 0
+    log_file "files restored from $ts"
+  else
+    [[ $STOPPED == 1 ]] && exit 143
+    fail_backup "Copying stopped part way (rsync $rc). Press Restore to carry on: it only brings back what is still missing."
+  fi
+}
+
 # After a quick restore: put back what restore-to-disk left in the system area
 # (AI models, listed as skipped_system in partial-restore.json). The plugin's
 # "Restore my files" runs this in a terminal before bringing the files back,
@@ -1441,4 +1574,5 @@ case "$MODE" in
   prune) cmd_prune ;;
   browse) cmd_browse "$@" ;;
   put_back_system) cmd_put_back_system ;;
+  restore_files) cmd_restore_files "$@" ;;
 esac

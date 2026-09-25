@@ -790,9 +790,15 @@ pid_file() {
 # as the session does: oma-backups-browse@TS writes it when the folder is
 # ready and removes it on the way out.
 OMA_BROWSE_DIR=/run/omarchy-backups-browse
+# Files being brought back by oma-backups-restore@TS (backup.sh
+# cmd_restore_files). Same idea: a status file per restore point.
+OMA_RESTORE_DIR=/run/omarchy-backups-restore
 
 browse_in_progress() {
   local f ts
+  # Bringing files back counts too: a backup now would capture a home folder
+  # half way through being filled.
+  [[ -n $(systemctl list-units --no-legend --state=active 'oma-backups-restore@*' 2>/dev/null) ]] && return 0
   compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1 || return 1
   # The state file is only as trustworthy as the unit behind it. A browse
   # killed before its cleanup ran leaves the file there for good, and this

@@ -32,7 +32,7 @@ Item {
     || root.systemPhase === "waiting" || root.browsePhase === "opening"
   readonly property string busyText: root.backupRunning ? root.progressText
     : root.restoringFiles
-    ? (root.browsePhase === "opening" ? "Opening the restore point"
+    ? (root.restoreOpening ? "Opening the restore point"
       : root.restoreCounting ? "Working out what to bring back"
       : "Bringing your files back · " + root.restorePercent + "%")
     : root.systemPhase === "waiting" ? "Putting your AI models back"
@@ -277,8 +277,8 @@ Item {
   // Nothing to measure yet (opening the restore point, or rsync still
   // counting): the bar moves instead of showing a made-up number, as the
   // backup's does.
-  readonly property bool restoreBusy: root.browsePhase === "opening" || root.restoreCounting
-  readonly property string restoreDetail: root.browsePhase === "opening" ? ""
+  readonly property bool restoreBusy: root.restoreOpening || root.restoreCounting
+  readonly property string restoreDetail: root.restoreOpening ? ""
     : root.restoreCounting
     ? (root.restoreChecked > 0 ? root.restoreChecked.toLocaleString(Qt.locale(), "f", 0) + " files checked" : "")
     : [root.restoreCopied !== "" ? root.restoreCopied + " so far" : "", root.restoreSpeed,
@@ -326,9 +326,7 @@ Item {
       return
     }
     if (root.filesDone) return
-    root.restoringFiles = true
-    root.restoreReset()
-    browse(root.partialSnapshot, "restore")
+    root.startFilesRestore(root.partialSnapshot, root.partialExcludes())
   }
 
   function putBackModels() {
@@ -361,11 +359,8 @@ Item {
       root.lastError = "Your AI models weren't put back. Press \"Put AI models back\" to try again."
     partialFile.reload()
     // Straight on to the files, unless they're already back.
-    if (!root.filesDone && root.partialSnapshot !== "") {
-      root.restoringFiles = true
-      root.restoreReset()
-      browse(root.partialSnapshot, "restore")
-    }
+    if (!root.filesDone && root.partialSnapshot !== "")
+      root.startFilesRestore(root.partialSnapshot, root.partialExcludes())
   }
 
   // Everything the panel shows about a restore in flight, back to the start.
@@ -379,10 +374,134 @@ Item {
   }
 
   function stopRestoringFiles() {
-    restoreProc.running = false
+    if (root.restoreTs !== "")
+      Quickshell.execDetached(["systemctl", "stop", "oma-backups-restore@" + root.restoreTs + ".service"])
     root.restoringFiles = false
     root.restoreKeptTs = ""
-    closeBrowse()
+    root.keptExcludes = []
+    root.restoreTs = ""
+    root.restoreOpening = false
+  }
+
+  // Bringing files back is oma-backups-restore@TS's job (backup.sh
+  // cmd_restore_files), not an rsync of the panel's own: that one read an
+  // sshfs mount of the restore point, and from a Pi every file it looked at
+  // was a network round trip -- minutes of "checking" before anything moved.
+  // The panel writes what to leave out, starts the unit, and reads
+  // /run/omarchy-backups-restore/TS.json for rsync's progress.
+  property string restoreTs: ""
+  property bool restoreOpening: false
+  property string restoreId: ""
+  property int restoreMissed: 0
+  property string _restoreOut: ""
+  readonly property string restoreRequest: root.home + "/.local/state/omarchy-backups/restore-request.json"
+
+  function partialExcludes() {
+    var ex = []
+    for (var i = 0; i < restoreSkipListModel.count; i++) ex.push(restoreSkipListModel.get(i).path)
+    return ex
+  }
+
+  function startFilesRestore(ts, excludes) {
+    if (ts === "" || root.restoringFiles) return
+    // A restore point opened only to pick from has done its job.
+    if (root.browseTs === ts && root.browseMode === "pick") root.closeBrowse()
+    root.lastError = ""
+    root.restoringFiles = true
+    root.restoreReset()
+    root.restoreTs = ts
+    root.restoreOpening = true
+    root.restoreMissed = 0
+    root.restoreId = Math.random().toString(36).slice(2, 12)
+    restoreReqProc.command = ["python3", "-c",
+      "import json, os, sys\n"
+      + "p, ts, rid = sys.argv[1:4]\n"
+      + "os.makedirs(os.path.dirname(p), exist_ok=True)\n"
+      + "open(p + '.tmp', 'w').write(json.dumps({'snapshot': ts, 'id': rid, 'exclude': sys.argv[4:]}))\n"
+      + "os.replace(p + '.tmp', p)\n",
+      root.restoreRequest, ts, root.restoreId].concat(excludes || [])
+    restoreReqProc.running = true
+  }
+
+  Process {
+    id: restoreReqProc
+    onExited: function (code) {
+      if (!root.restoringFiles || root.restoreTs === "") return
+      if (code !== 0) {
+        root.restoreFinished(1, "Couldn't save what to leave out, so nothing was started.")
+        return
+      }
+      restoreStartProc.command = ["systemctl", "start", "oma-backups-restore@" + root.restoreTs + ".service"]
+      restoreStartProc.running = true
+    }
+  }
+
+  Process {
+    id: restoreStartProc
+    onExited: function (code) {
+      if (code !== 0 && root.restoringFiles)
+        root.restoreFinished(1, "Couldn't start bringing your files back. If OmaBackups was just updated, run:  sudo oma-backups link --refresh")
+    }
+  }
+
+  Timer {
+    id: restorePoll
+    interval: 500
+    repeat: true
+    running: root.restoringFiles && root.restoreTs !== ""
+    onTriggered: {
+      if (restoreReadProc.running || restoreReqProc.running) return
+      root._restoreOut = ""
+      restoreReadProc.command = ["cat", "/run/omarchy-backups-restore/" + root.restoreTs + ".json"]
+      restoreReadProc.running = true
+    }
+  }
+
+  Process {
+    id: restoreReadProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root._restoreOut = String(text || "")
+    }
+    onExited: {
+      if (!root.restoringFiles) return
+      var j = null
+      try { j = JSON.parse(root._restoreOut) } catch (e) { j = null }
+      // Not there yet, or still the last run's: the unit hasn't got going.
+      if (!j || j.id !== root.restoreId) {
+        root.restoreMissed += 1
+        if (root.restoreMissed > 60 && !restoreStartProc.running)
+          root.restoreFinished(1, "Bringing your files back didn't start. Press Restore to try again.")
+        return
+      }
+      root.restoreMissed = 0
+      root.restoreOpening = j.state === "opening"
+      if (j.line) root.applyRestoreLine(String(j.line))
+      if (j.state === "done") root.restoreFinished(0, "")
+      else if (j.state === "error") root.restoreFinished(j.rc || 1, String(j.message || ""))
+      else if (j.state === "stopped") root.restoreFinished(143, "")
+    }
+  }
+
+  function applyRestoreLine(line) {
+    // " 12300 files..." while it counts (flist2), then
+    // "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
+    var c = /^\s*(\d+) files\.\.\./.exec(line)
+    if (c) {
+      root.restoreChecked = parseInt(c[1], 10)
+      return
+    }
+    var m = /^\s*([\d,]+)\s+(\d{1,3})%(?:\s+(\S+\/s)\s+(\d+:\d{2}:\d{2}))?/.exec(line)
+    if (!m) return
+    root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
+    root.restorePercent = parseInt(m[2], 10)
+    // rsync's own speed and time left, as it sees them; its
+    // "0.00kB/s  0:00:00" before anything has moved means nothing.
+    if (m[3] !== undefined) {
+      root.restoreSpeed = /^0(\.0+)?[kMG]?B\/s$/.test(m[3]) ? "" : m[3]
+      root.restoreEta = (m[4] === "0:00:00" || root.restorePercent >= 100) ? "" : m[4]
+    }
+    root.restoreCounting = false
   }
 
   function browse(ts, mode) {
@@ -477,9 +596,7 @@ Item {
     if (!root.isKept(ts) || !root.linked || root.restoringFiles) return
     if (!root.sourceReachable(root.sourceOf(ts))) return
     root.restoreKeptTs = ts
-    root.restoringFiles = true
-    root.restoreReset()
-    root.browse(ts, "restore")
+    root.startFilesRestore(ts, root.keptExcludes)
   }
 
   function releaseKept(ts) {
@@ -856,12 +973,6 @@ Item {
 
   function openSnapshot(ts) {
     if (!ts) return
-    // Opening another restore point unmounts this one, and the restore is
-    // copying out of it. Say so rather than killing it halfway.
-    if (root.restoringFiles) {
-      root.lastError = "Your files are still being restored. Press Stop first, or let it finish."
-      return
-    }
     if (root.linked) { browse(ts); return }
     if (root.remoteActive) {
       // Clicking did nothing whatsoever before this.
@@ -1234,118 +1345,75 @@ Item {
         // Keep the timer going, slower: from here it is watching for the
         // session ending rather than waiting for it to start.
         browsePoll.interval = 2000
-        if (root.browseMode === "restore") {
-          // Only what's missing: never overwrite anything changed since.
-          // --no-inc-recursive: count the whole job before starting it, so the
-          // percentage means what someone watching it assumes it means.
-          var cmd = ["rsync", "-a", "--ignore-existing", "--no-inc-recursive",
-            "--info=progress2,flist2"]
-          // A kept restore point leaves out what was chosen for it this time;
-          // otherwise it is the restore's own list.
-          if (root.restoreKeptTs !== "")
-            for (var q = 0; q < root.keptExcludes.length; q++)
-              cmd.push("--exclude=" + root.keptExcludes[q])
-          else
-            for (var k = 0; k < restoreSkipListModel.count; k++)
-              cmd.push("--exclude=" + restoreSkipListModel.get(k).path)
-          cmd.push(String(j.path) + "/", root.home + "/")
-          restoreProc.command = cmd
-          restoreProc.running = true
-        } else if (root.browseMode === "pick") {
+        if (root.browseMode === "pick") {
           root.launchRestorePicker()
         } else {
           Quickshell.execDetached(["xdg-open", String(j.path)])
         }
       } else if (j.state === "error") {
         root.browseFailed(String(j.message || "Couldn't open that restore point."))
-        root.restoringFiles = false
         root.closeBrowse()
       }
     }
   }
 
-  Process {
-    id: restoreProc
-    stdout: SplitParser {
-      splitMarker: "\r"
-      onRead: function (line) {
-        // " 12300 files..." while it counts (flist2), then
-        // "   123,456,789  12%   1.23MB/s    0:01:23 (xfr#5, to-chk=10/200)"
-        var c = /^\s*(\d+) files\.\.\./.exec(line)
-        if (c) {
-          root.restoreChecked = parseInt(c[1], 10)
-          return
-        }
-        var m = /^\s*([\d,]+)\s+(\d{1,3})%(?:\s+(\S+\/s)\s+(\d+:\d{2}:\d{2}))?/.exec(line)
-        if (!m) return
-        root.restoreCopied = Model.formatSize(parseInt(m[1].replace(/,/g, ""), 10))
-        root.restorePercent = parseInt(m[2], 10)
-        // rsync's own speed and time left, as it sees them; its
-        // "0.00kB/s  0:00:00" before anything has moved means nothing.
-        if (m[3] !== undefined) {
-          root.restoreSpeed = /^0(\.0+)?[kMG]?B\/s$/.test(m[3]) ? "" : m[3]
-          root.restoreEta = (m[4] === "0:00:00" || root.restorePercent >= 100) ? "" : m[4]
-        }
-        root.restoreCounting = false
-      }
-    }
-    onExited: function (code) {
-      // Stopped from the panel, or overtaken by a restore point the user has
-      // since opened: either way this copy no longer owns the browse session,
-      // and closing it here shut a window they were reading.
-      if (!root.restoringFiles) return
-      root.restoringFiles = false
-      if (root.browseMode === "restore") root.closeBrowse()
-      if (root.restoreKeptTs !== "") {
-        var ts = root.restoreKeptTs
-        root.restoreKeptTs = ""
-        var ex = root.keptExcludes
-        root.keptExcludes = []
-        if (code === 0 && ex.length > 0) {
-          // Some of it was left out again, so it is still the only copy of
-          // that: stays kept, and now says exactly what it still holds.
-          var mark = ["python3", root.keptPointsCli, "--add", ts]
-          var src = root.sourceOf(ts)
-          if (src !== "") mark.push("--source", src)
-          keptPointProc.command = mark.concat(ex)
-          keptPointProc.running = true
-          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
-            "Everything but what you left out. That stays on " + Model.prettyStamp(ts) + ", which is kept for it."])
-        } else if (code === 0) {
-          // Nothing is left on it now, so it goes back to being an ordinary
-          // restore point that thinning may take when its turn comes.
-          root.releaseKept(ts)
-          Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
-            "What was left on that restore point is in your home folder again."])
-        } else {
-          root.lastError = "Bringing those back stopped before finishing. Press Restore to carry on."
-        }
-        return
-      }
-      if (code === 0) {
-        // Everything's back: the protected restore point can be thinned again.
-        // Unless the AI models are still on the backup: then the marker stays
-        // (backups stay paused, the restore point stays protected) and only
-        // records that the files are done. Decided from the file itself, as
-        // the terminal may have changed it since the panel last read it.
-        // Things left out on purpose do not hold the restore open any more:
-        // the restore point they are on is earmarked instead, and this system
-        // goes back to backing up as normal.
-        root._leftOutAtFinish = root.restoreSkipCount
-        if (root.restoreSkipCount > 0 && root.partialSnapshot !== "") {
-          var mark = ["python3", root.keptPointsCli, "--add", root.partialSnapshot]
-          if (root.partialSource !== "") mark.push("--source", root.partialSource)
-          for (var n = 0; n < restoreSkipListModel.count; n++)
-            mark.push(restoreSkipListModel.get(n).path)
-          root._afterKeep = true
-          keptPointProc.command = mark
-          keptPointProc.running = true
-        } else {
-          root.runFinishFiles()
-        }
+  // The restore unit finished (0), failed, or was stopped (143). message is
+  // its own account of a failure, when it gave one.
+  function restoreFinished(code, message) {
+    // Stopped from the panel: it has already put everything back.
+    if (!root.restoringFiles) return
+    root.restoringFiles = false
+    root.restoreTs = ""
+    root.restoreOpening = false
+    if (root.restoreKeptTs !== "") {
+      var ts = root.restoreKeptTs
+      root.restoreKeptTs = ""
+      var ex = root.keptExcludes
+      root.keptExcludes = []
+      if (code === 0 && ex.length > 0) {
+        // Some of it was left out again, so it is still the only copy of
+        // that: stays kept, and now says exactly what it still holds.
+        var mark = ["python3", root.keptPointsCli, "--add", ts]
+        var src = root.sourceOf(ts)
+        if (src !== "") mark.push("--source", src)
+        keptPointProc.command = mark.concat(ex)
+        keptPointProc.running = true
+        Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
+          "Everything but what you left out. That stays on " + Model.prettyStamp(ts) + ", which is kept for it."])
+      } else if (code === 0) {
+        // Nothing is left on it now, so it goes back to being an ordinary
+        // restore point that thinning may take when its turn comes.
+        root.releaseKept(ts)
+        Quickshell.execDetached(["notify-send", "-a", "OmaBackups", "They're back",
+          "What was left on that restore point is in your home folder again."])
       } else {
-        root.lastError = "Restoring your files stopped before finishing. Press Restore my files to carry on."
+        root.lastError = message || "Bringing those back stopped before finishing. Press Restore to carry on."
       }
+      return
+    }
+    if (code === 0) {
+      // Everything's back: the protected restore point can be thinned again.
+      // Unless the AI models are still on the backup: then the marker stays
+      // (backups stay paused, the restore point stays protected) and only
+      // records that the files are done. Decided from the file itself, as
+      // the terminal may have changed it since the panel last read it.
+      // Things left out on purpose do not hold the restore open any more:
+      // the restore point they are on is earmarked instead, and this system
+      // goes back to backing up as normal.
+      root._leftOutAtFinish = root.restoreSkipCount
+      if (root.restoreSkipCount > 0 && root.partialSnapshot !== "") {
+        var keep = ["python3", root.keptPointsCli, "--add", root.partialSnapshot]
+        if (root.partialSource !== "") keep.push("--source", root.partialSource)
+        for (var n = 0; n < restoreSkipListModel.count; n++)
+          keep.push(restoreSkipListModel.get(n).path)
+        root._afterKeep = true
+        keptPointProc.command = keep
+        keptPointProc.running = true
+      } else {
+        root.runFinishFiles()
+      }
+    } else {
+      root.lastError = message || "Restoring your files stopped before finishing. Press Restore my files to carry on."
     }
   }
 

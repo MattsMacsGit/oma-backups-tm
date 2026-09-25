@@ -669,7 +669,7 @@ Panel {
                 text: svc.systemPhase === "waiting"
                   ? "Finish in the terminal window: it's putting your AI models back. Your files come next."
                   : svc.restoringFiles
-                  ? (svc.browsePhase === "opening"
+                  ? (svc.restoreOpening
                     ? "Opening " + Model.prettyStamp(svc.partialSnapshot) + "…"
                     : svc.restoreCounting
                     ? "Working out what to bring back from " + Model.prettyStamp(svc.partialSnapshot) + "…"
@@ -927,7 +927,7 @@ Panel {
                     Button {
                       visible: rpKeptRow
                       text: svc.restoreKeptTs === snapId
-                        ? (svc.browsePhase === "opening" ? "Opening…"
+                        ? (svc.restoreOpening ? "Opening…"
                           : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
                         : "Restore"
                       bordered: true
@@ -1010,7 +1010,7 @@ Panel {
                   Button {
                     visible: keptAway.reachable
                     text: svc.restoreKeptTs === keptAway.modelData
-                      ? (svc.browsePhase === "opening" ? "Opening…"
+                      ? (svc.restoreOpening ? "Opening…"
                         : (svc.restoreCounting ? "Counting…" : svc.restorePercent + "%"))
                       : "Restore"
                     bordered: true

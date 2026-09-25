@@ -156,6 +156,7 @@ case "$cmd" in
   link) exec "$OMARCHY_TM_ROOT/link.sh" "$@" ;;
   browse) exec "$OMARCHY_TM_ROOT/backup.sh" --browse "$@" ;;
   put-back-system) exec "$OMARCHY_TM_ROOT/backup.sh" --put-back-system "$@" ;;
+  restore-files) exec "$OMARCHY_TM_ROOT/backup.sh" --restore-files "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
   schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)
