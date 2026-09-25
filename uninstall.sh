@@ -59,7 +59,7 @@ fi
 if compgen -G "/etc/systemd/system/oma-backups-*" >/dev/null || [[ -d /usr/local/lib/oma-backups ]]; then
   echo "Removing the backup services (needs sudo)..."
   sudo systemctl disable --now oma-backups-scheduled.timer >/dev/null 2>&1 || true
-  sudo systemctl stop 'oma-backups-browse@*.service' >/dev/null 2>&1 || true
+  sudo systemctl stop 'oma-backups-browse@*.service' 'oma-backups-restore@*.service' >/dev/null 2>&1 || true
   sudo rm -f /etc/systemd/system/oma-backups-* /etc/polkit-1/rules.d/50-oma-backups.rules &&
     sudo systemctl daemon-reload || true
   if [[ -f /etc/udev/rules.d/99-oma-backups.rules ]]; then

@@ -790,9 +790,15 @@ pid_file() {
 # as the session does: oma-backups-browse@TS writes it when the folder is
 # ready and removes it on the way out.
 OMA_BROWSE_DIR=/run/omarchy-backups-browse
+# Files being brought back by oma-backups-restore@TS (backup.sh
+# cmd_restore_files). Same idea: a status file per restore point.
+OMA_RESTORE_DIR=/run/omarchy-backups-restore
 
 browse_in_progress() {
   local f ts
+  # Bringing files back counts too: a backup now would capture a home folder
+  # half way through being filled.
+  [[ -n $(systemctl list-units --no-legend --state=active 'oma-backups-restore@*' 2>/dev/null) ]] && return 0
   compgen -G "$OMA_BROWSE_DIR/*.json" >/dev/null 2>&1 || return 1
   # The state file is only as trustworthy as the unit behind it. A browse
   # killed before its cleanup ran leaves the file there for good, and this
@@ -841,6 +847,19 @@ write_pid() {
 
 clear_pid() {
   rm -f "$(pid_file)"
+}
+
+# The disk a restore point was restored from, as backup.sh's dest_id writes it
+# (local:<luks uuid> or remote:<host>:<luks uuid>), when a restore recorded
+# one: the files a quick restore hasn't brought back yet, or things a restore
+# left out on purpose. Empty for any other restore point.
+source_for_ts() {
+  local ts=$1 s
+  s="$(jq -r --arg t "$ts" 'select(.snapshot == $t) | .source // empty' \
+    "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true)"
+  [[ -n $s ]] || s="$(jq -r --arg t "$ts" '.[$t].source // empty' \
+    "$OMARCHY_TM_STATE/kept-points.json" 2>/dev/null || true)"
+  printf '%s\n' "$s"
 }
 
 # Marks whether the last backup attempt ran to completion. Set once a

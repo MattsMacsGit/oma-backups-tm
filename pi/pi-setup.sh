@@ -137,7 +137,7 @@ WantedBy=timers.target
 UNIT
 systemctl daemon-reload
 systemctl enable --now oma-gate-sweep.timer >/dev/null 2>&1 ||
-  warn "Couldn't start the idle lock timer; the disk still locks when the last user lets go."
+  warn "Couldn't start the idle lock timer, so the disk locks the moment the last user lets go instead of after 10 quiet minutes."
 
 if [[ $UPDATE == 1 ]]; then
   v=$(gate_as_account version) || die "Self-test failed: the gatekeeper didn't answer."

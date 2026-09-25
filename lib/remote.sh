@@ -27,6 +27,17 @@ remote_configured() {
   [[ -f $OMA_REMOTE_CONF && -f $OMA_REMOTE_KEY ]] && capsule_key_present
 }
 
+# Every way a restore can have written down the paired Pi's disk (the dest_id
+# form, one per line). The proper one is the name it was paired under plus
+# its disk. Rescue sticks before 1.4.3 wrote whichever address they reached
+# the Pi at, and no disk: those count when the address is one the Pi reported
+# about itself. detect.py's remote_source_ids says the same.
+remote_source_ids() {
+  jq -r '"remote:\(.host // ""):\(.luks_uuid // "")",
+    ([.host] + (.lan // []) | .[] | select(type == "string" and . != "") | "remote:\(.):")' \
+    "$OMA_REMOTE_CONF" 2>/dev/null
+}
+
 remote_load() {
   REMOTE_HOST="$(jq -r '.host // empty' "$OMA_REMOTE_CONF")"
   local port
@@ -51,7 +62,13 @@ remote_load() {
     # One connection for the whole backup instead of a new handshake for
     # each of the dozen small gatekeeper calls (slow over a network). Every
     # command still goes through the gatekeeper on the Pi. Root-only socket.
-    -o ControlMaster=auto -o ControlPath=/run/omarchy-backups-ssh-%C -o ControlPersist=60)
+    #
+    # One per job ($$), never shared between jobs. The first job to connect
+    # owns the connection and it lives in that job's service, so when a
+    # restore point was closed, systemd took the connection down with it --
+    # and the models put-back that had been riding on it died mid-copy. The
+    # gatekeeper's marks kept the disk open for it; the pipe was what went.
+    -o ControlMaster=auto -o ControlPath="/run/omarchy-backups-ssh-$$-%C" -o ControlPersist=60)
   REMOTE_ADDR="$(remote_pick_addr)"
 }
 

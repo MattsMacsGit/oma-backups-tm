@@ -86,6 +86,22 @@ Environment=OMARCHY_TM_UNATTENDED=1
 ExecStart=$base browse %i
 TimeoutStopSec=30
 EOF
+  cat >"$UNIT_DIR/oma-backups-restore@.service" <<EOF
+[Unit]
+Description=OmaBackups: bring files back from restore point %i
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+Environment=SUDO_USER=$user
+Environment=OMARCHY_TM_UNATTENDED=1
+ExecStart=$base restore-files %i
+# Stop exits 143 on purpose, after telling the panel and letting go of the
+# disk; on a Pi that takes a network round trip or two.
+SuccessExitStatus=143
+TimeoutStopSec=60
+EOF
   cat >"$UNIT_DIR/oma-backups-scheduled.service" <<EOF
 [Unit]
 Description=OmaBackups automatic backup
@@ -147,7 +163,7 @@ polkit.addRule(function (action, subject) {
   if (verb !== "start" && verb !== "stop") return;
   var unit = action.lookup("unit");
   if (unit === "oma-backups-backup.service" || unit === "oma-backups-scheduled.service" ||
-      /^oma-backups-browse@[0-9]{8}T[0-9]{6}Z\.service$/.test(unit))
+      /^oma-backups-(browse|restore)@[0-9]{8}T[0-9]{6}Z\.service$/.test(unit))
     return polkit.Result.YES;
 });
 EOF

@@ -42,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --files) MODE=files; shift; break ;;
     --copy) MODE=copy; shift; break ;;
     --put-back-system) MODE=put_back_system; shift ;;
+    --restore-files) MODE=restore_files; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -245,6 +246,48 @@ pick_destination() {
     remote_load
     RSYNC_RSH=(-e "$(remote_rsh)")
   fi
+}
+
+# Reading back (a restore's files, its AI models, things a restore left out)
+# comes from the disk those files are on, recorded when the restore was made —
+# not from wherever the next backup would go. Backups write to one disk; a
+# restore point can be on another: the Pi, or an older backup USB. Restore
+# points without a record (anything opened from the list) are on the disk the
+# list came from, which is the destination.
+SOURCE_PART=""
+pick_source() {
+  local ts=$1 want uuid
+  want="$(source_for_ts "$ts")"
+  case $want in
+    remote:*)
+      remote_configured ||
+        fail_backup "That restore point is on a Pi this laptop isn't paired with any more. Pair it again (Settings → Back up to a Pi), then try again."
+      grep -qxF -- "$want" <<<"$(remote_source_ids)" ||
+        fail_backup "That restore point is on the backup disk of a Pi this laptop was paired with before. Pair with that one again to bring it back."
+      DEST_REMOTE=1
+      remote_load
+      RSYNC_RSH=(-e "$(remote_rsh)")
+      ;;
+    local:?*)
+      uuid=${want#local:}
+      SOURCE_PART="$(lsblk -nrp -o PATH,FSTYPE,UUID 2>/dev/null |
+        awk -v u="$uuid" '$2=="crypto_LUKS" && $3==u {print $1; exit}')"
+      [[ -n $SOURCE_PART ]] ||
+        fail_backup "That restore point is on a backup USB that isn't plugged in (the one it was restored from). Plug it in and try again."
+      DEST_REMOTE=0
+      ;;
+    *) pick_destination ;;
+  esac
+}
+
+# A disk opened only to read from (pick_source) is locked again afterwards,
+# unless it is the backup disk anyway. Left open, it sits where backups look,
+# and the next one refuses it as "not the backup disk you set up".
+release_source() {
+  [[ -n $SOURCE_PART ]] || return 0
+  [[ $(luks_uuid_of "$SOURCE_PART") == "$(current_capsule_uuid)" ]] && return 0
+  backup_running && return 0
+  "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
 }
 
 remote_open() {
@@ -550,7 +593,9 @@ fail_backup() {
   # way to say why they stopped.
   [[ $STOPPED == 1 ]] && exit 143
   BACKUP_FAILED=1
-  if [[ -n ${BROWSE_STATE:-} ]]; then
+  if [[ -n ${RESTORE_STATE:-} ]]; then
+    restore_state error "$*"
+  elif [[ -n ${BROWSE_STATE:-} ]]; then
     browse_state error "$*"
   else
     OMA_DEST_ID="$(dest_id 2>/dev/null || true)" progress fail "Backup failed: $*"
@@ -593,6 +638,40 @@ take_force_note() {
   [[ -f $(OMA_FORCE_NOTE) ]] || return 1
   [[ ${1:-} == peek ]] || rm -f "$(OMA_FORCE_NOTE)"
   return 0
+}
+
+# A forced backup ends the restore, but not the restore point's job: what
+# never came back is still on it, and nowhere else. Clearing the marker used
+# to be all that happened, which took away the only thing stopping thinning
+# from deleting it -- and the panel's "still holds" row that says where it
+# is. Earmark it the way a restore that left things out does.
+keep_forced_point() {
+  local m="$OMARCHY_TM_STATE/partial-restore.json" snap source kf
+  local -a what=()
+  snap="$(jq -r '.snapshot // empty' "$m" 2>/dev/null || true)"
+  [[ $snap =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || return 0
+  source="$(jq -r '.source // empty' "$m" 2>/dev/null || true)"
+  [[ $(jq -r '.files_done // false' "$m" 2>/dev/null) == true ]] || what+=("your files")
+  [[ $(jq -r '.skipped_system // [] | length' "$m" 2>/dev/null || echo 0) == 0 ]] || what+=("your AI models")
+  ((${#what[@]})) || return 0
+  if "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --add "$snap" \
+    ${source:+--source "$source"} "${what[@]}" >/dev/null 2>>"$OMARCHY_TM_LOG"; then
+    # Written as root into the user's own folder: hand it back, so the
+    # plugin can let it go later.
+    # What they had chosen to leave out of this restore goes with it, so
+    # going back for the rest starts from their answer rather than nothing.
+    local -a skips=()
+    mapfile -t skips < <(grep -v '^[[:space:]]*\(#\|$\)' "$OMARCHY_TM_STATE/restore-skips.txt" 2>/dev/null || true)
+    if ((${#skips[@]})); then
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --set-skip "$snap" "${skips[@]}" \
+        >/dev/null 2>>"$OMARCHY_TM_LOG" || true
+    fi
+    kf="$OMARCHY_TM_STATE/kept-points.json"
+    chown --reference="$OMARCHY_TM_STATE" "$kf" 2>/dev/null || true
+    log_file "forced backup: kept restore point $snap (still holds: ${what[*]})"
+  else
+    warn "Couldn't mark $snap to be kept. It still holds ${what[*]}; thinning may take it."
+  fi
 }
 
 # Called twice: once before the sudo re-exec so a refusal costs no password
@@ -675,26 +754,35 @@ open_destination() {
   fi
   # Local destination: whatever is plugged in has to be the disk that was set
   # up. With a Pi paired, pick_destination has already sent us there instead.
-  refuse_other_capsule
+  # Reading from the disk a restore came from (pick_source) is the exception:
+  # nothing is written to it, so it needn't be the one set up.
+  [[ -n $SOURCE_PART ]] || refuse_other_capsule
   local want mapper
-  want="$(capsule_luks_partition 2>/dev/null || true)"
+  want="${SOURCE_PART:-$(capsule_luks_partition 2>/dev/null || true)}"
   if [[ -n $want ]] && findmnt -n "$MNT" >/dev/null 2>&1; then
     mapper="$(backup_mapper "$MNT")"
     if ! lsblk -nr -o NAME,TYPE "$want" 2>/dev/null | awk '$2=="crypt"{print $1}' | grep -qx "$mapper"; then
-      step "Switching to the current backup disk"
+      # Never pull the disk out from under a backup that is writing to it.
+      [[ -n $SOURCE_PART ]] && backup_running &&
+        fail_backup "A backup is using the other backup disk. Try again once it has finished."
+      step "Switching to the $([[ -n $SOURCE_PART ]] && echo "backup disk it came from" || echo "current backup disk")"
       "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
     fi
   fi
   if ! findmnt -n "$MNT" >/dev/null 2>&1; then
     step "Backup disk not mounted — unlocking"
     progress phase "unlock"
-    "$OMARCHY_TM_ROOT/mount.sh" mount
+    if [[ -n $SOURCE_PART ]]; then
+      "$OMARCHY_TM_ROOT/mount.sh" mount --disk "/dev/$(lsblk -n -o PKNAME "$SOURCE_PART" | head -1)"
+    else
+      "$OMARCHY_TM_ROOT/mount.sh" mount
+    fi
   fi
   ensure_rw_mount "$MNT"
   findmnt -n "$MNT" >/dev/null 2>&1 || fail_backup "The backup disk isn't mounted. Unplug it, plug it back in, and try again."
   { touch "$MNT/.oma-write-test" && rm -f "$MNT/.oma-write-test"; } 2>/dev/null ||
     fail_backup "The backup disk can't be written to. Unplug it, plug it back in, and try again."
-  if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want ]]; then
+  if [[ ! -f $OMA_CURRENT_CAPSULE && -n $want && -z $SOURCE_PART ]]; then
     set_current_capsule "$(luks_uuid_of "$want")"
   fi
 }
@@ -1087,6 +1175,7 @@ cmd_backup() {
     # files are still in survives this run rather than being thinned on the
     # way out.
     if [[ $FORCE_AFTER_RESTORE == 1 && -f $OMARCHY_TM_STATE/partial-restore.json ]]; then
+      keep_forced_point
       rm -f "$OMARCHY_TM_STATE/partial-restore.json"
       log_file "partial-restore marker cleared by a forced backup"
     fi
@@ -1144,6 +1233,7 @@ browse_cleanup() {
     rmdir "$mp" 2>/dev/null || true
   fi
   rm -f "$BROWSE_STATE" 2>/dev/null || true
+  release_source
   # With a mark of our own, letting go is safe whatever else is going on: the
   # gatekeeper locks the disk when the last user leaves, not the first. Without
   # one, the old guard stands -- and it only ever asked about backups, which is
@@ -1169,12 +1259,14 @@ cmd_browse() {
   rm -f "$BROWSE_STATE"
 
   close_stale_mapper "$LUKS_MAPPER"
-  pick_destination
+  pick_source "$ts"
   open_destination
 
   if [[ $DEST_REMOTE != 1 ]]; then
     local path="$MNT/home/$ts/$user"
-    [[ -d $path ]] || fail_backup "No copy of your home folder in that restore point."
+    # Not through browse_cleanup: that takes the error away with it, before
+    # the panel has read it.
+    [[ -d $path ]] || { release_source; fail_backup "No copy of your home folder in that restore point."; }
     trap 'browse_cleanup' EXIT
     browse_state ready "$path"
     # Nothing to hold open for a plugged-in disk; just wait to be stopped.
@@ -1207,6 +1299,136 @@ cmd_browse() {
   mountpoint -q "$mp" || fail_backup "Couldn't open that restore point on $REMOTE_HOST (see $OMARCHY_TM_LOG)."
   browse_state ready "$mp"
   wait "$pid" || true
+}
+
+# Bringing files back out of a restore point ("Restore my files", and going
+# back to a kept one), run by oma-backups-restore@TS. It used to be the
+# plugin's own rsync reading an sshfs mount of the restore point, and from a
+# Pi that meant one network round trip for every file it looked at: ~75,000
+# of them took eight minutes before a byte moved. Here rsync talks to the
+# other end the way a backup does, and the Pi builds the file list on its
+# own disk.
+#
+# The plugin writes what to leave out to restore-request.json in the user's
+# state folder, starts the unit, and polls $RESTORE_DIR/TS.json:
+#   {"state": "opening"|"copying"|"done"|"error"|"stopped", "line": ..., ...}
+# "line" is rsync's latest progress line, parsed there exactly as before.
+RESTORE_DIR="$OMA_RESTORE_DIR"
+RESTORE_STATE=""
+RESTORE_LINE=""
+# The panel's id for this run, echoed back so it never mistakes the last
+# run's "done" for this one's.
+RESTORE_ID=""
+
+restore_state() {
+  local state=$1 msg=${2:-} rc=${3:-}
+  [[ -n $RESTORE_STATE ]] || return 0
+  jq -n --arg s "$state" --arg l "$RESTORE_LINE" --arg m "$msg" --arg r "$rc" --arg i "$RESTORE_ID" \
+    '{state: $s, line: $l, id: $i} + (if $m != "" then {message: $m} else {} end)
+      + (if $r != "" then {rc: ($r | tonumber)} else {} end)' >"$RESTORE_STATE.tmp" 2>/dev/null || return 0
+  chmod 644 "$RESTORE_STATE.tmp"
+  mv "$RESTORE_STATE.tmp" "$RESTORE_STATE"
+}
+
+restore_cleanup() {
+  local rc=$?
+  trap - EXIT
+  # Whatever ended it, the panel is told: a Stop (TERM) and a failure both
+  # leave something it can read instead of a file that says "copying" for good.
+  if [[ -n $RESTORE_STATE && -f $RESTORE_STATE ]] &&
+    [[ $(jq -r .state "$RESTORE_STATE" 2>/dev/null) =~ ^(opening|copying)$ ]]; then
+    if [[ $STOPPED == 1 || $rc == 143 ]]; then restore_state stopped "" "$rc"
+    else restore_state error "Restoring your files stopped before finishing (see $OMARCHY_TM_LOG)." "$rc"; fi
+  fi
+  release_source
+  remote_close || true
+  exit "$rc"
+}
+
+cmd_restore_files() {
+  local ts=${1:-} user=${SUDO_USER:-} home group req n i
+  local -a ex=() args=()
+  [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups restore-files TIMESTAMP"
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose files to bring back"
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  group="$(id -gn "$user")"
+  [[ -n $home && -d $home ]] || die "no home folder for $user"
+  mkdir -p "$RESTORE_DIR"
+  chmod 755 "$RESTORE_DIR"
+  RESTORE_STATE="$RESTORE_DIR/$ts.json"
+  rm -f "$RESTORE_STATE"
+  req="$OMARCHY_TM_STATE/restore-request.json"
+  RESTORE_ID="$(jq -r '.id // empty' "$req" 2>/dev/null || true)"
+  [[ $RESTORE_ID =~ ^[a-z0-9]{1,32}$ ]] || RESTORE_ID=""
+  trap restore_cleanup EXIT
+  trap 'STOPPED=1; exit 143' TERM INT
+  restore_state opening
+
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't bring your files back."
+  backup_running && fail_backup "A backup is running. Try again once it has finished."
+
+  # What to leave out: the user's own answer, from their own folder. Only for
+  # this restore point, so a request left over from another can't be used.
+  if [[ -f $req ]]; then
+    [[ $(jq -r '.snapshot // empty' "$req" 2>/dev/null) == "$ts" ]] ||
+      fail_backup "The list of what to leave out is for a different restore point. Press Restore again."
+    n="$(jq -r '(.exclude // []) | length' "$req")"
+    ((n <= 2000)) || fail_backup "That leave-out list is too long."
+    for ((i = 0; i < n; i++)); do
+      ex+=("$(jq -r --argjson i "$i" '.exclude[$i] | tostring | gsub("[\\n\\r]"; "")' "$req")")
+    done
+  fi
+
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_source "$ts"
+  rsync_link_flags
+  open_destination
+  # The Pi's gatekeeper only answers for the restore point itself (two levels
+  # deep); a missing home folder inside it is rsync's to report.
+  if [[ $DEST_REMOTE == 1 ]]; then
+    d_exists "home/$ts" || fail_backup "That restore point isn't on the backup any more."
+  else
+    [[ -d $MNT/home/$ts/$user ]] || fail_backup "No copy of your home folder in that restore point."
+  fi
+
+  args=(-a --ignore-existing --no-inc-recursive --info=progress2,flist2
+    # As the user, the way the plugin's own copy always came back: never
+    # root's, and never an old uid that means someone else on this machine.
+    --chown="$user:$group")
+  for i in "${ex[@]}"; do [[ -n $i ]] && args+=("--exclude=$i"); done
+
+  restore_state copying
+  log_file "restoring files from $ts for $user (${#ex[@]} left out)"
+  local last=0 now rc
+  set +e
+  # progress2 rewrites one line with \r; hand the panel the latest of them,
+  # a few times a second rather than for every hundred files counted.
+  stdbuf -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${args[@]}" \
+    "$(d_target "home/$ts/$user")/" "$home/" 2>>"$OMARCHY_TM_LOG" |
+    stdbuf -o0 tr '\r' '\n' | {
+      local l
+      # read empties its variable at the end of input, so the last line is
+      # kept in its own.
+      while IFS= read -r l; do
+        [[ -n $l ]] || continue
+        RESTORE_LINE=$l
+        now=${EPOCHREALTIME/./}
+        if ((now - last >= 300000)); then restore_state copying; last=$now; fi
+      done
+      restore_state copying
+    }
+  rc=${PIPESTATUS[0]}
+  set -e
+  RESTORE_LINE="$(jq -r '.line // empty' "$RESTORE_STATE" 2>/dev/null || true)"
+  if ((rc == 0)); then
+    restore_state done "" 0
+    log_file "files restored from $ts"
+  else
+    [[ $STOPPED == 1 ]] && exit 143
+    fail_backup "Copying stopped part way (rsync $rc). Press Restore to carry on: it only brings back what is still missing."
+  fi
 }
 
 # After a quick restore: put back what restore-to-disk left in the system area
@@ -1247,9 +1469,10 @@ cmd_put_back_system() {
   NOT_A_BACKUP=1
   FAIL_TITLE="Couldn't put your AI models back."
   close_stale_mapper "$LUKS_MAPPER"
-  pick_destination
+  pick_source "$snap"
   rsync_link_flags
   open_destination
+  if [[ -n $SOURCE_PART ]]; then trap release_source EXIT; fi
   d_exists "os/$snap" || fail_backup "The restore point $snap isn't on the backup any more."
 
   # Ollama holds its models open; stop it while they're copied.
@@ -1351,4 +1574,5 @@ case "$MODE" in
   prune) cmd_prune ;;
   browse) cmd_browse "$@" ;;
   put_back_system) cmd_put_back_system ;;
+  restore_files) cmd_restore_files "$@" ;;
 esac

@@ -424,6 +424,18 @@ def remote_conf() -> dict | None:
     return j if isinstance(j, dict) else None
 
 
+def remote_source_ids(rconf: dict) -> list[str]:
+    """Every way a restore can have written down the paired Pi's disk, as
+    lib/remote.sh's remote_source_ids: the name it was paired under plus its
+    disk, then the bare addresses older rescue sticks wrote."""
+    ids = [f"remote:{rconf.get('host') or ''}:{rconf.get('luks_uuid') or ''}"]
+    lan = rconf.get("lan")
+    for a in [rconf.get("host")] + (lan if isinstance(lan, list) else []):
+        if isinstance(a, str) and a:
+            ids.append(f"remote:{a}:")
+    return ids
+
+
 def backup_destination(disks: list[dict], mnt: Path | None, recorded: str | None,
                        rkey: str | None, rconf: dict | None):
     """Where the next backup goes, decided exactly as backup.sh's
@@ -623,14 +635,26 @@ def detect(diagnostics: bool = True) -> dict:
     capsule_disk = None
     destination = None
     destination_id = None
+    # Every disk a restore could read from right now, in dest_id form: the
+    # backup USBs plugged in here, and the paired Pi's disk. Reading back
+    # comes from the disk the files are on (see backup.sh pick_source), so
+    # the panel needs to know which of those it can reach.
+    reachable = []
     try:
         sys.path.insert(0, str(Path(__file__).resolve().parent))
         from list_snapshots import (cache_path, disk_key, find_mount, load_saved, remote_key,
                                     save_list, scan, write_cache)
 
         rkey = remote_key()
+        rconf = remote_conf()
         destination, destination_id, here, mounted_uuid, mnt = backup_destination(
-            disks, find_mount(), current_capsule_uuid(), rkey, remote_conf())
+            disks, find_mount(), current_capsule_uuid(), rkey, rconf)
+        for d in disks:
+            cap = d.get("capsule")
+            if d["kind"] == "capsule" and not d["protected"] and cap and cap.get("luks_uuid"):
+                reachable.append(f"local:{cap['luks_uuid']}")
+        if rkey and rconf:
+            reachable.extend(remote_source_ids(rconf))
         backup_mounted = mnt is not None
 
         if mnt is not None:
@@ -716,6 +740,7 @@ def detect(diagnostics: bool = True) -> dict:
         "backup_mounted": backup_mounted,
         "destination": destination,
         "destination_id": destination_id,
+        "reachable": reachable,
         "capsule_disk": capsule_disk,
         "current_capsule_uuid": current_capsule_uuid(),
         "limine": limine_info(),

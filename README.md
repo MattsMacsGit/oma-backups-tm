@@ -154,12 +154,18 @@ point on it: pairing moves a working backup disk to the Pi, so there has to be
 a backup on it first.
 
 The disk stays locked between backups; the laptop sends the unlock key each
-time. The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
+time. Unlocking takes the Pi about 20 seconds, so once the last backup,
+restore or open restore point is finished with it, the disk stays open for
+10 quiet minutes before locking itself, and back-to-back jobs don't each pay
+for it (gatekeeper 10 and newer). The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
 that unlocks this one disk and writes backups to it, nothing else on the Pi.
 The home page shows the disk's free space as of the last backup.
 
 Restore points on the Pi open in Files the same way, over `sshfs` (slower, and
-a notification says it's opening). On the Pi, the folder is served by
+a notification says it's opening). **Restore my files** doesn't go through that:
+it copies straight from the Pi the way a backup does, so the Pi works out what
+to send on its own disk instead of the laptop checking each file over the
+network. On the Pi, the folder is served by
 `sftp-server -R` inside a `bubblewrap` sandbox that contains nothing else.
 
 When the Pi is on the same network as the laptop, backups go straight to its
@@ -250,7 +256,8 @@ intended path is **booting**.
 
 After a **Quick System Rescue**, the plugin shows **Restore my files**.
 It copies back everything that was left behind, without overwriting anything
-you've changed since. Stop it and carry on later if you like. Until your files
+you've changed since, with a progress bar, speed and time left. Stop it and
+carry on later if you like; it picks up with what is still missing. Until your files
 are back, the restore point they came from is kept safe from thinning — it's
 the only one that still has them.
 
@@ -259,14 +266,23 @@ first: the quick skips and **Folder** / **File** there pick from the backup's
 own copy. Once the rest is back, backups start
 again as normal, and the restore point still holding what you left out is
 marked in the list and never thinned away. Its row has **Browse** and
-**Restore** buttons for fetching the rest later. Tap the row itself to stop
-keeping it.
+**Restore** buttons for fetching the rest later: **Restore** opens the same
+leave-out screen with the list you used last time, so you can take off what
+you want back now and press **Start restore**. Whatever you leave out again
+stays on it, and it stays kept. Tap the row itself to stop keeping it.
 
 AI models kept in the system area (Ollama's, in `/var/lib/ollama`) are left on
 the backup by a Quick System Rescue too: they're often many gigabytes. **Restore
 my files** puts them back first, in a terminal, because that needs your
 password. Skip it and your files still come back; the panel then offers **Put
 AI models back** for later, and backups stay paused until they are.
+
+All of these read from the disk the restore came from, even when backups now
+go somewhere else: restored from the Pi with a backup USB plugged in, they still
+come from the Pi, and restored from an older USB, they come from that USB. If
+that disk isn't here, the panel says which one to plug in rather than offering
+a button that can't work. A USB opened just to read from is locked again
+afterwards.
 
 ### Backups pause until the system is whole again
 
@@ -288,7 +304,9 @@ Press **Restore my files** and backups start again by themselves. If you meant
 to keep only what's on this system — setting up a second machine, say — hold
 **Ctrl** and the Backup now button wakes up. It spells out what gets dropped
 before anything happens. From a terminal that's
-`oma-backups backup --force-after-restore`.
+`oma-backups backup --force-after-restore`. The restore point your files are
+still on is kept (with the leave-out list you'd made), so they can still be
+fetched from its row later, and thinning never takes it.
 
 ### Sync apps
 
