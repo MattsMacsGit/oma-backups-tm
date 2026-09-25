@@ -106,13 +106,9 @@ Panel {
   property bool newDiskConfirmed: false
   property string stickDisk: ""
   property bool stickConfirmed: false
-  // USBs that could become a network rescue stick: never a backup disk.
-  readonly property var stickDisks: {
-    var out = []
-    for (var i = 0; i < svc.disks.length; i++)
-      if (!svc.disks[i].capsule && svc.disks[i].kind !== "capsule") out.push(svc.disks[i])
-    return out
-  }
+  // Disks that could become a network rescue stick: all of them. Anything
+  // already on one (a backup disk, a Ventoy stick) is named in its label.
+  readonly property var stickDisks: svc.disks
   readonly property var otherDisks: {
     var out = []
     var cur = svc.capsule ? svc.capsule.path : ""
@@ -736,7 +732,11 @@ Panel {
               Text {
                 width: parent.width
                 text: svc.snapshotCount === 0
-                  ? "No dated copies yet. After a backup they appear here."
+                  ? (!svc.snapshotsKnown
+                    ? (svc.remoteActive
+                      ? "Not read from " + svc.remoteHost + " yet. Its restore points appear here after the next backup to it."
+                      : "Not read from this disk yet. Its restore points appear here once it's unlocked or backed up to.")
+                    : "No dated copies yet. After a backup they appear here.")
                   : (svc.remoteActive && !svc.linked
                     ? "Stored on " + svc.remoteHost + ". Link this laptop (below) to open them from here."
                     : "Open a date to browse that copy. " + (svc.schedule.retention === "smart"
@@ -1196,17 +1196,6 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.bodySmall
               wrapMode: Text.WordWrap
-            }
-
-            Toggle {
-              visible: !root.blockedByRestore
-              width: parent.width
-              label: "Show all disks"
-              description: "Includes internal drives. Easy to wipe the computer’s own disk."
-              checked: svc.showAllDisks
-              foreground: root.foreground
-              fontFamily: root.fontFamily
-              onClicked: svc.showAllDisks = !svc.showAllDisks
             }
 
             // Not part of setting up: moving the disk to a Pi only makes

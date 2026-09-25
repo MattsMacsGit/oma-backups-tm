@@ -629,8 +629,12 @@ def main() -> int:
                "detail": "", "speed": "", "eta": "0:00", "line": "Done", "overall_percent": 100})
     elif cmd == "fail":
         clear_plan()
+        # Which disk it failed on (backup.sh's dest_id): "unplugged partway
+        # through, press Resume" is about that disk, and stops being true the
+        # moment the next backup would go somewhere else.
         write({"running": False, "phase": "error", "label": "", "busy": False, "percent": 0,
-               "detail": "", "speed": "", "eta": "", "line": " ".join(args) or "Setup failed"})
+               "detail": "", "speed": "", "eta": "", "line": " ".join(args) or "Setup failed",
+               "dest": os.environ.get("OMA_DEST_ID") or None})
     elif cmd == "stream":
         return stream(args[0] if args else "rsync", args[1] if len(args) > 1 else None)
     else:

@@ -161,21 +161,102 @@ def cache_path() -> Path:
     return home / ".local" / "state" / "omarchy-backups" / "snapshots.json"
 
 
-def write_cache(rows: list[dict]) -> None:
-    path = cache_path()
+def _write_if_changed(path: Path, text: str) -> None:
+    """Atomic, readable by the user, and left alone when nothing changed —
+    the panel watches these files, and detect runs every two seconds."""
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(rows) + "\n", encoding="utf-8")
-        txt = path.with_suffix(".txt")
+        if path.read_text(encoding="utf-8") == text:
+            return
+    except OSError:
+        pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.chmod(tmp, 0o644)
+    if os.geteuid() == 0:
+        st = path.parent.stat()
+        os.chown(tmp, st.st_uid, st.st_gid)
+    tmp.replace(path)
+
+
+# Each backup disk, and a paired Pi, keeps its own list. There used to be one
+# list, holding whichever disk was read last: unplug the USB and the panel
+# went on showing its restore points under the Pi's name. A list is only ever
+# shown for the disk the next backup would actually go to (see detect.py).
+REMOTE_CONF = Path("/etc/omarchy-backups/remote.json")
+
+
+def remote_key() -> str | None:
+    """The paired Pi's list, tied to the disk it was paired with."""
+    try:
+        j = json.loads(REMOTE_CONF.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(j, dict) or not j.get("host"):
+        return None
+    return "remote-" + str(j.get("luks_uuid") or j["host"])
+
+
+def disk_key(luks_uuid: str | None) -> str | None:
+    return f"disk-{luks_uuid}" if luks_uuid else None
+
+
+def mount_luks_uuid(mnt: Path) -> str | None:
+    """The LUKS partition under a mounted backup disk: which disk this is."""
+    import subprocess
+
+    try:
+        src = subprocess.run(["findmnt", "-n", "-o", "SOURCE", str(mnt)],
+                             capture_output=True, text=True, timeout=5).stdout.strip()
+        if not src:
+            return None
+        out = subprocess.run(["lsblk", "-n", "-s", "-r", "-o", "UUID,FSTYPE", src],
+                             capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    for line in out.splitlines():
+        bits = line.split()
+        if len(bits) == 2 and bits[1] == "crypto_LUKS":
+            return bits[0]
+    return None
+
+
+def saved_path(key: str) -> Path:
+    safe = "".join(c if c.isalnum() or c in "._-" else "_" for c in key)
+    return cache_path().parent / f"points-{safe}.json"
+
+
+def load_saved(key: str | None) -> list[dict] | None:
+    """That disk's list as last read, or None if it never has been."""
+    if not key:
+        return None
+    try:
+        rows = json.loads(saved_path(key).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rows if isinstance(rows, list) else None
+
+
+def save_list(key: str | None, rows: list[dict]) -> None:
+    """Remember what is on that disk, without showing it."""
+    if not key:
+        return
+    try:
+        _write_if_changed(saved_path(key), json.dumps(rows) + "\n")
+    except OSError:
+        pass
+
+
+def write_cache(rows: list[dict], key: str | None = None) -> None:
+    """The list the panel shows, and (given the disk it came from) that
+    disk's own saved copy."""
+    save_list(key, rows)
+    try:
+        body = json.dumps(rows) + "\n"
+        path = cache_path()
         lines = [f"{s.get('label') or s['timestamp']} | {s['timestamp']}" for s in rows]
-        txt.write_text(("\n".join(lines) + "\n") if lines else "", encoding="utf-8")
-        os.chmod(txt, 0o644)
-        os.chmod(tmp, 0o644)
-        if os.geteuid() == 0:
-            st = path.parent.stat()
-            os.chown(tmp, st.st_uid, st.st_gid)
-        tmp.replace(path)
+        _write_if_changed(path.with_suffix(".txt"), ("\n".join(lines) + "\n") if lines else "")
+        _write_if_changed(path, body)
     except OSError:
         pass
 
@@ -220,7 +301,7 @@ def main() -> int:
         return open_snapshot(args.open)
     if args.stdin:
         rows = json.load(sys.stdin)
-        write_cache(rows)
+        write_cache(rows, remote_key())
         if args.json:
             json.dump(rows, sys.stdout)
             sys.stdout.write("\n")
@@ -261,7 +342,7 @@ def main() -> int:
             return 0
         mnt = found
     rows = scan(mnt)
-    write_cache(rows)
+    write_cache(rows, disk_key(mount_luks_uuid(mnt)))
     if args.json:
         json.dump(rows, sys.stdout)
         sys.stdout.write("\n")
