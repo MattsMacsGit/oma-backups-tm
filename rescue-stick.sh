@@ -115,7 +115,6 @@ require_usb_or_allow "$DISK" "erase"
 disk_real="$(real_dev "$DISK")"
 is_capsule="$(printf '%s' "$DETECT_JSON" | jq -r --arg p "$disk_real" --arg n "$DISK" \
   '.disks[] | select(.path == $p or .path == $n) | .capsule // empty | tostring')"
-[[ -z $is_capsule ]] || fail "$DISK is a backup disk. Use a different USB for the rescue stick."
 
 # Plain call, not a command substitution: the ISO-verified cache it sets would
 # not survive a subshell, and it is checked again when the image is built.
@@ -168,6 +167,10 @@ else
 fi
 echo
 gum style --bold --foreground 1 "This erases $DISK."
+note="$(printf '%s' "$DETECT_JSON" | jq -r --arg p "$disk_real" --arg n "$DISK" \
+  '.disks[] | select(.path == $p or .path == $n) | .content // empty' | head -1)"
+[[ -n $note ]] && gum style --bold --foreground 3 "  It is a $note."
+[[ -n $is_capsule ]] && gum style --bold --foreground 3 "  Its backups will be gone. Make sure your backups live on another disk or the Pi."
 gum style --foreground 8 "Making a new stick switches off any older rescue stick for this Pi."
 echo
 confirm "Erase $DISK and make it a network rescue stick?"

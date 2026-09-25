@@ -7,7 +7,6 @@ function diskLabel(d) {
   if (d.tran) bits.push(d.tran)
   if (labels.length) bits.push(labels.join(","))
   if (d.protected) bits.push("live system — cannot use")
-  else if (d.kind === "installer") bits.push("installer disk")
   else {
     if (d.kind === "internal") bits.push("internal")
     // What is already on it (backup disk, rescue stick, a system). Advisory:

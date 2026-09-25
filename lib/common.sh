@@ -570,13 +570,7 @@ refuse_dangerous_disk() {
   local reason
   reason="$(disk_protected_reason "$disk")"
   if [[ -n $reason ]]; then
-    # Rescue restore: the user picks any disk (including Ventoy). Format from
-    # a running desktop still refuses installer sticks.
-    if [[ $action == "restore onto" && $reason == installer\ disk* ]]; then
-      log "installer disk $disk allowed for restore ($reason)"
-    else
-      die "REFUSING to $action $disk — $reason"
-    fi
+    die "REFUSING to $action $disk — $reason"
   fi
 }
 

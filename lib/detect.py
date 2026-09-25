@@ -17,14 +17,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-PROTECTED_LABELS = {
+# Boot sticks made by other tools. Only a warning: they are listed and can be
+# picked like any other USB — whose stick it is, is the owner's business.
+INSTALLER_LABELS = {
     "VENTOY",
     "VTOYEFI",
     "CLONEZILLA",
     "CLONEZILLA-LIVE",
 }
-
-INSTALLER_LABELS = PROTECTED_LABELS
 
 # Our own disk labels, compared uppercased (see labels_on_disk). New disks get
 # the 1.1 names; the older ones stay recognised so disks built before the
@@ -224,7 +224,9 @@ def installer_reason(disk: dict) -> str | None:
 
 
 def protected_reason(disk: dict, live_root_disk: str | None) -> str | None:
-    """Live root and installer sticks are never format/restore targets."""
+    """The disk this computer is running from is never a format/restore
+    target. Nothing else is refused: every other disk is listed, with a note
+    (content_note) when it holds something worth a second look."""
     path = device_path(disk)
     if live_root_disk and os.path.realpath(path) == os.path.realpath(live_root_disk):
         return "live root disk"
@@ -232,9 +234,6 @@ def protected_reason(disk: dict, live_root_disk: str | None) -> str | None:
     for critical in ("/", "/boot", "/home"):
         if critical in mps:
             return f"mounted as {critical}"
-    inst = installer_reason(disk)
-    if inst:
-        return inst
     return None
 
 
@@ -255,6 +254,10 @@ def content_note(disk: dict, cap: dict | None) -> str | None:
     spare drive they restored a working system onto, thinking it was blank.
     """
     labels = {str(x).upper() for x in labels_on_disk(disk)}
+    if labels & {"VENTOY", "VTOYEFI"}:
+        return "Ventoy stick — erasing removes Ventoy and its ISOs"
+    if labels & INSTALLER_LABELS:
+        return "installer stick — erasing removes it"
     if labels & NET_LABELS:
         return "network rescue stick"
     if cap:
@@ -513,7 +516,7 @@ def detect(diagnostics: bool = True) -> dict:
                 "internal": not usb,
                 "kind": kind,
                 "installer": installer,
-                "hidden_by_default": (not usb) or bool(installer) or reason is not None,
+                "hidden_by_default": (not usb) or reason is not None,
                 "protected": reason is not None,
                 "protected_reason": reason,
                 "capsule": cap,
@@ -522,7 +525,7 @@ def detect(diagnostics: bool = True) -> dict:
                 # Shown next to the disk wherever one gets picked. Advisory
                 # only: it changes no decision this script makes.
                 "content": content_note(n, cap),
-                "candidate": reason is None and not installer,
+                "candidate": reason is None,
             }
         )
 
@@ -724,8 +727,6 @@ def print_human(d: dict) -> None:
         flags.append(disk.get("kind") or "?")
         if disk["protected"]:
             flags.append(f"REFUSE: {disk['protected_reason']}")
-        elif disk.get("installer"):
-            flags.append(f"hidden: {disk['installer']}")
         elif disk.get("content"):
             flags.append(disk["content"])
         elif disk.get("hidden_by_default"):

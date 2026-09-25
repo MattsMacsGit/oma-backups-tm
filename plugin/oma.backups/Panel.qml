@@ -106,13 +106,9 @@ Panel {
   property bool newDiskConfirmed: false
   property string stickDisk: ""
   property bool stickConfirmed: false
-  // USBs that could become a network rescue stick: never a backup disk.
-  readonly property var stickDisks: {
-    var out = []
-    for (var i = 0; i < svc.disks.length; i++)
-      if (!svc.disks[i].capsule && svc.disks[i].kind !== "capsule") out.push(svc.disks[i])
-    return out
-  }
+  // Disks that could become a network rescue stick: all of them. Anything
+  // already on one (a backup disk, a Ventoy stick) is named in its label.
+  readonly property var stickDisks: svc.disks
   readonly property var otherDisks: {
     var out = []
     var cur = svc.capsule ? svc.capsule.path : ""

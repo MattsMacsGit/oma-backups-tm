@@ -115,12 +115,12 @@ disks_cmd() {
   if [[ $all == 1 ]]; then
     printf '%s\n' "$raw" | jq -r '
       .disks[] |
-      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .protected then "\tREFUSE:"+(.protected_reason // "") else "" end)"
+      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .protected then "\tREFUSE:"+(.protected_reason // "") elif .content then "\t"+.content else "" end)"
     '
   else
     printf '%s\n' "$raw" | jq -r '
       .disks[] | select(.hidden_by_default != true) |
-      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))"
+      "\(.path)\t\(.size // "?")\t\(.tran // "-")\t\(.kind)\t\(.model // "")\t\((.labels // []) | join(","))\(if .content then "\t"+.content else "" end)"
     '
   fi
 }

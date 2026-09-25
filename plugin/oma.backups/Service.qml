@@ -730,9 +730,19 @@ Item {
     privileged(["remote", "forget"])
   }
 
+  // An internal disk is only on the list when "Show all disks" is on, and is
+  // only erased after the user has picked it and ticked the confirm. That is
+  // the choice made, so the scripts are told so instead of refusing it.
+  function eraseArgs(disk) {
+    var d = detect && detect.disks ? detect.disks : []
+    for (var i = 0; i < d.length; i++)
+      if (d[i].path === disk && !d[i].usb) return ["--allow-internal"]
+    return []
+  }
+
   function makeRescueStick(disk) {
     if (!disk) return
-    privileged(["rescue-stick", disk])
+    privileged(eraseArgs(disk).concat(["rescue-stick", disk]))
   }
 
   function pickFolder() { pickProc.command = ["python3", root.picker]; pickProc.running = true }
@@ -980,7 +990,7 @@ Item {
         root.backupRunning = true
         root.launchedBackup = true
         root.sawBackupStatus = false
-        root.privileged(["first-run", disk])
+        root.privileged(root.eraseArgs(disk).concat(["first-run", disk]))
       } else if (root.pendingBackup) {
         root.pendingBackup = false
         var forced = root.pendingForce
