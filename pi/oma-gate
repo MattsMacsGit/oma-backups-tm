@@ -28,7 +28,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "10"
+VERSION = "11"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -515,6 +515,10 @@ def v_delete(args: list[str]) -> None:
         run("btrfs", "subvolume", "delete", str(esp))
     elif esp.is_dir():
         shutil.rmtree(esp)
+    # Its manifest (sizes for a restore's progress bars) goes with it. The
+    # laptop writes it with plain rsync, so older gatekeepers never knew of
+    # it and simply leave it behind.
+    target(f"meta/{ts}.json").unlink(missing_ok=True)
     log(f"deleted restore point {ts}")
 
 
