@@ -62,7 +62,13 @@ remote_load() {
     # One connection for the whole backup instead of a new handshake for
     # each of the dozen small gatekeeper calls (slow over a network). Every
     # command still goes through the gatekeeper on the Pi. Root-only socket.
-    -o ControlMaster=auto -o ControlPath=/run/omarchy-backups-ssh-%C -o ControlPersist=60)
+    #
+    # One per job ($$), never shared between jobs. The first job to connect
+    # owns the connection and it lives in that job's service, so when a
+    # restore point was closed, systemd took the connection down with it --
+    # and the models put-back that had been riding on it died mid-copy. The
+    # gatekeeper's marks kept the disk open for it; the pipe was what went.
+    -o ControlMaster=auto -o ControlPath="/run/omarchy-backups-ssh-$$-%C" -o ControlPersist=60)
   REMOTE_ADDR="$(remote_pick_addr)"
 }
 

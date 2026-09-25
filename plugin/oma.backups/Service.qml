@@ -232,6 +232,10 @@ Item {
   // next time it is mounted somewhere else.
   property string browsePath: ""
   property bool pickWantFile: false
+  // Which list a pick goes on. Not browseMode: a restore point already open
+  // with Browse is reused for picking without becoming "pick", and the picks
+  // then landed on the backup skip list instead of the restore one.
+  property bool pickForRestore: false
   property int browseMissed: 0
 
   // After a "system + settings" restore: which restore point still has the
@@ -787,8 +791,8 @@ Item {
     privileged(eraseArgs(disk).concat(["rescue-stick", disk]))
   }
 
-  function pickFolder() { pickProc.command = ["python3", root.picker]; pickProc.running = true }
-  function pickFile() { pickProc.command = ["python3", root.picker, "--file"]; pickProc.running = true }
+  function pickFolder() { root.pickForRestore = false; pickProc.command = ["python3", root.picker]; pickProc.running = true }
+  function pickFile() { root.pickForRestore = false; pickProc.command = ["python3", root.picker, "--file"]; pickProc.running = true }
 
   // Choosing what to leave out of the restore means choosing from what is on
   // the backup, not from this half-empty system — so the restore point has to
@@ -810,6 +814,7 @@ Item {
       "--title", root.pickWantFile ? "Leave this file out of the restore"
         : "Leave this folder out of the restore"]
     if (root.pickWantFile) cmd.push("--file")
+    root.pickForRestore = true
     pickProc.command = cmd
     pickProc.running = true
   }
@@ -825,7 +830,7 @@ Item {
       if (code === 0 && root._pickOut !== "") {
         var p = String(root._pickOut)
         if (p.indexOf("file://") === 0) p = decodeURIComponent(p.slice(7))
-        if (root.browseMode === "pick") {
+        if (root.pickForRestore) {
           // Stored relative to the mount, with a leading slash so rsync
           // anchors it at the top of the home folder rather than matching
           // the same name anywhere below it.
