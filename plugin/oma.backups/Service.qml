@@ -267,7 +267,6 @@ Item {
   // be watched directly (the launcher returns at once), so the terminal
   // leaves a note when it's done.
   property string systemPhase: ""
-  property bool systemAsked: false
   readonly property string putBackNote: root.home + "/.local/state/omarchy-backups/put-back-system.done"
 
   // Reading back works from any disk this laptop can reach: a backup USB
@@ -295,8 +294,10 @@ Item {
 
   function restoreMyFiles() {
     if (root.partialSnapshot === "" || !root.linked || !root.partialSourceHere) return
-    // The models first, while someone is here to type the password.
-    if (root.skippedSystem > 0 && !root.systemAsked) {
+    // The models first, while someone is here to type the password — every
+    // time they are still missing. Asking once per session meant that after
+    // a Ctrl+C, Stop and Restore again went straight past them to the files.
+    if (root.skippedSystem > 0) {
       putBackModels()
       return
     }
@@ -312,9 +313,14 @@ Item {
     root.lastError = ""
     Quickshell.execDetached(["rm", "-f", root.putBackNote])
     // trap: Ctrl+C at the password prompt stops the command, not this shell,
-    // so the note still gets written and the panel moves on.
-    var inner = "rm -f " + root.shQuote([root.putBackNote]) + "; trap true INT; "
-      + root.shQuote([root.cli, "put-back-system"]) + "; printf '%s' $? > " + root.shQuote([root.putBackNote])
+    // so the note still gets written and the panel moves on. The EXIT trap is
+    // for the window itself closing mid-copy: the shell is hung up on before
+    // it reaches the printf, no note was ever written, and the panel sat on
+    // "putting your models back" for good. It says 130, cancelled.
+    var note = root.shQuote([root.putBackNote])
+    var inner = "rm -f " + note + "; trap true INT; wrote=0; "
+      + "trap \"[ \\$wrote = 1 ] || printf 130 > " + note + "\" EXIT; "
+      + root.shQuote([root.cli, "put-back-system"]) + "; printf '%s' $? > " + note + "; wrote=1"
     var term = "omarchy-launch-floating-terminal-with-presentation"
     Quickshell.execDetached(["sh", "-c",
       "if command -v " + term + " >/dev/null 2>&1; then exec " + term + " " + root.shQuote([inner]) + "; fi; "
@@ -326,7 +332,6 @@ Item {
   function putBackFinished(rc) {
     if (root.systemPhase !== "waiting") return
     root.systemPhase = ""
-    root.systemAsked = true
     Quickshell.execDetached(["rm", "-f", root.putBackNote])
     if (rc !== 0 && rc !== null)
       root.lastError = "Your AI models weren't put back. Press \"Put AI models back\" to try again."
