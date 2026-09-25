@@ -128,11 +128,14 @@ Item {
 
   readonly property var disks: {
     var d = detect && detect.disks ? detect.disks : []
-    // Every disk, USB first. The one this computer runs from is listed too
-    // (greyed out, it can't be erased from inside the running system) so
-    // the list is the whole picture.
+    // Every disk, USB first, except the one this computer is running from
+    // (it can't be erased from inside the running system, and a greyed-out
+    // row that does nothing when clicked only invites clicking it).
     var usb = [], other = []
-    for (var i = 0; i < d.length; i++) (d[i].usb ? usb : other).push(d[i])
+    for (var i = 0; i < d.length; i++) {
+      if (d[i].protected) continue
+      (d[i].usb ? usb : other).push(d[i])
+    }
     return usb.concat(other)
   }
   // The current backup disk if it's plugged in, else any backup disk (the
