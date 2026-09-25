@@ -1286,7 +1286,15 @@ cmd_browse() {
   trap 'browse_cleanup "$mp"' EXIT
   # allow_other + default_permissions: mounted by root, readable by the user
   # exactly as far as each file's own owner/permissions allow.
-  sshfs -f -o ro,allow_other,default_permissions,reconnect \
+  local -a links=()
+  # sshfs 3.7.6 refuses to read any symlink pointing at ".." or an absolute
+  # path (contain_symlinks, on by default), so every such link in a restore
+  # point showed as unreadable and Files couldn't copy it ("Cannot retrieve
+  # attribute standard::symlink-target"). These are the user's own links,
+  # served read-only by their own Pi, and a restore has to bring them back
+  # as they were. Older sshfs doesn't know the option, so ask first.
+  sshfs -h 2>&1 | grep -q no_contain_symlinks && links=(-o no_contain_symlinks)
+  sshfs -f -o ro,allow_other,default_permissions,reconnect "${links[@]}" \
     -o ssh_command="$(remote_rsh)" -o sftp_server="/browse $ts $user" \
     "$(remote_target):/data" "$mp" 2>>"$OMARCHY_TM_LOG" &
   pid=$!
