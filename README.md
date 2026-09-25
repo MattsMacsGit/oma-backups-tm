@@ -420,8 +420,12 @@ keeps working exactly as it did — nothing is relabelled behind your back.
 
 None of these partitions are mounted by the desktop when you plug them in: a
 udev rule installed by `oma-backups link` turns off auto-mounting, so no
-windows pop up. The tool mounts what it needs itself. The boot and key
-partitions are hidden from the file manager entirely.
+windows pop up. Omarchy's auto-mounter (udiskie) doesn't read that setting by
+itself, so `install.sh` also adds a small rule to `~/.config/udiskie/config.yml`
+(or tells you what to add, if you already have udiskie settings of your own).
+Without it, plugging in the backup disk pops up a password window. The tool
+mounts what it needs itself. The backup and rescue partitions still show in
+the file manager; the boot and key partitions are hidden from it entirely.
 
 Disk names (`sda` / `nvme0n1` / …) shuffle. Identify by **label** and `lsblk TRAN`.
 

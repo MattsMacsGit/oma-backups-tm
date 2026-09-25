@@ -47,6 +47,8 @@ if command -v omarchy >/dev/null 2>&1; then
   omarchy plugin disable oma.backups >/dev/null 2>&1 || true
 fi
 
+"$SRC/lib/udiskie-rule.sh" remove || true
+
 rm -f "$BINDIR/oma-backups" "$BINDIR/omarchy-backups" "$BINDIR/omarchy-tm"
 rm -rf "$PLUGIN" "$SHARE" "$STATE"
 
