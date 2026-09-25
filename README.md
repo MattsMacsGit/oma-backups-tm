@@ -1,6 +1,6 @@
 # OmaBackups
 
-**v1.4.0** — Time Machine-style **encrypted backups** for
+**v1.4.1** — Time Machine-style **encrypted backups** for
 [Omarchy](https://omarchy.org/).
 
 A USB disk keeps dated copies of your system and your home folder. Click a
@@ -334,12 +334,14 @@ keeps its restore points, and you can plug it back into a laptop and use it.
 
 ## Safety
 
-- USB disks only, unless **Show all disks** (Settings)
-- Live root is never a format/restore target
+- Every disk is listed, USB first, except the one this computer is running
+  from: that one is never shown, and never a format/restore target
+- An internal drive can be picked, and is named as one
 - Wiping requires an explicit erase confirm
 - The disk is checked again, immediately before it is wiped, to make sure it is
   still the disk you picked
-- Ventoy / Clonezilla sticks stay hidden unless you show all disks
+- Ventoy / Clonezilla sticks are listed with a warning that erasing them
+  removes Ventoy and its ISOs
 - A disk that already has backups is **used as-is** until you explicitly start over
 - Disks that already hold something — a backup disk, a rescue stick, a system —
   say so in every list they appear in. They are never hidden: it is your disk
