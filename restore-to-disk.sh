@@ -563,6 +563,17 @@ NEW_PARTUUID="$(blkid -s PARTUUID -o value "$P2")"
 NEW_LUKS_UUID="$(blkid -s UUID -o value "$P2")"
 [[ -n $NEW_BTRFS_UUID && -n $NEW_ESP_UUID && -n $NEW_PARTUUID && -n $NEW_LUKS_UUID ]] || die "missing new UUIDs"
 
+# Which restore point this system came from, under the new system's own
+# identity (its filesystem's ID, what backup.sh's system_id reads). Its first
+# backup starts the backup disk's working copy from that point rather than
+# copying over the original system's -- so a restored drive that is booted
+# and backed up doesn't make the original send everything again, or store it
+# twice. Best effort: without it that first backup just copies over.
+mkdir -p "$NEW_ROOT/@${OMA_RESTORED_FROM%/*}"
+jq -n --arg s "$SNAPSHOT" --arg id "$NEW_BTRFS_UUID" --arg at "$(ts)" --arg l "$LEVEL" \
+  '{snapshot: $s, system: $id, restored_at: $at, level: $l}' >"$NEW_ROOT/@$OMA_RESTORED_FROM" ||
+  log "couldn't record which restore point this came from"
+
 FSTAB="$NEW_ROOT/@/etc/fstab"
 [[ -f $FSTAB ]] || die "restored system has no /etc/fstab. Restore aborted."
 if ! "$OMARCHY_TM_PYTHON" - "$FSTAB" "$NEW_BTRFS_UUID" "$NEW_ESP_UUID" <<'PY'

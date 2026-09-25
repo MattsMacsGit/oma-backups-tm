@@ -420,6 +420,38 @@ def v_snapshot(args: list[str]) -> None:
     run("btrfs", "subvolume", "snapshot", "-r", str(src), str(dst))
 
 
+def v_reseed(args: list[str]) -> None:
+    """reseed KIND TS -- make KIND/current a writable copy of restore point TS.
+
+    When another system has been backing up to this disk, its files are in
+    the working copy; copying this system's back over the top would store
+    all of them a second time, because the disk can't tell they match the
+    ones already in this system's own restore points. A snapshot of one of
+    those shares every byte with it instead. Built beside the old copy and
+    swapped in, so an interruption never leaves no working copy at all.
+    """
+    require_mounted()
+    kind, ts = args
+    if kind not in ("os", "home", "esp") or not STAMP.match(ts):
+        raise Refused(f"can't rebuild {kind!r} from {ts!r}")
+    src = target(f"{kind}/{ts}")
+    if not is_subvolume(src):
+        raise Refused(f"{kind}/{ts} is not a restore point here")
+    cur = target(f"{kind}/current")
+    new = target(f"{kind}/current.new")
+    if new.exists():
+        if not is_subvolume(new):
+            raise Refused(f"{kind}/current.new exists but is not a btrfs subvolume")
+        run("btrfs", "subvolume", "delete", str(new))
+    run("btrfs", "subvolume", "snapshot", str(src), str(new))
+    if cur.exists():
+        if not is_subvolume(cur):
+            raise Refused(f"{kind}/current exists but is not a btrfs subvolume")
+        run("btrfs", "subvolume", "delete", str(cur))
+    os.rename(new, cur)
+    log(f"rebuilt {kind}/current from {ts}")
+
+
 def v_set_writable(args: list[str]) -> None:
     require_mounted()
     (p,) = map(target, args)
@@ -641,6 +673,7 @@ VERBS = {
     "subvol-create": (v_subvol_create, 1),
     "snapshot": (v_snapshot, 2),
     "set-writable": (v_set_writable, 1),
+    "reseed": (v_reseed, 2),
     "mkdir": (v_mkdir, 1),
     "exists": (v_exists, 1),
     "chmod755": (v_chmod755, None),

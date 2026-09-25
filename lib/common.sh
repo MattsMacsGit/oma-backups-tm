@@ -627,6 +627,19 @@ RSYNC_PROGRESS=(--no-inc-recursive --info=progress2,name2,flist2 --out-format='%
 # shellcheck disable=SC2034 # used by the scripts that source this
 RSYNC_PROGRESS_TEXT="--no-inc-recursive --info=progress2,name2,flist2 --out-format='%i %l' --stats"
 
+# Which system this is, as far as the backup disk is concerned: the ID of
+# the filesystem it runs from. Not the machine ID -- a restore copies that
+# across, so a restored drive and the original would look like one system.
+# A restore always makes a new filesystem, so it always gets a new ID.
+system_id() {
+  findmnt -n -o UUID / 2>/dev/null | head -1
+}
+
+# Where a restore records which restore point it came from, inside the
+# system it made (restore-to-disk.sh writes it, backup.sh reads it).
+# shellcheck disable=SC2034 # used by the scripts that source this
+OMA_RESTORED_FROM=/etc/omarchy-backups/restored-from.json
+
 now_timestamp() {
   date -u +%Y%m%dT%H%M%SZ
 }

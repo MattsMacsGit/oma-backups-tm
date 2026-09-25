@@ -312,6 +312,27 @@ before anything happens. From a terminal that's
 still on is kept (with the leave-out list you'd made), so they can still be
 fetched from its row later, and thinning never takes it.
 
+### Two systems, one backup disk
+
+The backup disk keeps one working copy of your system and files, and every
+restore point is a snapshot of it. When a second system backs up to the same
+disk — a restored spare drive, say — the disk notes which system each working
+copy belongs to. The next time either one backs up, it first sets the working
+copy back to its own newest restore point (or, on a freshly restored system,
+the one it was restored from). That's a snapshot, so it takes no extra space,
+and only what really changed is copied. Without it, going back to the original
+computer after a forced backup from a restored drive re-sent every file the
+restored drive didn't have, and stored all of it a second time.
+
+Each system's newest restore point is kept by thinning, so there is always one
+to start from. A Pi needs gatekeeper 11 for this; an older one keeps working
+the old way and says so.
+
+A backup disk used like this before the note existed can be put right by hand:
+`sudo oma-backups rebuild-current TIMESTAMP` sets the working copy back to that
+restore point (pick this computer's newest) and drops a stopped backup that was
+copying into the old one. Restore points themselves are never touched.
+
 ### Sync apps
 
 Pause or quit Nextcloud, Dropbox, Syncthing and friends before restoring, and
@@ -410,6 +431,7 @@ oma-backups backup --yes
 oma-backups backup --force-after-restore   # back up a part-restored system anyway
 oma-backups stop
 oma-backups prune [--dry-run]
+oma-backups rebuild-current TIMESTAMP   # working copy back to this computer's restore point
 oma-backups schedule enable | disable | status
 oma-backups snapshots
 oma-backups open TIMESTAMP    # open one restore point read-only in Files
@@ -432,6 +454,10 @@ oma-backups restore-to-disk /dev/TARGET --snapshot TS --level settings
 | `OMABOOT` | 1G | FAT32 | Limine + Omarchy ISO kernel |
 | `OmaRescue` | 16G | ext4 | Real Omarchy ISO (`arch/`) + restore scripts |
 | LUKS → `OmaBackups` | rest | btrfs zstd | `os/`, `home/`, `esp/`, `meta/` |
+
+`meta/` holds `machine.json` (the restore point list), one `TIMESTAMP.json` per
+restore point (each part's size and file count, and which system made it) and
+`current.json` (which system each working copy belongs to).
 
 The network rescue stick is `OMANETBOOT` / `OmaNetRescue` / LUKS →
 `OmaNetKeys`.

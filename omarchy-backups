@@ -27,6 +27,9 @@ Every day
   put-back-system         after a quick restore, put back the AI models it left
                           on the backup (the plugin's Restore my files runs it)
   prune [--dry-run]       thin out old restore points now
+  rebuild-current TIMESTAMP
+                          make the backup disk's working copy this computer's again,
+                          from that restore point (after another computer backed up there)
   schedule enable | disable | status | run
                           automatic backups
 
@@ -158,6 +161,7 @@ case "$cmd" in
   put-back-system) exec "$OMARCHY_TM_ROOT/backup.sh" --put-back-system "$@" ;;
   restore-files) exec "$OMARCHY_TM_ROOT/backup.sh" --restore-files "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
+  rebuild-current) exec "$OMARCHY_TM_ROOT/backup.sh" --rebuild-current "$@" ;;
   schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)
     exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "$@"

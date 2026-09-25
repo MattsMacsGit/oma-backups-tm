@@ -37,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --force-after-restore) FORCE_AFTER_RESTORE=1; shift ;;
     --list) MODE=list; shift ;;
     --prune) MODE=prune; shift ;;
+    --rebuild-current) MODE=rebuild_current; shift; break ;;
     --browse) MODE=browse; shift; break ;;
     --json) LIST_JSON=1; shift ;;
     --files) MODE=files; shift; break ;;
@@ -560,12 +561,59 @@ rsync_tree() {
   tree_rc_ok "$tree" copy
 }
 
+# A small file from the backup disk's meta/ folder, into OUT. Fails if there
+# isn't one. Plain rsync on a Pi, which every gatekeeper allows.
+d_meta_get() {
+  local name=$1 out=$2
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rsync "${RSYNC_RSH[@]}" "$(d_target "meta/$name")" "$out" 2>/dev/null
+  else
+    cp "$MNT/meta/$name" "$out" 2>/dev/null
+  fi
+}
+
+# Sent into the folder under its own name, never to a file name: through the
+# gatekeeper's rrsync, rsync refuses to replace an existing file named as the
+# destination ("could not make way for new regular file").
+d_meta_put() {
+  local file=$1 name=$2
+  chmod 644 "$file"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    local dir rc=0
+    dir="$(mktemp -d)"
+    cp -p "$file" "$dir/$name"
+    rsync "${RSYNC_RSH[@]}" -p "$dir/$name" "$(d_target meta)/" 2>>"$OMARCHY_TM_LOG" || rc=$?
+    rm -rf "$dir"
+    return "$rc"
+  else
+    cp -p "$file" "$MNT/meta/$name.tmp" 2>>"$OMARCHY_TM_LOG" && mv "$MNT/meta/$name.tmp" "$MNT/meta/$name"
+  fi
+}
+
+# Every restore point's manifest, as {"TS": {...}, ...}; {} when there are
+# none (restore points from before manifests existed have none).
+d_manifests() {
+  local dir out
+  dir="$(mktemp -d)"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    rsync "${RSYNC_RSH[@]}" -r --include='/*Z.json' --exclude='*' "$(d_target meta)/" "$dir/" 2>/dev/null || true
+  else
+    cp "$MNT"/meta/*Z.json "$dir/" 2>/dev/null || true
+  fi
+  out="$(find "$dir" -maxdepth 1 -name '*Z.json' -exec cat {} + 2>/dev/null |
+    jq -cs 'map(select(type == "object" and (.timestamp | type) == "string") | {(.timestamp): .}) | add // {}' \
+      2>/dev/null || true)"
+  rm -rf "$dir"
+  [[ -n $out ]] || out='{}'
+  printf '%s\n' "$out"
+}
+
 # What each part of a restore point holds: {"os": {"bytes", "files"}, ...},
 # from rsync's closing figures for the whole tree (not just what changed this
-# time). A restore onto a new disk sizes its bars by it instead of walking
-# the backup first. Written with plain rsync on a Pi, which every gatekeeper
-# already allows, so an older Pi needs nothing new. Best effort: without it a
-# restore measures instead, so it never fails a backup.
+# time), and which system made it. A restore onto a new disk sizes its bars
+# by it instead of walking the backup first; a backup finds this system's own
+# restore points by it. Best effort: without it a restore measures instead,
+# so it never fails a backup.
 write_manifest() {
   local ts=$1 t b f json='{}' tmp
   for t in os home esp; do
@@ -574,17 +622,148 @@ write_manifest() {
     [[ $b =~ ^[0-9]+$ && $b -gt 0 && $f =~ ^[0-9]+$ ]] || continue
     json="$(jq -c --arg t "$t" --argjson b "$b" --argjson f "$f" '.[$t] = {bytes: $b, files: $f}' <<<"$json")"
   done
-  [[ $json != '{}' ]] || return 0
   tmp="$(mktemp)"
-  jq -n --arg ts "$ts" --argjson trees "$json" '{version: 1, timestamp: $ts, trees: $trees}' >"$tmp"
-  chmod 644 "$tmp"
+  jq -n --arg ts "$ts" --argjson trees "$json" --arg s "${SYSTEM_ID:-}" --arg h "$HOSTNAME" \
+    '{version: 1, timestamp: $ts, trees: $trees} + (if $s != "" then {system: $s, host: $h} else {} end)' >"$tmp"
+  d_meta_put "$tmp" "$ts.json" ||
+    log_file "couldn't save the manifest for $ts (a restore will measure instead)"
+  rm -f "$tmp"
+}
+
+# ---- Whose working copy -----------------------------------------------------
+# The backup disk keeps one working copy of each part (os/current,
+# home/current, esp/current), and every restore point is a snapshot of it.
+# Nothing used to say which system had last written it. So two systems
+# backing up to one disk -- a restored drive booted and backed up, then the
+# original again -- dragged it back and forth: the second found everything
+# the first didn't have "missing" and sent it all again, and it was stored
+# twice, because the disk can't tell those files match the ones its older
+# restore points already hold.
+#
+# meta/current.json now says which system each working copy belongs to. It
+# is written before anything is copied, so a run that never finishes still
+# counts. When another system's is found, it is rebuilt first from this
+# system's own newest restore point (or the one this system was restored
+# from): a snapshot, which shares all its data with that point. Then only
+# real changes are sent.
+SYSTEM_ID=""
+
+# The restore point to rebuild KIND's working copy from: this system's own
+# newest, or else the one it was restored from. Nothing if neither is on
+# this disk.
+base_point_for() {
+  local kind=$1 manifests=$2 ts from
+  while read -r ts; do
+    [[ -n $ts ]] && d_exists "$kind/$ts" && { echo "$ts"; return 0; }
+  done < <(jq -r --arg s "$SYSTEM_ID" \
+    'to_entries | map(select(.value.system == $s) | .key) | sort | reverse | .[]' <<<"$manifests")
+  if [[ -r $OMA_RESTORED_FROM && $(jq -r '.system // ""' "$OMA_RESTORED_FROM" 2>/dev/null) == "$SYSTEM_ID" ]]; then
+    from="$(jq -r '.snapshot // ""' "$OMA_RESTORED_FROM" 2>/dev/null)"
+    [[ $from =~ ^[0-9]{8}T[0-9]{6}Z$ ]] && d_exists "$kind/$from" && echo "$from"
+  fi
+  return 0
+}
+
+# Replace KIND's working copy with a writable snapshot of restore point TS.
+# Built beside the old one and swapped in, so it is never left with none.
+d_reseed() {
+  local kind=$1 ts=$2
   if [[ $DEST_REMOTE == 1 ]]; then
-    rsync "${RSYNC_RSH[@]}" -p "$tmp" "$(d_target "meta/$ts.json")" 2>>"$OMARCHY_TM_LOG" ||
-      log_file "couldn't save the manifest for $ts on $REMOTE_HOST (a restore will measure instead)"
-    rm -f "$tmp"
-  else
-    mv "$tmp" "$MNT/meta/$ts.json" 2>>"$OMARCHY_TM_LOG" ||
-      { rm -f "$tmp"; log_file "couldn't save the manifest for $ts (a restore will measure instead)"; }
+    rgate reseed "$kind" "$ts" 2>>"$OMARCHY_TM_LOG"
+    return
+  fi
+  local new="$MNT/$kind/current.new"
+  btrfs subvolume show "$MNT/$kind/$ts" >/dev/null 2>&1 || return 1
+  if [[ -e $new ]]; then
+    btrfs subvolume delete "$new" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+  fi
+  btrfs subvolume snapshot "$MNT/$kind/$ts" "$new" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+  if [[ -e $MNT/$kind/current ]]; then
+    btrfs subvolume delete "$MNT/$kind/current" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+  fi
+  mv "$new" "$MNT/$kind/current"
+}
+
+# Whose working copies these are, from the disk: {"home": {"system": ...}}.
+d_owners() {
+  local tmp out='{}'
+  tmp="$(mktemp)"
+  if d_meta_get current.json "$tmp" && jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+    out="$(jq -c . "$tmp")"
+  fi
+  rm -f "$tmp"
+  printf '%s\n' "$out"
+}
+
+d_owners_put() {
+  local tmp
+  tmp="$(mktemp)"
+  printf '%s\n' "$1" >"$tmp"
+  d_meta_put "$tmp" current.json
+  local rc=$?
+  rm -f "$tmp"
+  return "$rc"
+}
+
+# Mark KIND in an owners record as this system's (from restore point BASE,
+# when it was rebuilt from one).
+owners_claim() {
+  jq -c --arg k "$2" --arg s "$SYSTEM_ID" --arg h "$HOSTNAME" --arg b "${3:-}" --argjson at "$(date +%s)" \
+    '.[$k] = ({system: $s, host: $h, since: $at} + (if $b != "" then {base: $b} else {} end))' <<<"$1"
+}
+
+step_undone() {
+  [[ -f $RESUME_FILE ]] || return 0
+  jq --arg n "$1" '.done -= [$n]' "$RESUME_FILE" >"$RESUME_FILE.tmp" &&
+    chmod 644 "$RESUME_FILE.tmp" && mv "$RESUME_FILE.tmp" "$RESUME_FILE"
+}
+
+# Before anything is copied: every working copy this run will turn into a
+# restore point is made this system's. Parts a stopped run of ours had
+# already finished count too -- if another system has been at them since,
+# they have to be copied again. Sets WORKING_COPY_REBUILT=1 if any was.
+WORKING_COPY_REBUILT=0
+adopt_working_copies() {
+  SYSTEM_ID="$(system_id)"
+  [[ -n $SYSTEM_ID ]] || { log_file "couldn't tell which system this is; not checking whose working copy it is"; return 0; }
+  local owners before kind owner base manifests=""
+  owners="$(d_owners)"
+  before=$owners
+  for kind in "$@"; do
+    owner="$(jq -r --arg k "$kind" '.[$k].system // ""' <<<"$owners")"
+    [[ $owner == "$SYSTEM_ID" ]] && continue
+    base=""
+    # No owner means a disk from before this was recorded: nearly always
+    # this system's own, so it is simply claimed.
+    if [[ -n $owner ]]; then
+      [[ -n $manifests ]] || manifests="$(d_manifests)"
+      base="$(base_point_for "$kind" "$manifests")"
+      if [[ -z $base ]]; then
+        log_file "$kind/current was last written by another system ($owner), and there is no restore point of this one's to start from: copying over it"
+      elif [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 11 ]]; then
+        warn "Another system has backed up to this disk since this one last did, so this backup copies everything it doesn't have again."
+        warn "Update the Pi and it starts from this computer's own last backup instead: $(pi_update_cmd)"
+        base=""
+      else
+        step "Another computer backed up here since this one did; starting $(tree_name "$kind") from restore point $base"
+        if d_reseed "$kind" "$base"; then
+          step_undone "$kind"
+          WORKING_COPY_REBUILT=1
+          log_file "rebuilt $kind/current from $base (last written by $owner)"
+        else
+          warn "Couldn't start $(tree_name "$kind") from $base, so this backup copies over what's there instead."
+          ensure_dest_current "$kind"
+          base=""
+        fi
+      fi
+    fi
+    owners="$(owners_claim "$owners" "$kind" "$base")"
+  done
+  # Not optional: without the record, the next system to back up here can't
+  # tell this one has been at the working copy, and copies everything again.
+  if [[ $owners != "$before" ]]; then
+    d_owners_put "$owners" ||
+      fail_backup "Couldn't record on the backup disk which computer this backup is from. Nothing was copied; try again, and if it keeps happening the details are in $OMARCHY_TM_LOG."
   fi
 }
 
@@ -920,17 +1099,21 @@ prune_restore_points() {
   fi
   plan="$(d_list_json | jq -r '.[].timestamp' |
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/retention.py" plan --mode "$mode")"
-  # Two kinds of restore point thinning must never touch. The one a restore
+  # Three kinds of restore point thinning must never touch. The one a restore
   # is still mid-way through (partial-restore.json), and the ones earmarked
   # because a restore deliberately left something behind on them — those are
   # the only copy of what was left out, and the system carries on backing up
-  # around them (kept-points.json, written by the plugin).
+  # around them (kept-points.json, written by the plugin). And the newest of
+  # each system that backs up here: it is what that system's working copy is
+  # rebuilt from when another system has been using the disk in between.
   local protect_json
   protect_json="$(
     {
       jq -r '.snapshot // empty' "$OMARCHY_TM_STATE/partial-restore.json" 2>/dev/null || true
       "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --list 2>/dev/null |
         jq -r 'keys[]?' 2>/dev/null || true
+      d_manifests | jq -r 'to_entries | map(select(.value.system | type == "string"))
+        | group_by(.value.system) | map(max_by(.key).key) | .[]' 2>/dev/null || true
     } | grep -E '^[0-9]{8}T[0-9]{6}Z$' | jq -R . | jq -s 'unique'
   )"
   if [[ $(jq 'length' <<<"$protect_json") -gt 0 ]]; then
@@ -1053,6 +1236,19 @@ cmd_backup() {
     fi
     run_quiet btrfs subvolume snapshot -r "$SRC_TOP/@home" "$SRC_TOP/$SNAP_SUB/home-$ts"
     resume_start "$ts"
+  fi
+
+  # Every working copy this run turns into a restore point has to be this
+  # system's before anything is copied into it (see adopt_working_copies).
+  local -a parts=()
+  [[ $HOME_ONLY == 1 ]] || parts+=(os)
+  parts+=(home)
+  [[ $esp_subvol == 1 ]] && parts+=(esp)
+  adopt_working_copies "${parts[@]}"
+  if [[ $WORKING_COPY_REBUILT == 1 && $RESUMED == 1 ]]; then
+    # Parts the stopped run had finished are back on the list.
+    progress_steps "$ts"
+    progress phase "prepare"
   fi
 
   if [[ $HOME_ONLY != 1 ]] && ! is_done os; then
@@ -1529,6 +1725,52 @@ cmd_put_back_system() {
   gum style --bold --foreground 2 "● Your AI models are back."
 }
 
+# oma-backups rebuild-current TIMESTAMP: make the backup disk's working
+# copies this system's again, starting from restore point TIMESTAMP, and let
+# go of any stopped backup (it was copying into the old ones). For a disk
+# another system -- a restored drive, say -- backed up to before there was
+# any record of whose working copy it was: without this, the next backup
+# sends everything that system didn't have all over again, and stores it
+# twice. Restore points themselves are never touched.
+cmd_rebuild_current() {
+  local from=${1:-} kind owners
+  local -a rebuilt=()
+  [[ $from =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups rebuild-current TIMESTAMP"
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't rebuild the working copy."
+  SYSTEM_ID="$(system_id)"
+  [[ -n $SYSTEM_ID ]] || die "couldn't tell which system this is"
+  refuse_if_running
+  trap 'remote_close; clear_pid' EXIT
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  open_destination
+  if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 11 ]]; then
+    fail_backup "The Pi needs updating first. Run this on it: $(pi_update_cmd)"
+  fi
+  d_exists "home/$from" || fail_backup "There is no restore point $from on this backup disk."
+  owners="$(d_owners)"
+  for kind in os home esp; do
+    d_exists "$kind/$from" || continue
+    step "Starting $(tree_name "$kind") from $from"
+    if d_reseed "$kind" "$from"; then
+      rebuilt+=("$kind")
+      owners="$(owners_claim "$owners" "$kind" "$from")"
+      log_file "rebuilt $kind/current from $from by hand"
+    else
+      warn "Couldn't start $(tree_name "$kind") from $from (it is left as it was)."
+    fi
+  done
+  ((${#rebuilt[@]})) || fail_backup "Nothing could be rebuilt from $from. Details are in $OMARCHY_TM_LOG."
+  d_owners_put "$owners" || warn "Couldn't record on the backup disk that these are this computer's backups."
+  rm -f "$RESUME_FILE"
+  clear_incomplete
+  echo
+  gum style --bold --foreground 2 "● The backup disk's working copy is this computer's again (from $from)."
+  gum style --foreground 8 "  The next backup only sends what changed since then."
+}
+
 cmd_prune() {
   # Even a dry run has to unlock the disk to read its restore points.
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
@@ -1592,6 +1834,7 @@ case "$MODE" in
   copy) cmd_copy "$@" ;;
   backup) cmd_backup ;;
   prune) cmd_prune ;;
+  rebuild_current) cmd_rebuild_current "$@" ;;
   browse) cmd_browse "$@" ;;
   put_back_system) cmd_put_back_system ;;
   restore_files) cmd_restore_files "$@" ;;
