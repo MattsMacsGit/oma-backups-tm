@@ -170,7 +170,7 @@ Panel {
   }
 
   NumberAnimation on spin {
-    running: svc.backupRunning
+    running: svc.diskBusy
     loops: Animation.Infinite
     from: 0
     to: 360
@@ -180,7 +180,7 @@ Panel {
   Component {
     id: safeIcon
     Item {
-      readonly property color tint: svc.backupRunning ? root.urgent : root.foreground
+      readonly property color tint: svc.diskBusy ? root.urgent : root.foreground
 
       Image {
         id: safeBodyImg
@@ -197,7 +197,7 @@ Panel {
         colorizationColor: parent.tint
       }
 
-      // Only the dial wheel spins during a backup — the safe body and
+      // Only the dial wheel spins while the disk is in use — the safe body and
       // its ring/bezel stay put. Two separately-cropped image layers of
       // the same source icon, overlaid so they read as one icon at rest.
       Image {
@@ -213,7 +213,7 @@ Panel {
         source: safeDialImg
         colorization: 1.0
         colorizationColor: parent.tint
-        rotation: svc.backupRunning ? root.spin : 0
+        rotation: svc.diskBusy ? root.spin : 0
         transformOrigin: Item.Center
       }
     }
@@ -226,8 +226,8 @@ Panel {
     iconComponent: safeIcon
     slotSize: Style.bar.statusSlot
     fontSize: Style.font.caption
-    tooltipText: svc.backupRunning
-      ? ("OmaBackups — " + svc.progressText)
+    tooltipText: svc.diskBusy
+      ? ("OmaBackups — " + svc.busyText)
       : (svc.hasCapsule ? "OmaBackups" : "OmaBackups — set up a disk")
     onPressed: root.toggle()
   }

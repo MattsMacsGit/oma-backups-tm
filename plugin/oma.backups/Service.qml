@@ -24,6 +24,20 @@ Item {
   property string backupError: ""
   property bool refreshing: false
   property bool backupRunning: false
+  // Anything reading from or writing to the backup disk right now, for the
+  // bar icon: a backup, bringing files back, putting the AI models back, or
+  // opening a restore point. A restore point merely sitting open in Files is
+  // not work, so an open browse doesn't count.
+  readonly property bool diskBusy: root.backupRunning || root.restoringFiles
+    || root.systemPhase === "waiting" || root.browsePhase === "opening"
+  readonly property string busyText: root.backupRunning ? root.progressText
+    : root.restoringFiles
+    ? (root.browsePhase === "opening" ? "Opening the restore point"
+      : root.restoreCounting ? "Working out what to bring back"
+      : "Bringing your files back · " + root.restorePercent + "%")
+    : root.systemPhase === "waiting" ? "Putting your AI models back"
+    : root.browsePhase === "opening" ? "Opening the restore point"
+    : ""
   property bool launchedBackup: false
   property bool sawBackupStatus: false
   property int progressPercent: 0
