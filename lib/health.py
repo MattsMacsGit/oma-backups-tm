@@ -40,6 +40,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -58,6 +59,19 @@ PATH_RE = re.compile(r"\broot (?P<root>\d+),.*\(path: (?P<path>.*)\)\s*$")
 
 def btrfs(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["btrfs", *args], capture_output=True, text=True)
+
+
+def scrub_go(verb: str, mount: str) -> subprocess.CompletedProcess:
+    """`btrfs scrub start|resume`: it forks the scrub into the background and
+    returns. That child keeps whatever it was given as stdout and stderr open
+    until the scrub ends, so they must not be pipes: capture_output waited on
+    them for the whole scrub, and health-start never answered the laptop. A
+    file doesn't wait on anyone."""
+    with tempfile.TemporaryFile(mode="w+") as err:
+        r = subprocess.run(["btrfs", "scrub", verb, *IDLE, mount],
+                           stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err, text=True)
+        err.seek(0)
+        return subprocess.CompletedProcess(r.args, r.returncode, "", err.read())
 
 
 def scrub_status(mount: str) -> dict:
@@ -190,13 +204,13 @@ def start(mount: str, state: Path, minutes: int) -> dict:
     record.update(running=True, night_started=int(now), deadline=int(now + minutes * 60),
                   total_bytes=used_bytes(mount))
     save(state, record)
-    r = btrfs("scrub", "start" if new_pass else "resume", *IDLE, mount)
+    r = scrub_go("start" if new_pass else "resume", mount)
     if r.returncode != 0 and not new_pass:
         # Nothing to resume after all (a status file lost to a reinstall):
         # a fresh pass it is.
         record.update(pass_started=int(now), files=[], errors={}, done_bytes=0)
         save(state, record)
-        r = btrfs("scrub", "start", *IDLE, mount)
+        r = scrub_go("start", mount)
     if r.returncode != 0:
         record["running"] = False
         record["problem"] = (r.stderr or r.stdout).strip()[:300]
@@ -295,7 +309,7 @@ def carry_on(mount: str, state: Path) -> dict:
     save(state, record)
     if time.time() >= record["deadline"]:
         return settle(mount, state)
-    r = btrfs("scrub", "resume", *IDLE, mount)
+    r = scrub_go("resume", mount)
     if r.returncode != 0 and scrub_status(mount)["status"] != "running":
         return settle(mount, state)
     return load(state)
