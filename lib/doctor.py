@@ -77,10 +77,21 @@ def explain(home: Path) -> None:
 def main() -> int:
     home = user_home()
     explain(home)
-    skip = home / ".config" / "omarchy-backups" / "skip-paths.txt"
     etc_home = Path("/etc/omarchy-backups/excludes-home.txt")
     etc_os = Path("/etc/omarchy-backups/excludes-os.txt")
     user_home_ex = home / ".config" / "omarchy-backups" / "excludes-home.txt"
+    # Each backup disk has its own list: check against the one the last
+    # compile used, which it names in its header.
+    skip = home / ".config" / "omarchy-backups" / "skip-paths.txt"
+    for f in (etc_home, user_home_ex):
+        try:
+            head = f.read_text(encoding="utf-8", errors="replace").splitlines()[:3]
+        except OSError:
+            continue
+        named = [ln.split(":", 1)[1].strip() for ln in head if ln.startswith("# skip list:")]
+        if named and Path(named[0]).is_file():
+            skip = Path(named[0])
+            break
     dest = dest_home()
     paths = load_paths(skip)
     want_home, want_os = split_paths(paths, Path("/home"))

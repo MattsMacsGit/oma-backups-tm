@@ -840,13 +840,23 @@ Item {
 
   onBackupRunningChanged: if (!backupRunning) Qt.callLater(refreshSnapshots)
 
+  // Each backup disk keeps its own skip list, and the panel shows the one
+  // for the disk the next backup goes to (see lib/skip_defaults.py).
+  // skipFor is the disk the loaded list belongs to: a change of disk loads
+  // that disk's list, and edits are saved to the disk they were made for.
+  property string skipFor: ""
+  onDestinationIdChanged: if (skipLoaded && destinationId !== skipFor) loadSkipFile()
+
   function loadSkipFile() {
-    loadSkipProc.command = ["python3", root.seedSkip]
+    root.skipFor = root.destinationId
+    loadSkipProc.command = root.skipFor !== ""
+      ? ["python3", root.seedSkip, root.skipFor] : ["python3", root.seedSkip]
     loadSkipProc.running = true
   }
 
   function persistSkipPaths() {
     var args = ["python3", root.writeSkip]
+    if (root.skipFor !== "") args.push("--dest", root.skipFor)
     for (var i = 0; i < skipListModel.count; i++) args.push(skipListModel.get(i).path)
     persistProc.command = args
     persistProc.running = true
@@ -890,7 +900,8 @@ Item {
       pendingBackup = true
       pendingStop = false
     }
-    compileProc.command = [root.cli, "compile-excludes"]
+    compileProc.command = root.skipFor !== ""
+      ? [root.cli, "compile-excludes", "--dest", root.skipFor] : [root.cli, "compile-excludes"]
     compileProc.running = true
   }
 
@@ -1222,6 +1233,8 @@ Item {
           if (line && line.indexOf("#") !== 0) skipListModel.append({ path: line })
         }
         root.skipLoaded = true
+        // The disk changed while this one was loading.
+        if (root.skipFor !== root.destinationId) Qt.callLater(root.loadSkipFile)
       }
     }
   }

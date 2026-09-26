@@ -1,6 +1,13 @@
 #!/usr/bin/env python3
 """Seed the recommended quick-skips into skip-paths.txt, once, then print it.
 
+  skip_defaults.py [DEST_ID]   print the skip list of one backup disk
+
+Each backup disk keeps its own skip list (skips/<disk>.txt): a folder worth
+skipping on a small USB stick may be one to keep on a big Pi disk. A disk
+without one yet goes by skip-paths.txt, the list every disk starts from, and
+gets its own the first time its list is changed.
+
 Recommended skips used to be hardcoded in share/excludes-home.txt, where the
 user could never turn them off. They now live in the skip list like any other
 entry, so the plugin's switches really control them. A marker file makes this
@@ -11,10 +18,12 @@ from __future__ import annotations
 
 import os
 import pwd
+import re
 import sys
 from pathlib import Path
 
 HEADER = "# OmaBackups skip list — one entry per line"
+UUID = re.compile(r"^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$")
 
 # rsync patterns (not absolute paths): each matches at any depth under /home.
 RECOMMENDED = [
@@ -90,11 +99,30 @@ def seed(home: Path) -> Path:
     return skip
 
 
+def disk_file(home: Path, dest: str | None) -> Path | None:
+    """Where DEST's own skip list lives, or None for a destination with no
+    disk to tell apart (then the shared list is all there is). DEST is a
+    destination id -- "local:UUID" or "remote:HOST:UUID" -- and the disk is
+    its encrypted volume's UUID, which stays the same whatever the Pi is
+    called or whichever port the USB is in."""
+    uuid = (dest or "").rsplit(":", 1)[-1]
+    if not UUID.match(uuid):
+        return None
+    return home / ".config" / "omarchy-backups" / "skips" / f"{uuid.lower()}.txt"
+
+
+def for_disk(home: Path, dest: str | None) -> Path:
+    """The skip list a backup to DEST goes by."""
+    shared = seed(home)
+    own = disk_file(home, dest)
+    return own if own is not None and own.is_file() else shared
+
+
 def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from compile_excludes import user_home
 
-    skip = seed(user_home())
+    skip = for_disk(user_home(), sys.argv[1] if len(sys.argv) > 1 else None)
     sys.stdout.write(skip.read_text(encoding="utf-8"))
     return 0
 

@@ -398,9 +398,12 @@ keeps its restore points, and you can plug it back into a laptop and use it.
 Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
 
 1. Freeze with `btrfs subvolume snapshot -r`
-2. Work out the size of the job, so the progress bars mean something
-3. `rsync -aHAX --delete --delete-excluded` onto the USB (skip list applied every time)
-4. Snapshot the destination so you can browse dated copies
+2. Check what has changed, so the progress bars mean something
+3. Any new file the backup disk already holds in an older restore point (a
+   folder you stopped skipping, one moved away and back) is put back from
+   there as a btrfs clone: nothing is sent, and it takes no extra space
+4. `rsync -aHAX --delete --delete-excluded` onto the USB (skip list applied every time)
+5. Snapshot the destination so you can browse dated copies
 
 ## UI
 
@@ -414,7 +417,10 @@ Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
   all disks, back up to a Pi, network rescue stick, use a different disk,
   erase / start over
 
-Skip list: `~/.config/omarchy-backups/skip-paths.txt`. Nothing of yours is
+Skip list: each backup disk keeps its own, in
+`~/.config/omarchy-backups/skips/<disk>.txt`, and the panel shows the one for
+the disk the next backup goes to. A disk starts from
+`~/.config/omarchy-backups/skip-paths.txt` until its list is first changed. Nothing of yours is
 skipped to begin with. Caches and Trash are switched on as recommended skips,
 and you can turn them off like any other; Downloads, Flatpak apps, virtual
 machines and containers, AI models and game libraries are switches too, off to

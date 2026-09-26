@@ -1163,6 +1163,16 @@ Panel {
               fontFamily: root.fontFamily
             }
             Text {
+              visible: !root.leaveOutMode && svc.skipFor !== ""
+              width: parent.width
+              text: "For backups to " + svc.sourceWhere(svc.skipFor)
+                + ". Each backup disk keeps its own skip list."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+            Text {
               visible: root.leaveOutMode
               width: parent.width
               text: "Tick anything you don't want brought back right now. It stays on the "

@@ -75,8 +75,12 @@ require_excludes_visible() {
   done
 }
 
+# With a destination id, that backup disk's own skip list (each disk has one;
+# see lib/skip_defaults.py); without, the list every disk starts from.
 refresh_excludes_from_user() {
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py"
+  local -a dest=()
+  [[ -n ${1:-} ]] && dest=(--dest "$1")
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "${dest[@]}" >/dev/null
   load_config_json
   EX_HOME="$(cfg '._excludes_home')"
   EX_OS="$(cfg '._excludes_os')"
@@ -1245,11 +1249,12 @@ cmd_backup() {
   if [[ -f $OMA_SCHEDULE_UNIT && ${OMARCHY_TM_UNATTENDED:-0} != 1 ]]; then
     refresh_root_copy || warn "Couldn't update the copy automatic backups run from."
   fi
-  refresh_excludes_from_user
   # A backup disk unplugged while mounted leaves a dead mount at $MNT that
   # still looks mounted; writing to it fails with I/O errors mid-backup.
   close_stale_mapper "$LUKS_MAPPER"
   pick_destination
+  # The skip list is the one this disk keeps, so it waits for the disk.
+  refresh_excludes_from_user "$(dest_id)"
   rsync_link_flags
   # Whether this carries on a stopped backup is known before anything is
   # shown, so the steps are numbered once, for the run this really is. Only

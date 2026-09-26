@@ -181,12 +181,12 @@ def write_exclude_file(path: Path, lines: list[str], header: str) -> None:
         pass
 
 
-def compile_from(skip_file: Path | None = None) -> tuple[list[str], list[str], Path]:
+def compile_from(skip_file: Path | None = None, dest: str | None = None) -> tuple[list[str], list[str], Path]:
     home = user_home()
     if skip_file is None:
-        from skip_defaults import seed
+        from skip_defaults import for_disk
 
-        skip_file = seed(home)
+        skip_file = for_disk(home, dest)
     root = repo_root()
     defaults_home = load_paths(root / "share" / "excludes-home.txt")
     defaults_os = load_paths(root / "share" / "excludes-os.txt")
@@ -195,8 +195,9 @@ def compile_from(skip_file: Path | None = None) -> tuple[list[str], list[str], P
     home_ex = uniq(defaults_home + user_home_ex)
     os_ex = uniq(defaults_os + user_os_ex)
 
-    header_h = "# compiled from share/excludes-home.txt + skip-paths (relative to /home)\n"
-    header_o = "# compiled from share/excludes-os.txt + skip-paths (relative to /)\n"
+    # "skip list:" names the list these came from: lib/doctor.py reads it.
+    header_h = f"# compiled from share/excludes-home.txt + skip-paths (relative to /home)\n# skip list: {skip_file}\n"
+    header_o = f"# compiled from share/excludes-os.txt + skip-paths (relative to /)\n# skip list: {skip_file}\n"
     user_dir = home / ".config" / "omarchy-backups"
     write_exclude_file(user_dir / "excludes-home.txt", home_ex, header_h)
     write_exclude_file(user_dir / "excludes-os.txt", os_ex, header_o)
@@ -213,14 +214,18 @@ def compile_from(skip_file: Path | None = None) -> tuple[list[str], list[str], P
 
 
 def main() -> int:
-    skip = Path(sys.argv[1]) if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    dest = None
+    if args[:1] == ["--dest"]:
+        dest, args = (args[1] if len(args) > 1 else ""), args[2:]
+    skip = Path(args[0]) if args else None
     if os.geteuid() == 0 and not os.environ.get("SUDO_USER") and skip is None:
         print(
             "compile-excludes: running as root with no SUDO_USER — "
             "will still merge share defaults and /root skip list if any",
             file=sys.stderr,
         )
-    home_ex, os_ex, skip_file = compile_from(skip)
+    home_ex, os_ex, skip_file = compile_from(skip, dest)
     print(f"skip-paths: {skip_file}")
     print(f"home: {len(home_ex)}  os: {len(os_ex)}")
     for x in home_ex:
