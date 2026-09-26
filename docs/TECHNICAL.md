@@ -157,9 +157,10 @@ and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
 address is used, the Pi's key is still checked under the name you paired it as.
 
 After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing).
-This version wants gatekeeper 12; with an older one, backups still work, but
-the Pi's disk isn't health-checked and files it already has can be sent again,
-and the panel says so.
+This version wants gatekeeper 13; with an older one, backups still work, and
+the panel says so. Before 12 the Pi's disk isn't health-checked and files it
+already has can be sent again; with 12, a health check doesn't pause for a
+backup, so the two slow each other down.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
@@ -420,6 +421,19 @@ checked while it's plugged in and the laptop is on. `oma-backups health`
 shows the latest record, and `sudo oma-backups health run` checks tonight's
 slice now. Time, length and on/off are in Settings.
 
+A laptop that is shut at night never starts the nightly check. **Check now**
+(Settings, behind the health check's gear) starts tonight's slice straight
+away and counts as tonight's check. With a Pi you can close the laptop once it
+has started; with a USB disk, keep the laptop awake and the disk plugged in.
+
+A backup comes first. One that starts while the disk is being checked pauses
+the check (btrfs keeps its place), and the check carries on afterwards with the
+time it had left: on a Pi as soon as the backup lets go of the disk, or once
+its mark goes stale if the laptop vanished mid-backup. A check due while a
+backup is running waits for it to finish. (The scrub's idle I/O priority alone
+isn't enough: only the bfq scheduler honours it, and USB disks usually run
+mq-deadline.)
+
 ## UI
 
 - **Home:** last copy, disk free space, Backup now / Stop, next automatic
@@ -429,7 +443,7 @@ slice now. Time, length and on/off are in Settings.
   files are back. A restore point still holding things a restore left out is
   marked, with **Browse** and **Restore** buttons on its row.
 - **Settings:** automatic backups (how often sits behind a gear), Smart
-  thinning, nightly disk health check (time and length behind a gear), quick
+  thinning, nightly disk health check (time, length and Check now behind a gear), quick
   skips, skip list, back up to a Pi, network rescue stick, use a different
   disk, erase / start over
 

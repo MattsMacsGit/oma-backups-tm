@@ -239,6 +239,10 @@ REMOTE_HOLD_PID=""
 # an explicit one followed by the EXIT trap -- would look like "no mark" and
 # fall through to the blunt lock that takes the disk off everybody.
 REMOTE_HOLD_ISSUED=0
+# What the gatekeeper said before unlocking: its version, and whether a health
+# check is under way there (see pause_health_check).
+REMOTE_GATE_VERSION=0
+REMOTE_CHECKING=false
 
 pick_destination() {
   # "No backup disk plugged in here" also covers "a backup disk is plugged in,
@@ -300,6 +304,9 @@ remote_open() {
   st="$(rgate status 2>>"$OMARCHY_TM_LOG")" ||
     fail_backup "Can't reach $REMOTE_HOST. Is it switched on, and on the same network (or Tailscale) as this laptop?"
   note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
+  REMOTE_GATE_VERSION="$(jq -r '.version // 0' <<<"$st")"
+  [[ $REMOTE_GATE_VERSION =~ ^[0-9]+$ ]] || REMOTE_GATE_VERSION=0
+  REMOTE_CHECKING="$(jq -r '.checking // false' <<<"$st")"
   [[ $(jq -r .present <<<"$st") == true ]] ||
     fail_backup "The backup disk isn't plugged into $REMOTE_HOST (or its USB hub has no power)."
   # A gatekeeper before v8 can refuse an unlock that arrives while the lock
@@ -863,6 +870,9 @@ on_backup_exit() {
   # the plugin to guess whether the backup is still running.
   [[ $STOPPED == 1 && $DEST_REMOTE == 1 ]] && progress phase stopping
   remote_close
+  # Letting go of the disk is what sets a paused health check going again:
+  # fetch its record so the panel doesn't go on saying paused.
+  [[ $DEST_REMOTE == 1 && $REMOTE_CHECKING == true ]] && { health_fetch || true; }
   clear_pid
   if [[ $rc -ne 0 ]]; then
     # Keep fail_backup's message for the plugin; otherwise it was stopped.
@@ -905,6 +915,32 @@ fail_backup() {
   # 1, not 130: by convention 130 means "the user pressed Ctrl-C", which is a
   # different thing from "this failed". 143 (asked to stop) stays as it is.
   exit 1
+}
+
+# A health check under way stands aside while a backup writes: the two fighting
+# over the disk slows both, and the check's low priority only counts on disks
+# using the bfq scheduler, which USB disks mostly don't. It carries on where it
+# stopped once the backup is done with the disk -- on a Pi when this run lets
+# go of it (or its mark goes stale), here once this run has gone -- with the
+# time it had left. A Pi before gatekeeper 13 can't: both run at once, as before.
+pause_health_check() {
+  if [[ $DEST_REMOTE == 1 ]]; then
+    [[ $REMOTE_CHECKING == true && -n $REMOTE_HOLD ]] || return 0
+    ((REMOTE_GATE_VERSION >= 13)) || return 0
+    step "Pausing the disk health check until this backup is done"
+    rgate health-pause "$REMOTE_HOLD" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+      log_file "couldn't pause the Pi's health check; both carry on at once"
+    # So the panel says paused, not checking.
+    health_fetch || true
+    return 0
+  fi
+  systemctl is-active --quiet oma-backups-health.service 2>/dev/null || return 0
+  local state
+  state="$(health_state)" || return 0
+  jq -e '.running == true' "$state" >/dev/null 2>&1 || return 0
+  step "Pausing the disk health check until this backup is done"
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" pause "$MNT" "$state" "pid:$$" \
+    >/dev/null 2>>"$OMARCHY_TM_LOG" || log_file "couldn't pause the health check; both carry on at once"
 }
 
 backup_running() {
@@ -1271,6 +1307,7 @@ cmd_backup() {
   mark_incomplete
   trap 'fail_backup "unexpected failure"' ERR
   progress phase "prepare"
+  pause_health_check
 
   if [[ -n $resume_ts ]]; then
     ts=$resume_ts
@@ -1893,6 +1930,16 @@ cmd_health() {
     run)
       minutes="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get health_minutes)"
       [[ $minutes =~ ^[0-9]+$ ]] || minutes=120
+      # Started by hand (Check now) or by the nightly tick, it counts as
+      # tonight's: the tick leaves it 20 hours before starting another.
+      mkdir -p "$OMARCHY_TM_STATE"
+      date +%s >"$OMARCHY_TM_STATE/health-started"
+      # A backup comes first: the check starts once it's done, rather than
+      # slowing it down.
+      if backup_running; then
+        log_file "health check waiting for the backup to finish"
+        while backup_running; do sleep 20; done
+      fi
       trap 'remote_close' EXIT
       open_destination
       log_file "health check: up to $minutes minutes of $(dest_id)"

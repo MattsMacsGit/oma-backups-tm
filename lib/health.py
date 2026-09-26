@@ -15,6 +15,9 @@ full pass is every block checked once.
                                         (SIGTERM) -- and settle
   health.py settle MOUNT STATE [--stop] fold what the scrub found into STATE
                                         (--stop: pause a running one first)
+  health.py pause MOUNT STATE BY        stand aside for a backup (BY: pid:N,
+                                        or the Pi's mark for it)
+  health.py carry-on MOUNT STATE        pick up again after one
   health.py show STATE                  STATE as JSON, with its verdict
 
 STATE is the JSON record of the disk's checks. The Pi's gatekeeper imports
@@ -40,7 +43,9 @@ import sys
 import time
 from pathlib import Path
 
-# btrfs scrub -c 3: the idle I/O class, so a backup or a film always comes first.
+# btrfs scrub -c 3: the idle I/O class. Only the bfq scheduler honours it, and
+# USB disks are mostly on mq-deadline, so a backup doesn't get the disk first
+# by itself: it pauses the check instead (pause / carry_on).
 IDLE = ["-c", "3"]
 ERRORS = ("csum_errors", "read_errors", "verify_errors", "super_errors",
           "uncorrectable_errors", "corrected_errors")
@@ -173,6 +178,10 @@ def start(mount: str, state: Path, minutes: int) -> dict:
     status = scrub_status(mount)
     if status["status"] == "running":
         return record
+    # A pause nobody came back from (a backup that died, a restart): starting
+    # again is what carrying on would have done.
+    record.pop("paused", None)
+    record.pop("paused_by", None)
     new_pass = status["status"] in ("none", "finished") or not record.get("pass_started")
     if new_pass:
         if record.get("full_pass_at"):
@@ -209,7 +218,12 @@ def settle(mount: str, state: Path, stop: bool = False) -> dict:
                 break
             time.sleep(1)
     now = int(time.time())
-    running = status["status"] == "running"
+    # Paused for a backup is still under way, not over for the night. A stop
+    # ends it either way.
+    if stop:
+        record.pop("paused", None)
+        record.pop("paused_by", None)
+    running = status["status"] == "running" or bool(record.get("paused"))
     done = int(status.get("data_bytes_scrubbed", 0)) + int(status.get("tree_bytes_scrubbed", 0))
     record["errors"] = {k: int(status.get(k, 0)) for k in ERRORS}
     record["device"] = device_stats(mount)
@@ -236,8 +250,75 @@ def settle(mount: str, state: Path, stop: bool = False) -> dict:
     return record
 
 
+def pause(mount: str, state: Path, by: str) -> dict:
+    """Stand aside while a backup writes to the disk: the two fighting over
+    it slows both. The scrub stops where it is and keeps its place, and the
+    time it is paused doesn't count against tonight's. BY is who it waits
+    for: carry_on is called once they are done."""
+    record = load(state)
+    if not record.get("running"):
+        return record
+    # Written down first: whatever is watching the scrub must not take it
+    # stopping for the end of the night.
+    record.setdefault("paused", int(time.time()))
+    record["paused_by"] = by
+    save(state, record)
+    status = scrub_status(mount)
+    if status["status"] == "running":
+        btrfs("scrub", "cancel", mount)
+        for _ in range(30):
+            status = scrub_status(mount)
+            if status["status"] != "running":
+                break
+            time.sleep(1)
+    if status["status"] == "finished":
+        # It got to the end first: nothing to come back to.
+        record = load(state)
+        record.pop("paused", None)
+        record.pop("paused_by", None)
+        save(state, record)
+        return settle(mount, state)
+    return load(state)
+
+
+def carry_on(mount: str, state: Path) -> dict:
+    """Pick a paused check up where it stopped, with the time it had left."""
+    record = load(state)
+    paused = record.pop("paused", None)
+    record.pop("paused_by", None)
+    if not paused or not record.get("running"):
+        save(state, record)
+        return record
+    now = time.time()
+    deadline = float(record.get("deadline") or now)
+    record["deadline"] = int(deadline + max(0.0, now - float(paused)))
+    save(state, record)
+    if time.time() >= record["deadline"]:
+        return settle(mount, state)
+    r = btrfs("scrub", "resume", *IDLE, mount)
+    if r.returncode != 0 and scrub_status(mount)["status"] != "running":
+        return settle(mount, state)
+    return load(state)
+
+
+def pid_alive(by: object) -> bool:
+    """For pause's BY on this computer: pid:N."""
+    m = re.fullmatch(r"pid:(\d+)", str(by or ""))
+    if not m:
+        return False
+    try:
+        os.kill(int(m.group(1)), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def run(mount: str, state: Path, minutes: int) -> dict:
-    """Tonight's slice, start to finish, for a disk plugged into this computer."""
+    """Tonight's slice, start to finish, for a disk plugged into this computer.
+    A backup pauses it (pause); this picks it up again once that backup has
+    gone."""
     def stop(*_: object) -> None:
         raise SystemExit(143)
 
@@ -245,11 +326,20 @@ def run(mount: str, state: Path, minutes: int) -> dict:
     signal.signal(signal.SIGINT, stop)
     try:
         record = start(mount, state, minutes)
-        deadline = record.get("deadline") or time.time()
-        while record.get("running") and time.time() < deadline:
-            time.sleep(10)
-            if scrub_status(mount)["status"] != "running":
+        while record.get("running"):
+            if record.get("paused"):
+                if not pid_alive(record.get("paused_by")):
+                    record = carry_on(mount, state)
+                    continue
+            elif time.time() >= float(record.get("deadline") or 0):
                 break
+            time.sleep(10)
+            record = load(state)
+            if not record.get("paused") and scrub_status(mount)["status"] != "running":
+                # A backup may have paused it between those two looks.
+                record = load(state)
+                if not record.get("paused"):
+                    break
     finally:
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         record = settle(mount, state, stop=True)
@@ -271,6 +361,10 @@ def main() -> int:
             print(json.dumps(run(a[1], Path(a[2]), int(a[3]))))
         elif a[:1] == ["settle"] and len(a) in (3, 4):
             print(json.dumps(settle(a[1], Path(a[2]), stop=a[3:] == ["--stop"])))
+        elif a[:1] == ["pause"] and len(a) == 4:
+            print(json.dumps(pause(a[1], Path(a[2]), a[3])))
+        elif a[:1] == ["carry-on"] and len(a) == 3:
+            print(json.dumps(carry_on(a[1], Path(a[2]))))
         elif a[:1] == ["show"] and len(a) == 2:
             print(json.dumps(show(Path(a[1]))))
         else:

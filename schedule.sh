@@ -125,6 +125,13 @@ health_tick() {
   fi
   mkdir -p "$OMARCHY_TM_STATE"
   echo "$now" >"$HEALTH_MARK"
+  # Linked laptops have the unit Check now starts too (link.sh); a transient
+  # one of the same name can't be made beside it.
+  if [[ -f /etc/systemd/system/oma-backups-health.service ]]; then
+    systemctl start --no-block oma-backups-health.service 2>>"$OMARCHY_TM_LOG" ||
+      log_file "couldn't start the health check"
+    return 0
+  fi
   systemd-run --unit=oma-backups-health --collect --no-block --quiet \
     --description="OmaBackups: tonight's backup disk health check" \
     --setenv=SUDO_USER="${SUDO_USER:-}" --setenv=OMARCHY_TM_UNATTENDED=1 \

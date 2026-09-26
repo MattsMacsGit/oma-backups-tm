@@ -133,7 +133,9 @@ function healthLine(h, on, nowSec) {
     return { urgent: false, text: on ? "Disk health: not checked yet. It is checked a little each night." : "" }
   var total = Number(h.total_bytes) || 0
   var pct = total > 0 ? Math.min(100, Math.floor(100 * (Number(h.done_bytes) || 0) / total)) : 0
-  var text = h.running
+  var text = h.running && h.paused
+    ? "Disk health: paused while a backup runs, then carries on (" + pct + "% of this pass)"
+    : h.running
     ? "Disk health: checking now, nothing wrong so far (" + pct + "% of this pass)"
     : (h.full_pass_at ? "Disk health: good · whole disk checked " + ago(h.full_pass_at, nowSec)
       : "Disk health: good so far · " + pct + "% of the disk checked")

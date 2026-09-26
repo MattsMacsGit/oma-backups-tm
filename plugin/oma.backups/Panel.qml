@@ -30,11 +30,14 @@ Panel {
   // Settings behind gears: the defaults suit nearly everyone.
   property bool autoMore: false
   property bool healthMore: false
+  readonly property string healthFor: {
+    var m = Number(svc.schedule.health_minutes) || 120
+    return m % 60 ? m + " minutes" : (m / 60) + (m === 60 ? " hour" : " hours")
+  }
   readonly property string healthWhen: {
     var at = Number(svc.schedule.health_at) || 0
     var when = at === 0 ? "midnight" : (at === 12 ? "noon" : (at % 12) + (at < 12 ? " am" : " pm"))
-    var m = Number(svc.schedule.health_minutes) || 120
-    return "From " + when + ", up to " + (m % 60 ? m + " minutes" : (m / 60) + (m === 60 ? " hour" : " hours")) + " a night"
+    return "From " + when + ", up to " + root.healthFor + " a night"
   }
   // A system restored without its files: backups are paused so this machine
   // can't overwrite the real backup with the gap. Holding Ctrl wakes the
@@ -1256,6 +1259,34 @@ Panel {
                   width: parent.width
                   text: "Runs while the laptop is on. A Pi carries on by itself once started. "
                     + "Longer nights check the whole disk sooner; a Pi works hard while it checks."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
+                // For a laptop that's shut at night: start tonight's check now.
+                Button {
+                  width: parent.width
+                  text: svc.healthStarting ? "Starting the check…"
+                    : svc.health.running === true
+                      ? (svc.health.paused ? "Paused for a backup" : "Checking now")
+                      : "Check now"
+                  bordered: true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  enabled: svc.hasCapsule && svc.healthUuid !== "" && !svc.healthStarting
+                    && svc.health.running !== true && !svc.backupRunning && !svc.launchedBackup
+                  onClicked: svc.startHealthCheck()
+                }
+                Text {
+                  width: parent.width
+                  text: (svc.backupRunning || svc.launchedBackup) && svc.health.running !== true
+                    ? "Waits for the backup to finish."
+                    : "Checks for up to " + root.healthFor + ", starting now, and counts as tonight's check. "
+                      + (svc.remoteActive
+                        ? "Once it has started you can close the laptop: the Pi carries on by itself. "
+                        : "Keep the laptop awake and the disk plugged in until it's done. ")
+                      + "A backup pauses it, and it carries on afterwards."
                   color: root.dim
                   font.family: root.fontFamily
                   font.pixelSize: Style.font.bodySmall

@@ -803,6 +803,7 @@ Item {
     lastSuccessFile.reload()
     piGateFile.reload()
     if (root.healthUuid !== "") healthFile.reload()
+    if (root.healthAskedAt > 0 && !healthUnitStateProc.running) healthUnitStateProc.running = true
     if (!root.restoringFiles) partialFile.reload()
     if (root.systemPhase === "waiting") putBackFile.reload()
     nowSec = Date.now() / 1000
@@ -1469,6 +1470,54 @@ Item {
   }
   property var health: ({})
   readonly property var healthLine: Model.healthLine(root.health, root.schedule.health === true, root.nowSec)
+
+  // Check now: the unit the nightly tick starts, so it waits for a backup the
+  // same way and counts as tonight's. "Starting" covers the time before the
+  // disk's record says it's under way (unlocking a Pi takes half a minute);
+  // only while it is set does refresh ask systemd how the unit is doing.
+  property real healthAskedAt: 0
+  readonly property bool healthStarting: healthAskedAt > 0 && root.health.running !== true
+
+  function startHealthCheck() {
+    root.lastError = ""
+    root.healthAskedAt = Date.now() / 1000
+    if (root.linked) healthStartProc.running = true
+    else privileged(["health", "run"])
+  }
+
+  Process {
+    id: healthStartProc
+    command: ["systemctl", "start", "--no-block", "oma-backups-health.service"]
+    onExited: function (code) {
+      if (code === 0) return
+      root.healthAskedAt = 0
+      root.lastError = "Couldn't start the disk health check. Try Settings → link this laptop again."
+    }
+  }
+
+  Process {
+    id: healthUnitStateProc
+    command: ["systemctl", "is-active", "oma-backups-health.service"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var st = String(text || "").trim()
+        if (root.healthAskedAt <= 0 || Date.now() / 1000 - root.healthAskedAt < 5) return
+        // Under way: the record takes it from here.
+        if (root.health.running === true) { root.healthAskedAt = 0; return }
+        if (st === "failed") {
+          root.healthAskedAt = 0
+          root.lastError = "The disk health check couldn't start. Details are in "
+            + root.home + "/.local/state/omarchy-backups/oma-backups.log"
+        } else if (st !== "activating" && st !== "active") {
+          // Done: on a Pi it has handed the check over, and the record
+          // fetched on the way out says how it's going.
+          root.healthAskedAt = 0
+          healthFile.reload()
+        }
+      }
+    }
+  }
 
   FileView {
     id: healthFile

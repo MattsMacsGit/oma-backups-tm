@@ -28,7 +28,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "12"
+VERSION = "13"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -246,6 +246,22 @@ def scrub_busy() -> bool:
     return True
 
 
+def health_paused() -> dict:
+    """The check's record while a backup has it paused, else nothing."""
+    if not HEALTH.exists():
+        return {}
+    record = shared("health").load(HEALTH)
+    return record if record.get("running") and record.get("paused") else {}
+
+
+def carry_on_health() -> None:
+    try:
+        shared("health").carry_on(str(MOUNT), HEALTH)
+        log("health check carrying on after the backup")
+    except OSError as e:
+        log(f"couldn't carry the health check on: {e}")
+
+
 def settle_health(stop: bool) -> None:
     try:
         shared("health").settle(str(MOUNT), HEALTH, stop=stop)
@@ -332,7 +348,7 @@ def sweep_armed() -> bool:
 
 def do_lock() -> None:
     # A health check under way is paused, not lost: the next night resumes it.
-    if scrub_busy():
+    if scrub_busy() or health_paused():
         settle_health(stop=True)
     if mounted():
         run("sync")
@@ -367,6 +383,9 @@ def v_lock(args: list[str]) -> None:
     with capsule_turn():
         if hid:
             hold_drop(hid)
+            # The backup a health check stood aside for is done with the disk.
+            if health_paused().get("paused_by") == hid and mounted():
+                carry_on_health()
             still = holders_live()
             if still:
                 log(f"let go of {hid}; {len(still)} still using the disk")
@@ -412,6 +431,13 @@ def v_sweep(args: list[str]) -> None:
             return
         if HEALTH.exists() and mounted():
             record = shared("health").load(HEALTH)
+            if record.get("running") and record.get("paused"):
+                # Waiting on a backup: carry on once it has gone, even if it
+                # died without saying so and its mark has gone stale.
+                if record.get("paused_by") not in holders_live():
+                    carry_on_health()
+                IO_STAMP.unlink(missing_ok=True)
+                return
             if record.get("running"):
                 if not scrub_busy():
                     settle_health(stop=False)
@@ -516,6 +542,24 @@ def v_health_start(args: list[str]) -> None:
     health.start(str(MOUNT), HEALTH, minutes)
     log(f"health check started for up to {minutes} minutes")
     print(json.dumps(health.show(HEALTH)))
+
+
+def v_health_pause(args: list[str]) -> None:
+    """health-pause HOLD -- a backup is about to write: a check under way
+    stands aside until that mark lets go of the disk (or goes stale), then
+    carries on where it stopped, with the time it had left."""
+    require_mounted()
+    (hid,) = args
+    if not HOLD_ID.match(hid):
+        raise Refused("that is not a hold id")
+    with capsule_turn():
+        if hid not in holders_live():
+            raise Refused("that hold has gone -- unlock again to take a new one")
+    health = shared("health")
+    if not (HEALTH.exists() and health.load(HEALTH).get("running")):
+        return
+    health.pause(str(MOUNT), HEALTH, hid)
+    log(f"health check paused while {hid} backs up")
 
 
 def v_health(args: list[str]) -> None:
@@ -773,6 +817,7 @@ VERBS = {
     "reseed": (v_reseed, 2),
     "reuse": (v_reuse, None),
     "health-start": (v_health_start, 1),
+    "health-pause": (v_health_pause, 1),
     "health": (v_health, 0),
     "mkdir": (v_mkdir, 1),
     "exists": (v_exists, 1),

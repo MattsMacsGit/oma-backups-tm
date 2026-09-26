@@ -119,6 +119,26 @@ IOSchedulingPriority=7
 SuccessExitStatus=143
 TimeoutStopSec=180
 EOF
+  # The disk health check: started by the nightly tick, or by Check now in the
+  # panel. On a Pi it only hands the check over and exits; on a USB disk it
+  # runs the check here, for up to the time set in Settings.
+  cat >"$UNIT_DIR/oma-backups-health.service" <<EOF
+[Unit]
+Description=OmaBackups: backup disk health check
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=SUDO_USER=$user
+Environment=OMARCHY_TM_UNATTENDED=1
+ExecStart=$base health run
+Nice=10
+IOSchedulingClass=idle
+# Stopped part way, it pauses the check (exit 143) for next time.
+SuccessExitStatus=143
+TimeoutStopSec=90
+EOF
   cat >"$UNIT_DIR/oma-backups-scheduled.timer" <<'EOF'
 [Unit]
 Description=OmaBackups automatic backup check
@@ -153,7 +173,8 @@ write_polkit_rule() {
   local user=$1
   install -d -m 750 -g polkitd "$(dirname "$POLKIT_RULE")" 2>/dev/null || true
   cat >"$POLKIT_RULE.tmp" <<EOF
-// OmaBackups: let $user run everyday backup actions without a password, only
+// OmaBackups: let $user run everyday backup actions (backing up, opening
+// restore points, bringing files back, checking the disk) without a password, only
 // from an active local session. Setting up or erasing disks, restoring and
 // pairing still ask. Written by \`oma-backups link\`; removed by uninstall.sh.
 polkit.addRule(function (action, subject) {
@@ -163,6 +184,7 @@ polkit.addRule(function (action, subject) {
   if (verb !== "start" && verb !== "stop") return;
   var unit = action.lookup("unit");
   if (unit === "oma-backups-backup.service" || unit === "oma-backups-scheduled.service" ||
+      unit === "oma-backups-health.service" ||
       /^oma-backups-(browse|restore)@[0-9]{8}T[0-9]{6}Z\.service$/.test(unit))
     return polkit.Result.YES;
 });
