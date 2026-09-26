@@ -699,7 +699,7 @@ capsule_luks_partition() {
 
 # A backup disk is plugged in, but not the one that was set up. Which disk
 # your backups go to is not something to guess at, so the paths that would
-# write to it say so and stop instead (README: "two backup USBs plugged in
+# write to it say so and stop instead (docs/TECHNICAL.md: "two backup USBs plugged in
 # at once never get mixed up").
 capsule_is_not_the_recorded_one() {
   local want part uuid

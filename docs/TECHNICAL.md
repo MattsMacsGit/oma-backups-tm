@@ -1,12 +1,8 @@
-# OmaBackups
+# OmaBackups — technical guide
 
-**v1.6.0** — Time Machine-style **encrypted backups** for
-[Omarchy](https://omarchy.org/).
-
-A USB disk keeps dated copies of your system and your home folder. Click a
-date to open that day's files read-only. Boot the same USB, or a small network
-stick, to put the whole machine back. The everyday UI is an Omarchy bar plugin,
-and there is a CLI for everything it does.
+**v1.6.0.** The full detail: how each part works, what it changes on your
+computer and on a Pi, and the command line. For what OmaBackups is and how to
+get started, see the [README](../README.md).
 
 This is **off-box** backup: the copies live on a disk you can unplug, or on a
 Raspberry Pi across the room. Snapper + Limine snapshots stay for "undo a bad
@@ -15,25 +11,6 @@ update".
 > Setting up a disk and restoring onto one both **erase that disk**. Until you
 > have booted a restored disk yourself, on hardware you can afford to lose,
 > keep another copy of anything you cannot lose.
-
-## What you get
-
-1. **Bar plugin** — disk icon. Backup now, stop, dated restore points, settings.
-2. **Encrypted backup USB** — plug in, set it up from the plugin (wipe is explicit).
-3. **Automatic backups** — hourly, daily or weekly, with old restore points
-   thinned out Time Machine-style.
-4. **File history** — click a date to open your home folder as it was, read-only,
-   in Files. Copy files out.
-5. **No password prompts** for everyday use once the laptop is linked to its disk.
-6. **Bare-metal restore** — firmware-boot the USB (Limine: "Rescue Disk").
-   Real Omarchy live environment + a restore wizard. Pick what to bring back
-   (everything, or just the system and your settings), pick a date, pick a
-   disk, type the name and YES.
-7. **Restore over the network** — a separate bootable stick restores this
-   laptop from the Pi without the backup disk: on your own network, or from
-   anywhere over Tailscale.
-8. **Optional Raspberry Pi** — keep the USB in an always-on Pi and back up over
-   the network.
 
 ## Install (Omarchy)
 
@@ -161,8 +138,9 @@ The disk stays locked between backups; the laptop sends the unlock key each
 time. Unlocking takes the Pi about 20 seconds, so once the last backup,
 restore or open restore point is finished with it, the disk stays open for
 10 quiet minutes before locking itself, and back-to-back jobs don't each pay
-for it (gatekeeper 10 and newer). The laptop's SSH key can only reach a small gatekeeper (`pi/oma-gate`)
-that unlocks this one disk and writes backups to it, nothing else on the Pi.
+for it (gatekeeper 10 and newer). The laptop's SSH key can only reach a small
+gatekeeper (`pi/oma-gate`) that unlocks this one disk and writes backups to it,
+nothing else on the Pi.
 The home page shows the disk's free space as of the last backup.
 
 Restore points on the Pi open in Files the same way, over `sshfs` (slower, and
@@ -178,7 +156,10 @@ and leaves the Pi's CPU for the copy. The Pi's addresses are noted at pairing
 and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
 address is used, the Pi's key is still checked under the name you paired it as.
 
-After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing):
+After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing).
+This version wants gatekeeper 12; with an older one, backups still work, but
+the Pi's disk isn't health-checked and files it already has can be sent again,
+and the panel says so.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
@@ -252,6 +233,24 @@ Then pick a disk, and type the disk name and YES. Restoring **wipes** the disk
 you restore onto. When it's done, the wizard offers to restart into the
 restored system or open a command line. Leave the USB in until the restart
 begins (the wizard is running from it), then take it out.
+
+### Onto a different computer
+
+The disk you restore onto doesn't have to go back in the same computer. The
+restore gives the new disk its own IDs and points the boot files at them, and
+puts a standard UEFI boot file on it as well as a Limine boot entry, so any
+UEFI PC that Omarchy runs on can boot it. That has been checked by restoring a
+laptop onto a completely different machine from the network rescue stick.
+
+What comes along is your system exactly as it was, including settings tied to
+the old hardware: monitor layout and scaling, for example. Adjust those on the
+new machine. The restored system still backs up to the same disk or Pi; see
+[Two systems, one backup disk](#two-systems-one-backup-disk).
+
+If a restored disk shows the Omarchy splash and then no password prompt, see
+[BOOT-FIX.md](BOOT-FIX.md).
+
+### From a running desktop
 
 Restore from a running desktop is expert-only (`--allow-internal`). The
 intended path is **booting**.
@@ -429,9 +428,10 @@ slice now. Time, length and on/off are in Settings.
   also shows **Restore my files**, and Backup now is greyed out until your
   files are back. A restore point still holding things a restore left out is
   marked, with **Browse** and **Restore** buttons on its row.
-- **Settings:** automatic backups, Smart thinning, quick skips, skip list, show
-  all disks, back up to a Pi, network rescue stick, use a different disk,
-  erase / start over
+- **Settings:** automatic backups (how often sits behind a gear), Smart
+  thinning, nightly disk health check (time and length behind a gear), quick
+  skips, skip list, back up to a Pi, network rescue stick, use a different
+  disk, erase / start over
 
 Skip list: each backup disk keeps its own, in
 `~/.config/omarchy-backups/skips/<disk>.txt`, and the panel shows the one for
@@ -450,6 +450,7 @@ After install, `oma-backups` is on `PATH` (`~/.local/bin`).
 oma-backups detect
 oma-backups disks            # every disk, and what is on it
 oma-backups backup --yes
+oma-backups status           # what it is doing, as JSON
 oma-backups backup --force-after-restore   # back up a part-restored system anyway
 oma-backups stop
 oma-backups prune [--dry-run]
@@ -457,6 +458,9 @@ oma-backups rebuild-current TIMESTAMP   # working copy back to this computer's r
 oma-backups schedule enable | disable | status
 oma-backups snapshots
 oma-backups open TIMESTAMP    # open one restore point read-only in Files
+oma-backups files TIMESTAMP [PATH]          # list what is inside a restore point
+oma-backups copy TIMESTAMP SRC DEST         # copy one thing out of it
+oma-backups health [status | run]           # the nightly disk check
 oma-backups remote pair HOST | status | forget
 oma-backups rescue-stick /dev/sdX
 oma-backups refresh-rescue --scripts-only   # after an update, with a rescue USB plugged in
@@ -523,4 +527,4 @@ not enough — use `omarchy-restart-shell`.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](../LICENSE).
