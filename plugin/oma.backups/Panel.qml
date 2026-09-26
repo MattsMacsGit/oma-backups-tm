@@ -27,6 +27,14 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
+  // The health check's own settings, behind its gear (Settings page).
+  property bool healthMore: false
+  readonly property string healthWhen: {
+    var at = Number(svc.schedule.health_at) || 0
+    var when = at === 0 ? "midnight" : (at === 12 ? "noon" : (at % 12) + (at < 12 ? " am" : " pm"))
+    var m = Number(svc.schedule.health_minutes) || 120
+    return "From " + when + ", up to " + (m % 60 ? m + " minutes" : (m / 60) + (m === 60 ? " hour" : " hours")) + " a night"
+  }
   // A system restored without its files: backups are paused so this machine
   // can't overwrite the real backup with the gap. Holding Ctrl wakes the
   // Backup now button for a one-off forced backup; automatic backups stay
@@ -1153,43 +1161,87 @@ Panel {
                 fontFamily: root.fontFamily
                 onChanged: function (v) { svc.setSchedule("every", v) }
               }
-              Toggle {
+              // The switch, and a gear for the rest: the defaults suit nearly
+              // everyone, so the settings stay out of the way until asked for.
+              Row {
                 width: parent.width
-                label: "Nightly disk health check"
-                description: svc.schedule.health
-                  ? "Recommended. Each night reads back part of the backup disk and checks it against what was written, "
-                    + "carrying on the next night, so damage is found before you need a restore. "
-                    + "Runs while the laptop is on (the Pi carries on by itself once started)."
-                  : "Off. A damaged backup disk would only be found when you try to restore from it."
-                checked: svc.schedule.health === true
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: svc.setSchedule("health", svc.schedule.health ? "false" : "true")
+                spacing: Style.space(8)
+                Toggle {
+                  id: healthToggle
+                  width: parent.width - (healthGear.visible ? healthGear.width + parent.spacing : 0)
+                  label: "Nightly disk health check"
+                  description: svc.schedule.health
+                    ? "Checks part of the backup disk each night, so damage is found before you need a restore. "
+                      + root.healthWhen + "."
+                    : "Off. A damaged backup disk would only be found when you try to restore from it."
+                  checked: svc.schedule.health === true
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: svc.setSchedule("health", svc.schedule.health ? "false" : "true")
+                }
+                Button {
+                  id: healthGear
+                  visible: svc.schedule.health === true
+                  anchors.verticalCenter: healthToggle.verticalCenter
+                  text: "\uf013"
+                  bordered: true
+                  selected: root.healthMore
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  tooltipText: "When, and for how long"
+                  onClicked: root.healthMore = !root.healthMore
+                }
               }
-              ButtonGroup {
-                visible: svc.schedule.health === true
-                options: [
-                  { value: "22", label: "10 pm" },
-                  { value: "0", label: "Midnight" },
-                  { value: "2", label: "2 am" },
-                  { value: "4", label: "4 am" }
-                ]
-                value: String(svc.schedule.health_at)
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onChanged: function (v) { svc.setSchedule("health_at", v) }
-              }
-              ButtonGroup {
-                visible: svc.schedule.health === true
-                options: [
-                  { value: "60", label: "1 hour a night" },
-                  { value: "120", label: "2 hours" },
-                  { value: "240", label: "4 hours" }
-                ]
-                value: String(svc.schedule.health_minutes)
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onChanged: function (v) { svc.setSchedule("health_minutes", v) }
+              Column {
+                visible: svc.schedule.health === true && root.healthMore
+                width: parent.width
+                spacing: Style.space(8)
+                Text {
+                  width: parent.width
+                  text: "Start at"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                ButtonGroup {
+                  options: [
+                    { value: "22", label: "10 pm" },
+                    { value: "0", label: "Midnight" },
+                    { value: "2", label: "2 am" },
+                    { value: "4", label: "4 am" }
+                  ]
+                  value: String(svc.schedule.health_at)
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onChanged: function (v) { svc.setSchedule("health_at", v) }
+                }
+                Text {
+                  width: parent.width
+                  text: "Check for up to, each night"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                }
+                ButtonGroup {
+                  options: [
+                    { value: "60", label: "1 hour" },
+                    { value: "120", label: "2 hours" },
+                    { value: "240", label: "4 hours" }
+                  ]
+                  value: String(svc.schedule.health_minutes)
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onChanged: function (v) { svc.setSchedule("health_minutes", v) }
+                }
+                Text {
+                  width: parent.width
+                  text: "Runs while the laptop is on. A Pi carries on by itself once started. "
+                    + "Longer nights check the whole disk sooner; a Pi works hard while it checks."
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.bodySmall
+                  wrapMode: Text.WordWrap
+                }
               }
               Toggle {
                 width: parent.width
