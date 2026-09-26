@@ -440,7 +440,10 @@ A backup comes first. One that starts while the disk is being checked pauses
 the check (btrfs keeps its place), and the check carries on afterwards with the
 time it had left: on a Pi as soon as the backup lets go of the disk, or once
 its mark goes stale if the laptop vanished mid-backup. A check due while a
-backup is running waits for it to finish. (The scrub's idle I/O priority alone
+backup is running waits for it to finish. Restore my files pauses a check the
+same way, and a restored system that is still waiting for its files starts
+no checks at all; the panel hides the health settings and the routine health
+line until the files are back (damage is still shown). (The scrub's idle I/O priority alone
 isn't enough: only the bfq scheduler honours it, and USB disks usually run
 mq-deadline.)
 

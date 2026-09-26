@@ -109,6 +109,9 @@ health_tick() {
   if remote_configured && [[ -z $(capsule_luks_partition 2>/dev/null || true) ]]; then
     "$OMARCHY_TM_ROOT/backup.sh" --health status >/dev/null 2>&1 || true
   fi
+  # A restored system still waiting for its files is in the middle of
+  # something bigger: no checks until they're back.
+  [[ -f $OMARCHY_TM_STATE/partial-restore.json ]] && return 0
   at=$(jq -r .health_at <<<"$s")
   hour=$((10#$(date +%H)))
   (((hour - at + 24) % 24 < 3)) || return 0

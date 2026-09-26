@@ -355,7 +355,9 @@ Panel {
                 }
               }
               Text {
-                visible: text !== ""
+                // Mid-restore the routine line is noise; damage still shows,
+                // since this is the disk the files are coming back from.
+                visible: text !== "" && (svc.healthLine.urgent || !(root.blockedByRestore || svc.restoringFiles))
                 width: parent.width
                 text: svc.healthLine.text
                 color: svc.healthLine.urgent ? root.urgent : root.dim

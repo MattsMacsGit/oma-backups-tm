@@ -974,7 +974,8 @@ fail_backup() {
   exit 1
 }
 
-# A health check under way stands aside while a backup writes: the two fighting
+# A health check under way stands aside while a backup writes (or Restore my
+# files reads a whole home folder back): the two fighting
 # over the disk slows both, and the check's low priority only counts on disks
 # using the bfq scheduler, which USB disks mostly don't. It carries on where it
 # stopped once the backup is done with the disk -- on a Pi when this run lets
@@ -984,7 +985,7 @@ pause_health_check() {
   if [[ $DEST_REMOTE == 1 ]]; then
     ((REMOTE_GATE_VERSION >= 12)) || return 0
     if [[ $REMOTE_CHECKING == true && -n $REMOTE_HOLD ]] && ((REMOTE_GATE_VERSION >= 13)); then
-      step "Pausing the disk health check until this backup is done"
+      step "Pausing the disk health check until this is done"
       rgate health-pause "$REMOTE_HOLD" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
         log_file "couldn't pause the Pi's health check; both carry on at once"
     fi
@@ -997,7 +998,7 @@ pause_health_check() {
   local state
   state="$(health_state)" || return 0
   jq -e '.running == true' "$state" >/dev/null 2>&1 || return 0
-  step "Pausing the disk health check until this backup is done"
+  step "Pausing the disk health check until this is done"
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" pause "$MNT" "$state" "pid:$$" \
     >/dev/null 2>>"$OMARCHY_TM_LOG" || log_file "couldn't pause the health check; both carry on at once"
 }
@@ -1710,6 +1711,8 @@ restore_cleanup() {
   fi
   release_source
   remote_close || true
+  # A health check paused for this has carried on: so the panel says so.
+  [[ $DEST_REMOTE == 1 && $REMOTE_CHECKING == true ]] && { health_fetch || true; }
   exit "$rc"
 }
 
@@ -1753,6 +1756,8 @@ cmd_restore_files() {
   pick_source "$ts"
   rsync_link_flags
   open_destination
+  # Getting files back comes before checking the disk, as a backup does.
+  pause_health_check
   # The Pi's gatekeeper only answers for the restore point itself (two levels
   # deep); a missing home folder inside it is rsync's to report.
   if [[ $DEST_REMOTE == 1 ]]; then
@@ -1987,6 +1992,10 @@ cmd_health() {
       "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" show "$state"
       ;;
     run)
+      if [[ -n $(partial_restore_snapshot) ]]; then
+        log_file "health check skipped: this system is waiting for its files to come back"
+        return 0
+      fi
       minutes="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get health_minutes)"
       [[ $minutes =~ ^[0-9]+$ ]] || minutes=120
       # Started by hand (Check now) or by the nightly tick, it counts as
