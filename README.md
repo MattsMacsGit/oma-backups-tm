@@ -10,6 +10,10 @@ onto the same machine or a completely different one.
 Everything is driven from a disk icon on the Omarchy bar. No config files to
 edit, and a command line for everything if you want it.
 
+<p align="center">
+  <img src="docs/panel.png" width="440" alt="The OmaBackups panel, opened from the Omarchy bar">
+</p>
+
 > Setting up a backup disk and restoring onto a disk both **erase that disk**.
 > Until you've restored once yourself, onto hardware you can afford to lose,
 > keep another copy of anything you can't lose.
