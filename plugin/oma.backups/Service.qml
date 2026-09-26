@@ -154,7 +154,8 @@ Item {
 
   // Automatic backups: settings live in the user's schedule.json; the root
   // timer only exists once `schedule enable` has run.
-  property var schedule: ({ enabled: false, every: "daily", retention: "smart" })
+  property var schedule: ({ enabled: false, every: "daily", retention: "smart",
+                            health: true, health_at: 0, health_minutes: 120 })
   property bool scheduleInstalled: false
   readonly property bool scheduleOn: schedule.enabled === true && scheduleInstalled
   readonly property string scheduleTool: shareRoot + "/lib/schedule.py"
@@ -801,6 +802,7 @@ Item {
     linkedFile.reload()
     lastSuccessFile.reload()
     piGateFile.reload()
+    if (root.healthUuid !== "") healthFile.reload()
     if (!root.restoringFiles) partialFile.reload()
     if (root.systemPhase === "waiting") putBackFile.reload()
     nowSec = Date.now() / 1000
@@ -1458,6 +1460,33 @@ Item {
     }
   }
 
+  // How the next backup's disk has fared in its nightly checks (lib/health.py),
+  // kept per disk by `oma-backups health` in health-<LUKS UUID>.json.
+  readonly property string healthUuid: {
+    var id = String(root.destinationId || "")
+    var u = id.slice(id.lastIndexOf(":") + 1).toLowerCase()
+    return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(u) ? u : ""
+  }
+  property var health: ({})
+  readonly property var healthLine: Model.healthLine(root.health, root.schedule.health === true, root.nowSec)
+
+  FileView {
+    id: healthFile
+    path: root.healthUuid !== ""
+      ? root.home + "/.local/state/omarchy-backups/health-" + root.healthUuid + ".json" : ""
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.health = (j && typeof j === "object") ? j : {}
+      } catch (e) {
+        root.health = {}
+      }
+    }
+    onLoadFailed: root.health = {}
+    onPathChanged: root.health = {}
+  }
+
   FileView {
     id: piGateFile
     path: root.home + "/.local/state/omarchy-backups/pi-gate.json"
@@ -1602,7 +1631,10 @@ Item {
         root.schedule = {
           enabled: j.enabled === true,
           every: ["hourly", "daily", "weekly"].indexOf(j.every) >= 0 ? j.every : "daily",
-          retention: j.retention === "keep" ? "keep" : "smart"
+          retention: j.retention === "keep" ? "keep" : "smart",
+          health: j.health !== false,
+          health_at: Number.isInteger(j.health_at) ? j.health_at : 0,
+          health_minutes: Number.isInteger(j.health_minutes) ? j.health_minutes : 120
         }
       } catch (e) {}
     }

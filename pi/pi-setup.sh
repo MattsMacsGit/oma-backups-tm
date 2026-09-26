@@ -97,18 +97,19 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 here=""
 [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]] && here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-for f in pi/oma-gate lib/list_snapshots.py lib/reuse.py; do
+for f in pi/oma-gate lib/list_snapshots.py lib/reuse.py lib/health.py; do
   if [[ -n $here && -f $here/$f ]]; then
     cp "$here/$f" "$tmp/"
   else
     curl -fsSL "$REPO_RAW/$f" -o "$tmp/$(basename "$f")" || die "Could not download $f."
   fi
 done
-python3 -m py_compile "$tmp/oma-gate" "$tmp/list_snapshots.py" "$tmp/reuse.py" || die "Downloaded files are broken."
+python3 -m py_compile "$tmp/oma-gate" "$tmp/list_snapshots.py" "$tmp/reuse.py" "$tmp/health.py" || die "Downloaded files are broken."
 install -d -m 755 "$LIB"
 install -m 755 "$tmp/oma-gate" "$GATE"
 install -m 644 "$tmp/list_snapshots.py" "$LIB/list_snapshots.py"
 install -m 644 "$tmp/reuse.py" "$LIB/reuse.py"
+install -m 644 "$tmp/health.py" "$LIB/health.py"
 
 # The safety net behind the marks: everything that opens the disk leaves one
 # and takes it away again, but something can always be killed before it gets

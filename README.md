@@ -405,6 +405,22 @@ Omarchy is LUKS + btrfs `@` / `@home`. Each backup:
 4. `rsync -aHAX --delete --delete-excluded` onto the USB (skip list applied every time)
 5. Snapshot the destination so you can browse dated copies
 
+## Disk health
+
+Every night (midnight by default) the backup disk is read back, a slice at a
+time, and checked against the checksums btrfs stored when it wrote each block
+(`btrfs scrub`, at idle priority). Each night carries on from where the last
+stopped, for up to two hours, until the whole disk has been checked; then a
+new pass starts. The panel says how it's going: good, the disk reporting read
+or write errors (check the cable), or damaged files, named, meaning the disk
+can't be trusted. Damage stays flagged until a later full pass comes back clean.
+
+A Pi's disk is checked on the Pi itself: the laptop only unlocks it and starts
+the night's slice, and the Pi pauses it when the time is up. A USB disk is
+checked while it's plugged in and the laptop is on. `oma-backups health`
+shows the latest record, and `sudo oma-backups health run` checks tonight's
+slice now. Time, length and on/off are in Settings.
+
 ## UI
 
 - **Home:** last copy, disk free space, Backup now / Stop, next automatic

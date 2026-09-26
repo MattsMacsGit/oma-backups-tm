@@ -3,7 +3,9 @@
 
   schedule.py get [KEY]      print all settings as JSON, or one value
   schedule.py set KEY VALUE  enabled=true|false, every=hourly|daily|weekly,
-                             retention=smart|keep
+                             retention=smart|keep, health=true|false,
+                             health_at=0..23 (the hour the nightly disk check
+                             starts), health_minutes=30|60|120|240|480
 
 The file is user-owned (the plugin writes it) but read by the root timer, so
 anything unexpected in it falls back to the defaults.
@@ -20,9 +22,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from compile_excludes import user_home  # noqa: E402
 
-DEFAULTS = {"enabled": False, "every": "daily", "retention": "smart", "enabled_at": 0}
+DEFAULTS = {"enabled": False, "every": "daily", "retention": "smart", "enabled_at": 0,
+            "health": True, "health_at": 0, "health_minutes": 120}
 CHOICES = {"every": ("hourly", "daily", "weekly"), "retention": ("smart", "keep")}
 INTERVAL = {"hourly": 3600, "daily": 86400, "weekly": 7 * 86400}
+NUMBERS = {"health_at": tuple(range(24)), "health_minutes": (30, 60, 120, 240, 480)}
 
 
 def path() -> Path:
@@ -37,8 +41,12 @@ def load() -> dict:
         data = {}
     if not isinstance(data, dict):
         data = {}
-    if isinstance(data.get("enabled"), bool):
-        out["enabled"] = data["enabled"]
+    for key in ("enabled", "health"):
+        if isinstance(data.get(key), bool):
+            out[key] = data[key]
+    for key, allowed in NUMBERS.items():
+        if data.get(key) in allowed and not isinstance(data.get(key), bool):
+            out[key] = data[key]
     for key, allowed in CHOICES.items():
         if data.get(key) in allowed:
             out[key] = data[key]
@@ -78,6 +86,10 @@ def main() -> int:
             s["enabled"] = value == "true"
             if s["enabled"]:
                 s["enabled_at"] = int(time.time())
+        elif key == "health" and value in ("true", "false"):
+            s["health"] = value == "true"
+        elif key in NUMBERS and value.isdigit() and int(value) in NUMBERS[key]:
+            s[key] = int(value)
         elif key in CHOICES and value in CHOICES[key]:
             s[key] = value
         else:

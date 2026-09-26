@@ -80,6 +80,11 @@ HOLD_STALE = 600
 # is never cut off mid-flight.
 IDLE_LOCK = 600
 IO_STAMP = CAPSULE_LOCK.with_name(CAPSULE_LOCK.name + ".io")
+# The disk's health checks (lib/health.py): kept off the disk itself, so the
+# laptop can ask how it is while it's locked.
+HEALTH = (Path(os.environ.get("OMA_GATE_HEALTH") or "/tmp/oma-gate-test.health.json") if TEST
+          else Path("/var/lib/oma-gate/health.json"))
+MAX_CHECK_MINUTES = 12 * 60
 
 
 def keys_file() -> Path:
@@ -224,6 +229,30 @@ def is_subvolume(p: Path) -> bool:
         return False
 
 
+def shared(name: str):
+    """A module installed beside the gatekeeper (in the repo, from ../lib)."""
+    sys.path[:0] = [str(LIB), str(LIB.parent / "lib")]
+    return __import__(name)
+
+
+def scrub_busy() -> bool:
+    """A health check is reading the disk: it must not be locked under it,
+    and the sweep pauses it once tonight's time is up."""
+    if not mounted():
+        return False
+    health = shared("health")
+    if health.scrub_status(str(MOUNT))["status"] != "running":
+        return False
+    return True
+
+
+def settle_health(stop: bool) -> None:
+    try:
+        shared("health").settle(str(MOUNT), HEALTH, stop=stop)
+    except OSError as e:
+        log(f"couldn't record the health check: {e}")
+
+
 def v_version(args: list[str]) -> None:
     print(VERSION)
 
@@ -236,6 +265,7 @@ def v_status(args: list[str]) -> None:
         "unlocked": mapper_open(),
         "mounted": mounted(),
         "holders": len(holders_seen()),
+        "checking": HEALTH.exists() and bool(shared("health").load(HEALTH).get("running")),
     }))
 
 
@@ -301,6 +331,9 @@ def sweep_armed() -> bool:
 
 
 def do_lock() -> None:
+    # A health check under way is paused, not lost: the next night resumes it.
+    if scrub_busy():
+        settle_health(stop=True)
     if mounted():
         run("sync")
         run("umount", str(MOUNT))
@@ -377,6 +410,17 @@ def v_sweep(args: list[str]) -> None:
     with capsule_turn():
         if not mapper_open() and not mounted():
             return
+        if HEALTH.exists() and mounted():
+            record = shared("health").load(HEALTH)
+            if record.get("running"):
+                if not scrub_busy():
+                    settle_health(stop=False)
+                elif time.time() >= float(record.get("deadline") or 0):
+                    settle_health(stop=True)
+                    log("health check paused for tonight; the next one carries on from here")
+                else:
+                    IO_STAMP.unlink(missing_ok=True)
+                    return
         if holders_live():
             IO_STAMP.unlink(missing_ok=True)
             return
@@ -452,6 +496,42 @@ def v_reseed(args: list[str]) -> None:
     log(f"rebuilt {kind}/current from {ts}")
 
 
+def v_health_start(args: list[str]) -> None:
+    """health-start MINUTES -- tonight's slice of the disk's health check:
+    carries on the pass where the last night stopped, in the background, at
+    idle priority. The sweep pauses it after MINUTES, and keeps the disk open
+    until then even once the laptop has let go of it."""
+    require_mounted()
+    try:
+        minutes = int(args[0])
+    except ValueError:
+        raise Refused("health-start: how many minutes?")
+    if not 1 <= minutes <= MAX_CHECK_MINUTES:
+        raise Refused(f"health-start: between 1 and {MAX_CHECK_MINUTES} minutes")
+    health = shared("health")
+    record = health.load(HEALTH)
+    if record.get("uuid") != load_uuid():
+        # Another disk than last time: its checks start from nothing.
+        health.save(HEALTH, {"uuid": load_uuid()})
+    health.start(str(MOUNT), HEALTH, minutes)
+    log(f"health check started for up to {minutes} minutes")
+    print(json.dumps(health.show(HEALTH)))
+
+
+def v_health(args: list[str]) -> None:
+    """health -- how the disk's checks have gone, as JSON. Works locked."""
+    health = shared("health")
+    if HEALTH.exists() and mounted() and health.load(HEALTH).get("running"):
+        settle_health(stop=False)
+    record = health.show(HEALTH)
+    if record.get("uuid") not in (None, load_uuid()):
+        record = {"uuid": load_uuid(), "state": "unknown"}
+    if record.get("running") and not mounted():
+        # The Pi restarted mid-check: the next night picks it up again.
+        record["running"] = False
+    print(json.dumps(record))
+
+
 def v_reuse(args: list[str]) -> None:
     """reuse KIND TS [TS ...] -- files already in those restore points go into
     KIND/current as clones of the stored copy, instead of being sent and
@@ -459,9 +539,7 @@ def v_reuse(args: list[str]) -> None:
     require_mounted()
     if len(args) < 2:
         raise Refused("reuse: which restore points?")
-    sys.path[:0] = [str(LIB), str(LIB.parent / "lib")]
-    import reuse
-
+    reuse = shared("reuse")
     try:
         files, total = reuse.reuse(str(MOUNT), args[0], args[1:], sys.stdin.buffer)
     except reuse.Refused as e:
@@ -694,6 +772,8 @@ VERBS = {
     "set-writable": (v_set_writable, 1),
     "reseed": (v_reseed, 2),
     "reuse": (v_reuse, None),
+    "health-start": (v_health_start, 1),
+    "health": (v_health, 0),
     "mkdir": (v_mkdir, 1),
     "exists": (v_exists, 1),
     "chmod755": (v_chmod755, None),

@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --copy) MODE=copy; shift; break ;;
     --put-back-system) MODE=put_back_system; shift ;;
     --restore-files) MODE=restore_files; shift; break ;;
+    --health) MODE=health; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
 done
@@ -1840,6 +1841,76 @@ cmd_rebuild_current() {
   gum style --foreground 8 "  The next backup only sends what changed since then."
 }
 
+# ---- Disk health -------------------------------------------------------------
+# Every night a slice of the backup disk is read back and checked against the
+# checksums btrfs wrote with it (lib/health.py), carrying on from where the
+# last night stopped. What it finds is kept per disk, for the panel, in
+# health-<disk>.json: the Pi keeps its own record (the check runs there, on
+# its own, long after the laptop has let go), and this copies it over.
+
+health_state() {
+  local id
+  id="$(dest_id)"
+  id=${id##*:}
+  [[ -n $id ]] || return 1
+  printf '%s/health-%s.json\n' "$OMARCHY_TM_STATE" "${id,,}"
+}
+
+# Copy the Pi's record over, if it answers. No unlocking: the gatekeeper keeps
+# it off the disk. Quietly nothing on an older Pi.
+health_fetch() {
+  local f out
+  [[ $DEST_REMOTE == 1 ]] || return 0
+  f="$(health_state)" || return 0
+  out="$(rgate health 2>/dev/null)" || return 0
+  jq -e 'type == "object"' >/dev/null 2>&1 <<<"$out" || return 0
+  mkdir -p "$OMARCHY_TM_STATE"
+  printf '%s\n' "$out" >"$f.tmp" && chmod 644 "$f.tmp" && mv "$f.tmp" "$f"
+}
+
+# oma-backups health [run | status]
+#   run     tonight's check of the disk the next backup goes to (the nightly
+#           timer starts this; it can be run by hand too)
+#   status  the latest record for that disk, fetched from the Pi if it's one
+cmd_health() {
+  local sub=${1:-status} minutes state
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't check the backup disk."
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_destination
+  if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 12 ]]; then
+    [[ $sub == run ]] && log_file "health check skipped: the Pi's gatekeeper is older than 12"
+    [[ $sub == run ]] || echo '{"state": "unknown", "old_pi": true}'
+    return 0
+  fi
+  state="$(health_state)" || die "couldn't tell which backup disk this is"
+  case $sub in
+    status)
+      health_fetch
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" show "$state"
+      ;;
+    run)
+      minutes="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/schedule.py" get health_minutes)"
+      [[ $minutes =~ ^[0-9]+$ ]] || minutes=120
+      trap 'remote_close' EXIT
+      open_destination
+      log_file "health check: up to $minutes minutes of $(dest_id)"
+      if [[ $DEST_REMOTE == 1 ]]; then
+        # The Pi runs it from here, and pauses it when the time is up.
+        rgate health-start "$minutes" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+          fail_backup "The Pi couldn't start checking its disk. Details are in $OMARCHY_TM_LOG."
+        health_fetch
+      else
+        mkdir -p "$OMARCHY_TM_STATE"
+        "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" run "$MNT" "$state" "$minutes" >/dev/null
+        log_file "health check: $(jq -r '.state // "unknown"' "$state" 2>/dev/null) ($(dest_id))"
+      fi
+      ;;
+    *) die "usage: oma-backups health [run | status]" ;;
+  esac
+}
+
 cmd_prune() {
   # Even a dry run has to unlock the disk to read its restore points.
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
@@ -1907,4 +1978,5 @@ case "$MODE" in
   browse) cmd_browse "$@" ;;
   put_back_system) cmd_put_back_system ;;
   restore_files) cmd_restore_files "$@" ;;
+  health) cmd_health "$@" ;;
 esac

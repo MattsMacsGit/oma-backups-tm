@@ -56,7 +56,8 @@ def explain(home: Path) -> None:
         print(
             f"The Pi's gatekeeper is v{data.get('version')}. This laptop wants v{data.get('want')}."
         )
-        print("  One session can still lock the disk out from under another.")
+        print("  Until it's updated, the Pi's disk isn't health-checked, and files it")
+        print("  already has can be sent again.")
         if data.get("update"):
             print("  Update it by running this on the Pi: " + str(data["update"]))
     logs = [

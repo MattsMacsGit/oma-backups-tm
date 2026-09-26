@@ -7,7 +7,8 @@
 #                                  a plugged-in backup USB (asks for its password once)
 #   oma-backups schedule disable
 #   oma-backups schedule status
-#   oma-backups schedule run       what the timer runs
+#   oma-backups schedule run       what the timer runs (it also starts the
+#                                  nightly disk health check; see health_tick)
 set -euo pipefail
 
 OMARCHY_TM_ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
@@ -95,9 +96,47 @@ nag_if_overdue() {
   notify_user "No backup for a while" "Last backup: $when. $why" overdue
 }
 
+# The nightly disk health check (lib/health.py), whether or not automatic
+# backups are on. It gets three hours' grace after its set time, for a laptop
+# that wakes a little late, and runs as a unit of its own so a long check of
+# a USB disk never holds up this hourly tick. Every tick also copies the Pi's
+# latest record over for the panel (no unlocking needed).
+HEALTH_MARK="$OMARCHY_TM_STATE/health-started"
+health_tick() {
+  local s at hour last now
+  s="$(settings get)"
+  [[ $(jq -r .health <<<"$s") == true ]] || return 0
+  if remote_configured && [[ -z $(capsule_luks_partition 2>/dev/null || true) ]]; then
+    "$OMARCHY_TM_ROOT/backup.sh" --health status >/dev/null 2>&1 || true
+  fi
+  at=$(jq -r .health_at <<<"$s")
+  hour=$((10#$(date +%H)))
+  (((hour - at + 24) % 24 < 3)) || return 0
+  now=$(date +%s)
+  last="$(cat "$HEALTH_MARK" 2>/dev/null || echo 0)"
+  [[ $last =~ ^[0-9]+$ ]] || last=0
+  ((now - last >= 20 * 3600)) || return 0
+  if on_low_battery; then
+    log_file "health check waiting: the battery is under 20%"
+    return 0
+  fi
+  if systemctl is-active --quiet oma-backups-health.service; then
+    return 0
+  fi
+  mkdir -p "$OMARCHY_TM_STATE"
+  echo "$now" >"$HEALTH_MARK"
+  systemd-run --unit=oma-backups-health --collect --no-block --quiet \
+    --description="OmaBackups: tonight's backup disk health check" \
+    --setenv=SUDO_USER="${SUDO_USER:-}" --setenv=OMARCHY_TM_UNATTENDED=1 \
+    -p Nice=10 -p IOSchedulingClass=idle \
+    "$OMARCHY_TM_ROOT/omarchy-backups" health run 2>>"$OMARCHY_TM_LOG" ||
+    log_file "couldn't start the health check"
+}
+
 cmd_run() {
   [[ ${EUID:-$(id -u)} -eq 0 ]] || die "schedule run is started by the system timer"
   local s interval since last now grace
+  health_tick || true
   s="$(settings get)"
   [[ $(jq -r .enabled <<<"$s") == true ]] || exit 0
   interval=$(jq -r .interval <<<"$s")

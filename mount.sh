@@ -159,6 +159,9 @@ cmd_umount() {
     run umount /run/omarchy-backups-efi || true
   fi
   if findmnt -n "$MNT" >/dev/null 2>&1; then
+    # A health check under way is paused, not lost: the next night resumes it.
+    systemctl stop oma-backups-health.service 2>/dev/null || true
+    btrfs scrub cancel "$MNT" >/dev/null 2>&1 || true
     run umount "$MNT"
   fi
   if [[ -e /dev/mapper/$LUKS_MAPPER ]]; then

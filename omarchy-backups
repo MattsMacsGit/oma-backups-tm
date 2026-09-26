@@ -32,6 +32,8 @@ Every day
                           from that restore point (after another computer backed up there)
   schedule enable | disable | status | run
                           automatic backups
+  health [status | run]   is the backup disk still holding what was written
+                          to it? (checked a slice a night; run = tonight's now)
 
 Setting up
   disks [--json]          every disk, and what is on it
@@ -162,6 +164,7 @@ case "$cmd" in
   restore-files) exec "$OMARCHY_TM_ROOT/backup.sh" --restore-files "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
   rebuild-current) exec "$OMARCHY_TM_ROOT/backup.sh" --rebuild-current "$@" ;;
+  health) exec "$OMARCHY_TM_ROOT/backup.sh" --health "$@" ;;
   schedule) exec "$OMARCHY_TM_ROOT/schedule.sh" "$@" ;;
   compile-excludes)
     exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" "$@"

@@ -122,9 +122,11 @@ remote_refresh_addresses() {
   chmod 644 "$tmp" && mv "$tmp" "$OMA_REMOTE_CONF"
 }
 
-# What this laptop's copy of the gatekeeper speaks. Older Pis still work,
-# but they lock the disk when the first session finishes, not the last.
-OMA_GATE_WANT=9
+# What this laptop's copy of the gatekeeper speaks. Older Pis still back up,
+# but without what came since: before 9 they lock the disk when the first
+# session finishes, not the last; before 12 they send again files the disk
+# already has, and never check the disk's health.
+OMA_GATE_WANT=12
 
 # The one-liner that updates (or with --uninstall, removes) the Pi's side.
 # OMA_REPO_RAW is where this copy came from, so someone testing another
@@ -156,7 +158,7 @@ note_pi_gate() {
     '{version: $v, want: $want, behind: $behind, update: $update}' >"$f.tmp" \
     && chmod 644 "$f.tmp" && mv "$f.tmp" "$f" || return 0
   [[ $behind == true && $quiet == 0 ]] || return 0
-  warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}. One session can still lock the disk out from under another." || true
+  warn "The Pi's gatekeeper is v${v}. This laptop wants v${OMA_GATE_WANT}: until it's updated, the Pi's disk isn't health-checked, and files it already has can be sent again." || true
   gum style --foreground 8 "  Update it by running this on the Pi (keeps the pairing):" || true
   gum style --foreground 8 "  $(pi_update_cmd)" || true
   return 0

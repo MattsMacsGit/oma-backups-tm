@@ -99,3 +99,46 @@ function phaseLabel(phase) {
   if (p === "done") return "Done"
   return p || "Backup"
 }
+
+// "3 days ago", "today", from a Unix time.
+function ago(sec, nowSec) {
+  var days = Math.floor((nowSec - sec) / 86400)
+  if (!(sec > 0) || days < 1) return "today"
+  if (days === 1) return "yesterday"
+  return days + " days ago"
+}
+
+// The disk health line (lib/health.py's record) for the home view:
+// { text, urgent }. An empty text hides the line.
+function healthLine(h, on, nowSec) {
+  h = h || {}
+  var state = String(h.state || "unknown")
+  var files = Array.isArray(h.files) ? h.files : []
+  if (state === "damaged") {
+    var names = files.slice(0, 3).map(function (f) { return String(f).split("/").pop() })
+    var more = files.length > 3 ? " and " + (files.length - 3) + " more" : ""
+    return {
+      urgent: true,
+      text: "Disk health: DAMAGED. "
+        + (files.length ? files.length + (files.length === 1 ? " file" : " files")
+          + " no longer match what was backed up (" + names.join(", ") + more + "). "
+          : "The disk has corrupted data. ")
+        + "Don't rely on this disk: back up to another one."
+    }
+  }
+  if (state === "warning")
+    return { urgent: true, text: "Disk health: the disk has reported read or write errors. "
+      + "Check its cable and power. No damaged files found so far." }
+  if (state === "unknown")
+    return { urgent: false, text: on ? "Disk health: not checked yet. It is checked a little each night." : "" }
+  var total = Number(h.total_bytes) || 0
+  var pct = total > 0 ? Math.min(100, Math.floor(100 * (Number(h.done_bytes) || 0) / total)) : 0
+  var text = h.running
+    ? "Disk health: checking now, nothing wrong so far (" + pct + "% of this pass)"
+    : (h.full_pass_at ? "Disk health: good · whole disk checked " + ago(h.full_pass_at, nowSec)
+      : "Disk health: good so far · " + pct + "% of the disk checked")
+  var last = Number(h.checked_at) || 0
+  if (on && !h.running && last > 0 && nowSec - last > 7 * 86400)
+    text += ". Last checked " + ago(last, nowSec) + ": leave the laptop on overnight to keep checking"
+  return { urgent: false, text: text }
+}
