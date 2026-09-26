@@ -414,6 +414,16 @@ stopped, for up to two hours, until the whole disk has been checked; then a
 new pass starts. The panel says how it's going: good, the disk reporting read
 or write errors (check the cable), or damaged files, named, meaning the disk
 can't be trusted. Damage stays flagged until a later full pass comes back clean.
+The disk's own error counters count up for its whole life, so only errors
+since the pass began count: a one-off that the next full pass doesn't find
+again clears.
+
+A damaged file is sent again by the next backup if this computer still has
+it. A backup can't notice by itself (it compares size and time, which still
+match), so these files are copied in full regardless. From that restore
+point on the copy is good; older restore points share the damaged copy and
+keep it, so the check keeps naming it until they are thinned away. Reusing
+files the disk already has never picks a damaged one.
 
 A Pi's disk is checked on the Pi itself: the laptop only unlocks it and starts
 the night's slice, and the Pi pauses it when the time is up. A USB disk is

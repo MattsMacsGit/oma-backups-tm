@@ -583,6 +583,56 @@ rsync_tree() {
   TREE_FILES="$(jq -r '.files // 0' "$stats" 2>/dev/null || echo 0)"
   rm -f "$stats"
   tree_rc_ok "$tree" copy
+  resend_damaged "$tree" "$src" "$dest"
+}
+
+# ---- Damaged files, sent again ----------------------------------------------
+# The health check names files whose stored copy no longer matches what was
+# written. A backup never notices by itself: it compares size and time, and
+# those still match. So each named file this computer still has is sent again
+# in full -- -I: don't trust size and time, -W: don't read the damaged copy to
+# work out a difference -- and from this restore point on there is a good
+# copy. Older restore points share the damaged one and keep it. Each is sent
+# once (health-resent-<disk>.json), unless a later check names it again.
+
+health_resent_file() {
+  local s
+  s="$(health_state)" || return 1
+  printf '%s/health-resent-%s\n' "$(dirname "$s")" "$(basename "$s" | sed 's/^health-//')"
+}
+
+resend_damaged() {
+  local tree=$1 src=$2 dest=$3 state resent rel rc=0 f
+  state="$(health_state)" || return 0
+  [[ -s $state ]] || return 0
+  resent="$(health_resent_file)" || return 0
+  local -a sent=() missing=() flags=()
+  while IFS= read -r -d '' rel; do
+    if [[ -f $src/$rel && ! -L $src/$rel ]]; then sent+=("$rel"); else missing+=("$rel"); fi
+  done < <("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" resend-list "$state" "$resent" "$tree" 2>>"$OMARCHY_TM_LOG" || true)
+  ((${#sent[@]} + ${#missing[@]})) || return 0
+  local sentf missf
+  sentf="$(mktemp)" missf="$(mktemp)"
+  if ((${#sent[@]})); then
+    printf '%s\0' "${sent[@]}" >"$sentf"
+    progress phase "$tree" "Sending fresh copies of damaged files"
+    step "Sending fresh copies of ${#sent[@]} file(s) the disk health check found damaged"
+    # One file at a time from a list: nothing to delete, and --delete needs -r.
+    for f in "${TREE_FLAGS[@]}"; do [[ $f == --delete* ]] || flags+=("$f"); done
+    rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${flags[@]}" -I -W --from0 --files-from="$sentf" \
+      "$src"/ "$dest"/ >>"$OMARCHY_TM_LOG" 2>&1 || rc=$?
+  fi
+  ((${#missing[@]})) && printf '%s\0' "${missing[@]}" >"$missf"
+  if [[ $rc -eq 0 || $rc -eq 23 || $rc -eq 24 ]]; then
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" resent "$state" "$resent" "$tree" "$sentf" "$missf" \
+      2>>"$OMARCHY_TM_LOG" || true
+    chown --reference="$OMARCHY_TM_STATE" "$resent" 2>/dev/null || true
+    log_file "damaged $(tree_name "$tree"): sent ${#sent[@]} again, ${#missing[@]} no longer on this computer"
+  else
+    # Not a failed backup: the next one tries again.
+    warn "Couldn't send fresh copies of the damaged files (rsync code $rc); the next backup tries again."
+  fi
+  rm -f "$sentf" "$missf"
 }
 
 # ---- Reusing what the disk already has --------------------------------------
@@ -621,6 +671,13 @@ reuse_from_points() {
   local tree=$1 out files bytes
   local -a points
   [[ -s $NEW_FILES ]] || return 0
+  # Never a damaged file: cloning it would put the bad copy straight back.
+  local state
+  if state="$(health_state)" && [[ -s $state ]] && jq -e '(.files // []) | length > 0' "$state" >/dev/null 2>&1; then
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/health.py" drop-damaged "$state" "$tree" \
+      <"$NEW_FILES" >"$NEW_FILES.ok" 2>>"$OMARCHY_TM_LOG" && mv "$NEW_FILES.ok" "$NEW_FILES" ||
+      rm -f "$NEW_FILES.ok"
+  fi
   mapfile -t points < <(reuse_points)
   ((${#points[@]})) || return 0
   progress phase "$tree" "Looking for files the backup disk already has"
@@ -925,12 +982,14 @@ fail_backup() {
 # time it had left. A Pi before gatekeeper 13 can't: both run at once, as before.
 pause_health_check() {
   if [[ $DEST_REMOTE == 1 ]]; then
-    [[ $REMOTE_CHECKING == true && -n $REMOTE_HOLD ]] || return 0
-    ((REMOTE_GATE_VERSION >= 13)) || return 0
-    step "Pausing the disk health check until this backup is done"
-    rgate health-pause "$REMOTE_HOLD" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
-      log_file "couldn't pause the Pi's health check; both carry on at once"
-    # So the panel says paused, not checking.
+    ((REMOTE_GATE_VERSION >= 12)) || return 0
+    if [[ $REMOTE_CHECKING == true && -n $REMOTE_HOLD ]] && ((REMOTE_GATE_VERSION >= 13)); then
+      step "Pausing the disk health check until this backup is done"
+      rgate health-pause "$REMOTE_HOLD" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+        log_file "couldn't pause the Pi's health check; both carry on at once"
+    fi
+    # The Pi's latest record: the panel says paused rather than checking, and
+    # this backup knows which damaged files to send again (resend_damaged).
     health_fetch || true
     return 0
   fi

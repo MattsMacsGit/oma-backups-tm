@@ -110,18 +110,42 @@ function ago(sec, nowSec) {
 
 // The disk health line (lib/health.py's record) for the home view:
 // { text, urgent }. An empty text hides the line.
-function healthLine(h, on, nowSec) {
+// The check names a file once per restore point sharing the damage
+// (home/<point>/matt/a.mkv): one file, however many names.
+function damagedFiles(files) {
+  var seen = {}
+  var out = []
+  for (var i = 0; i < files.length; i++) {
+    var parts = String(files[i]).split("/")
+    var key = parts.length > 2 ? parts[0] + "/" + parts.slice(2).join("/") : String(files[i])
+    if (!seen[key]) { seen[key] = true; out.push(key) }
+  }
+  return out
+}
+
+function healthLine(h, on, nowSec, resent) {
   h = h || {}
+  resent = resent || {}
   var state = String(h.state || "unknown")
-  var files = Array.isArray(h.files) ? h.files : []
+  var files = damagedFiles(Array.isArray(h.files) ? h.files : [])
   if (state === "damaged") {
     var names = files.slice(0, 3).map(function (f) { return String(f).split("/").pop() })
     var more = files.length > 3 ? " and " + (files.length - 3) + " more" : ""
+    var sent = Array.isArray(resent.sent) ? resent.sent : []
+    var gone = Array.isArray(resent.missing) ? resent.missing : []
+    var nSent = files.filter(function (f) { return sent.indexOf(f) >= 0 }).length
+    var nGone = files.filter(function (f) { return gone.indexOf(f) >= 0 }).length
+    var fixed = ""
+    if (nSent)
+      fixed += (nSent === files.length ? (files.length === 1 ? "It was" : "They were") : nSent + " of them " + (nSent === 1 ? "was" : "were"))
+        + " sent again from this computer, so newer restore points have a good copy; older ones keep the damaged one. "
+    if (nGone)
+      fixed += nGone + (nGone === 1 ? " is" : " are") + " no longer on this computer, so can't be sent again. "
     return {
       urgent: true,
       text: "Disk health: DAMAGED. "
-        + (files.length ? files.length + (files.length === 1 ? " file" : " files")
-          + " no longer match what was backed up (" + names.join(", ") + more + "). "
+        + (files.length ? files.length + (files.length === 1 ? " file no longer matches" : " files no longer match")
+          + " what was backed up (" + names.join(", ") + more + "). " + fixed
           : "The disk has corrupted data. ")
         + "Don't rely on this disk: back up to another one."
     }

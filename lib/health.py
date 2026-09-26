@@ -19,6 +19,16 @@ full pass is every block checked once.
                                         or the Pi's mark for it)
   health.py carry-on MOUNT STATE        pick up again after one
   health.py show STATE                  STATE as JSON, with its verdict
+  health.py resend-list STATE RESENT TREE
+                                        damaged files of TREE (os, home, esp)
+                                        not yet sent again, NUL-ended, as
+                                        paths inside the tree
+  health.py resent STATE RESENT TREE SENT MISSING
+                                        note them handled: SENT went again,
+                                        MISSING aren't on this computer
+                                        (NUL-ended files)
+  health.py drop-damaged STATE TREE     filter reuse.py's records (stdin to
+                                        stdout), leaving out damaged files
 
 STATE is the JSON record of the disk's checks. The Pi's gatekeeper imports
 this; on a USB disk backup.sh runs it. Everything here needs root.
@@ -158,20 +168,35 @@ def found_damage(part: dict) -> bool:
     return bool(bad or part.get("files"))
 
 
+def device_new(record: dict) -> dict:
+    """The disk's own error counters count up for its whole life and never
+    reset, so one bad moment years ago would say "damaged" forever. What
+    counts is what they went up by since this pass began. A record from
+    before passes noted where they started counts the lot."""
+    now = record.get("device") or {}
+    base = record.get("device_base")
+    if not isinstance(base, dict):
+        return {k: int(now.get(k) or 0) for k in DEVICE}
+    return {k: max(0, int(now.get(k) or 0) - int(base.get(k) or 0)) for k in DEVICE}
+
+
 def verdict(record: dict) -> str:
     """Damage found by the pass under way, or by the last full one, stands
     until a full pass has read the whole disk again: starting a new pass must
-    not wipe the warning before it has even reached the bad file."""
+    not wipe the warning before it has even reached the bad file. A one-off
+    that a later full pass doesn't find again is cleared by it."""
     if not record.get("checked_at") and not record.get("running"):
         return "unknown"
-    device = record.get("device") or {}
-    errors = record.get("errors") or {}
-    if (found_damage(record) or found_damage(record.get("previous") or {})
-            or int(device.get("corruption_errs") or 0)):
+    previous = record.get("previous") or {}
+    devices = [device_new(record), previous.get("device_new") or {}]
+    errors = [record.get("errors") or {}, previous.get("errors") or {}]
+    if (found_damage(record) or found_damage(previous)
+            or any(int(d.get("corruption_errs") or 0) for d in devices)):
         return "damaged"
-    if any(int(device.get(k) or 0) for k in ("read_io_errs", "write_io_errs", "flush_io_errs", "generation_errs")):
+    if any(int(d.get(k) or 0) for d in devices
+           for k in ("read_io_errs", "write_io_errs", "flush_io_errs", "generation_errs")):
         return "warning"
-    if int(errors.get("read_errors") or 0):
+    if any(int(e.get("read_errors") or 0) for e in errors):
         return "warning"
     return "healthy"
 
@@ -200,7 +225,9 @@ def start(mount: str, state: Path, minutes: int) -> dict:
     if new_pass:
         if record.get("full_pass_at"):
             record["previous"] = {k: record.get(k) for k in ("errors", "files", "full_pass_at")}
-        record.update(pass_started=int(now), files=[], errors={}, done_bytes=0)
+            record["previous"]["device_new"] = device_new(record)
+        record.update(pass_started=int(now), files=[], errors={}, done_bytes=0,
+                      device_base=device_stats(mount))
     record.update(running=True, night_started=int(now), deadline=int(now + minutes * 60),
                   total_bytes=used_bytes(mount))
     save(state, record)
@@ -208,7 +235,8 @@ def start(mount: str, state: Path, minutes: int) -> dict:
     if r.returncode != 0 and not new_pass:
         # Nothing to resume after all (a status file lost to a reinstall):
         # a fresh pass it is.
-        record.update(pass_started=int(now), files=[], errors={}, done_bytes=0)
+        record.update(pass_started=int(now), files=[], errors={}, done_bytes=0,
+                      device_base=device_stats(mount))
         save(state, record)
         r = scrub_go("start", mount)
     if r.returncode != 0:
@@ -360,6 +388,74 @@ def run(mount: str, state: Path, minutes: int) -> dict:
     return record
 
 
+# ---- Damaged files, sent again ----------------------------------------------
+# A backup can't notice a damaged file by itself (it compares size and time,
+# which still match), so backup.sh asks for the list and sends each one this
+# computer still has in full. RESENT (health-resent-<disk>.json, beside STATE)
+# is what has been dealt with: every damaged path the check named, so each is
+# sent once, and which were sent and which weren't here to send.
+
+TREES = ("os", "home", "esp")
+
+
+def damaged_in(record: dict, tree: str) -> dict[str, list[str]]:
+    """{path inside TREE: [every name the check gave it]}. The check names a
+    file once per restore point sharing the bad block: home/<point>/matt/a."""
+    out: dict[str, list[str]] = {}
+    for f in record.get("files") or []:
+        parts = str(f).split("/")
+        if len(parts) < 3 or parts[0] != tree or not parts[1]:
+            continue
+        rel = "/".join(parts[2:])
+        if rel and ".." not in parts:
+            out.setdefault(rel, []).append(str(f))
+    return out
+
+
+def resend_list(state: Path, resent: Path, tree: str) -> list[str]:
+    handled = set(load(resent).get("handled") or [])
+    return sorted(rel for rel, names in damaged_in(load(state), tree).items()
+                  if any(n not in handled for n in names))
+
+
+def read_nul(path: str) -> list[str]:
+    try:
+        data = Path(path).read_bytes()
+    except OSError:
+        return []
+    return [os.fsdecode(p) for p in data.split(b"\0") if p]
+
+
+def mark_resent(state: Path, resent: Path, tree: str, sent: list[str], missing: list[str]) -> dict:
+    record = load(resent)
+    handled = set(record.get("handled") or [])
+    names = damaged_in(load(state), tree)
+    for rel in set(sent) | set(missing):
+        handled.update(names.get(rel, []))
+    was_sent = set(record.get("sent") or []) | {f"{tree}/{r}" for r in sent}
+    was_missing = (set(record.get("missing") or []) | {f"{tree}/{r}" for r in missing}) - was_sent
+    record.update(handled=sorted(handled), sent=sorted(was_sent), missing=sorted(was_missing),
+                  at=int(time.time()))
+    save(resent, record)
+    return record
+
+
+def drop_damaged(state: Path, tree: str) -> None:
+    """reuse.py clones files into the working copy from older restore points.
+    A damaged one would put the bad copy straight back, so it is left for the
+    copy to send instead. Records: NUL-ended "SIZE MTIME_NS PATH"."""
+    bad = {os.fsencode(r) for r in damaged_in(load(state), tree)}
+    data = sys.stdin.buffer.read()
+    out = sys.stdout.buffer
+    for rec in data.split(b"\0"):
+        if not rec:
+            continue
+        fields = rec.split(b" ", 2)
+        if len(fields) == 3 and fields[2] in bad:
+            continue
+        out.write(rec + b"\0")
+
+
 def show(state: Path) -> dict:
     record = load(state)
     record["state"] = verdict(record)
@@ -379,6 +475,13 @@ def main() -> int:
             print(json.dumps(pause(a[1], Path(a[2]), a[3])))
         elif a[:1] == ["carry-on"] and len(a) == 3:
             print(json.dumps(carry_on(a[1], Path(a[2]))))
+        elif a[:1] == ["resend-list"] and len(a) == 4 and a[3] in TREES:
+            for rel in resend_list(Path(a[1]), Path(a[2]), a[3]):
+                sys.stdout.buffer.write(os.fsencode(rel) + b"\0")
+        elif a[:1] == ["resent"] and len(a) == 6 and a[3] in TREES:
+            mark_resent(Path(a[1]), Path(a[2]), a[3], read_nul(a[4]), read_nul(a[5]))
+        elif a[:1] == ["drop-damaged"] and len(a) == 3 and a[2] in TREES:
+            drop_damaged(Path(a[1]), a[2])
         elif a[:1] == ["show"] and len(a) == 2:
             print(json.dumps(show(Path(a[1]))))
         else:

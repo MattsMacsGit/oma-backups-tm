@@ -803,6 +803,7 @@ Item {
     lastSuccessFile.reload()
     piGateFile.reload()
     if (root.healthUuid !== "") healthFile.reload()
+    if (root.healthUuid !== "" && root.health.state === "damaged") healthResentFile.reload()
     if (root.healthAskedAt > 0 && !healthUnitStateProc.running) healthUnitStateProc.running = true
     if (!root.restoringFiles) partialFile.reload()
     if (root.systemPhase === "waiting") putBackFile.reload()
@@ -1469,7 +1470,10 @@ Item {
     return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/.test(u) ? u : ""
   }
   property var health: ({})
-  readonly property var healthLine: Model.healthLine(root.health, root.schedule.health === true, root.nowSec)
+  // Which damaged files backups have sent again (backup.sh resend_damaged).
+  property var healthResent: ({})
+  readonly property var healthLine: Model.healthLine(root.health, root.schedule.health === true, root.nowSec,
+                                                     root.healthResent)
 
   // Check now: the unit the nightly tick starts, so it waits for a backup the
   // same way and counts as tonight's. "Starting" covers the time before the
@@ -1534,6 +1538,23 @@ Item {
     }
     onLoadFailed: root.health = {}
     onPathChanged: root.health = {}
+  }
+
+  FileView {
+    id: healthResentFile
+    path: root.healthUuid !== ""
+      ? root.home + "/.local/state/omarchy-backups/health-resent-" + root.healthUuid + ".json" : ""
+    printErrors: false
+    onLoaded: {
+      try {
+        var j = JSON.parse(text())
+        root.healthResent = (j && typeof j === "object") ? j : {}
+      } catch (e) {
+        root.healthResent = {}
+      }
+    }
+    onLoadFailed: root.healthResent = {}
+    onPathChanged: root.healthResent = {}
   }
 
   FileView {
