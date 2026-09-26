@@ -30,7 +30,6 @@ Panel {
   // Settings behind gears: the defaults suit nearly everyone.
   property bool autoMore: false
   property bool healthMore: false
-  property bool toolsMore: false
   readonly property string healthWhen: {
     var at = Number(svc.schedule.health_at) || 0
     var when = at === 0 ? "midnight" : (at === 12 ? "noon" : (at % 12) + (at < 12 ? " am" : " pm"))
@@ -1448,27 +1447,8 @@ Panel {
             // sense once this laptop has made a backup on it, so the whole
             // section stays out of the way until there is one (or until a Pi
             // is already paired, so it can still be unpaired).
-            // Set once and rarely touched again: out of the way behind one gear.
             Column {
-              visible: !root.leaveOutMode
-              width: parent.width
-              spacing: Style.space(10)
-              PanelSeparator { foreground: root.foreground }
-              Button {
-                width: parent.width
-                leftAlign: true
-                bordered: true
-                selected: root.toolsMore
-                iconText: "\uf013"
-                text: (root.toolsMore ? "Hide" : "Show") + ": Pi, rescue stick, a different disk, start over"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: root.toolsMore = !root.toolsMore
-              }
-            }
-
-            Column {
-              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.leaveOutMode && root.toolsMore
+              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1521,7 +1501,7 @@ Panel {
 
             // Needs the Pi, something on it to restore, and a linked laptop.
             Column {
-              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.leaveOutMode && root.toolsMore
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1591,7 +1571,7 @@ Panel {
             }
 
             Column {
-              visible: svc.hasCapsule && !root.leaveOutMode && root.toolsMore
+              visible: svc.hasCapsule && !root.leaveOutMode
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1666,7 +1646,7 @@ Panel {
               // Nothing here can be acted on until a restored system has its
               // files back, and a control that cannot be pressed is just noise.
               // The restore card on the home page is the way through.
-              visible: !root.leaveOutMode && root.toolsMore
+              visible: !root.leaveOutMode
               width: parent.width
               spacing: Style.space(12)
               PanelSeparator { foreground: root.foreground }
