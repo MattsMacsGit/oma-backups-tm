@@ -28,7 +28,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "11"
+VERSION = "12"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -452,6 +452,25 @@ def v_reseed(args: list[str]) -> None:
     log(f"rebuilt {kind}/current from {ts}")
 
 
+def v_reuse(args: list[str]) -> None:
+    """reuse KIND TS [TS ...] -- files already in those restore points go into
+    KIND/current as clones of the stored copy, instead of being sent and
+    stored all over again. The list comes on stdin (see lib/reuse.py)."""
+    require_mounted()
+    if len(args) < 2:
+        raise Refused("reuse: which restore points?")
+    sys.path[:0] = [str(LIB), str(LIB.parent / "lib")]
+    import reuse
+
+    try:
+        files, total = reuse.reuse(str(MOUNT), args[0], args[1:], sys.stdin.buffer)
+    except reuse.Refused as e:
+        raise Refused(str(e))
+    if files:
+        log(f"reused {files} files ({total} bytes) in {args[0]}/current from older restore points")
+    print(files, total)
+
+
 def v_set_writable(args: list[str]) -> None:
     require_mounted()
     (p,) = map(target, args)
@@ -674,6 +693,7 @@ VERBS = {
     "snapshot": (v_snapshot, 2),
     "set-writable": (v_set_writable, 1),
     "reseed": (v_reseed, 2),
+    "reuse": (v_reuse, None),
     "mkdir": (v_mkdir, 1),
     "exists": (v_exists, 1),
     "chmod755": (v_chmod755, None),

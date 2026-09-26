@@ -618,14 +618,15 @@ progress() {
 # What rsync reports while it works, for lib/progress.py: backups and
 # restores alike. Unchanged files get a line each too (--info=name2): without
 # them rsync is silent while it compares, and most of an incremental backup
-# is comparing. %l is each file's size. --no-inc-recursive: build the whole
+# is comparing. %l is each file's size; %n its name, which the check
+# hands to the reuse step (lib/reuse.py). --no-inc-recursive: build the whole
 # file list first, so the number of files to go through is known from the
 # start. --stats: the closing figures the manifest and the check come from.
 # shellcheck disable=SC2034,SC2054 # used by the scripts that source this; the commas are rsync's
-RSYNC_PROGRESS=(--no-inc-recursive --info=progress2,name2,flist2 --out-format='%i %l' --stats)
+RSYNC_PROGRESS=(--no-inc-recursive --info=progress2,name2,flist2 --out-format='%i %l %n' --stats)
 # The same, as it would be typed, for the printouts of --dry-run.
 # shellcheck disable=SC2034 # used by the scripts that source this
-RSYNC_PROGRESS_TEXT="--no-inc-recursive --info=progress2,name2,flist2 --out-format='%i %l' --stats"
+RSYNC_PROGRESS_TEXT="--no-inc-recursive --info=progress2,name2,flist2 --out-format='%i %l %n' --stats"
 
 # Which system this is, as far as the backup disk is concerned: the ID of
 # the filesystem it runs from. Not the machine ID -- a restore copies that

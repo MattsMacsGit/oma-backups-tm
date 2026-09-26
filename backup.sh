@@ -487,18 +487,21 @@ rsync_link_flags() {
 
 # One rsync of a tree, through lib/progress.py. "check" is the same command
 # with -n: nothing is written, and it reports what the real one would send.
+# With NEW_FILES set, the check also lists the new files there (for reuse).
 TREE_FLAGS=()
 TREE_RC=0
+NEW_FILES=""
 tree_rsync() {
   local mode=$1 tree=$2 src=$3 dest=$4 stats=${5:-}
-  local -a dry_run=()
+  local -a dry_run=() new=()
   [[ $mode == check ]] && dry_run=(-n)
+  [[ $mode == check && -n $NEW_FILES ]] && new=(OMA_NEW_FILES="$NEW_FILES" OMA_NEW_FROM="$src")
   set +e
   set +o pipefail
   # rsync 3.x sends --info=progress2 to stdout (not stderr) when not a TTY.
   stdbuf -e0 -o0 rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" "${TREE_FLAGS[@]}" "${dry_run[@]}" "${RSYNC_PROGRESS[@]}" \
     "$src"/ "$dest"/ \
-    2>&1 | OMARCHY_TM_LOG="$OMARCHY_TM_LOG" \
+    2>&1 | env "${new[@]}" OMARCHY_TM_LOG="$OMARCHY_TM_LOG" \
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" "$mode" "$tree" ${stats:+"$stats"}
   TREE_RC=${PIPESTATUS[0]}
   set -o pipefail
@@ -549,8 +552,17 @@ rsync_tree() {
   fi
   [[ $DEST_REMOTE == 1 ]] || mkdir -p "$dest"
   step "Checking $(tree_name "$tree") for changes"
+  NEW_FILES=""
+  if [[ $tree != esp ]] && reuse_points >/dev/null; then
+    NEW_FILES="$(mktemp)"
+  fi
   tree_rsync check "$tree" "$src" "$dest"
   tree_rc_ok "$tree" check
+  if [[ -n $NEW_FILES ]]; then
+    reuse_from_points "$tree"
+    rm -f "$NEW_FILES"
+    NEW_FILES=""
+  fi
   step "Backing up $(tree_name "$tree") — live progress in the plugin panel"
   local stats
   stats="$(mktemp)"
@@ -559,6 +571,58 @@ rsync_tree() {
   TREE_FILES="$(jq -r '.files // 0' "$stats" 2>/dev/null || echo 0)"
   rm -f "$stats"
   tree_rc_ok "$tree" copy
+}
+
+# ---- Reusing what the disk already has --------------------------------------
+# rsync compares only against the working copy. A file that dropped out of
+# it -- a folder skipped for a while, moved away and back, a system restored
+# from this disk -- is still in older restore points, but would be sent again
+# and stored twice. After the check, the new files it found are looked up in
+# this system's restore points, and any the disk already has go into the
+# working copy as clones of the stored copy (lib/reuse.py): instant, and no
+# extra space. The copy then finds them done.
+
+# This system's restore points, newest first, one per line; fails if there
+# are none. Points from before systems were recorded count as this one's
+# (nearly always true), another system's never do: a file of the same name,
+# size and time there could still hold something else.
+REUSE_POINTS=""
+REUSE_POINTS_READ=0
+reuse_points() {
+  if [[ $REUSE_POINTS_READ == 0 ]]; then
+    REUSE_POINTS_READ=1
+    if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 12 ]]; then
+      log_file "the Pi's gatekeeper is older than 12: not looking for files it already has"
+    else
+      local list manifests
+      list="$(d_list_json 2>/dev/null || true)"
+      manifests="$(d_manifests)"
+      REUSE_POINTS="$(jq -r --arg s "${SYSTEM_ID:-}" --argjson m "${manifests:-"{}"}" '
+        [.[]? | .timestamp // empty | select(test("^[0-9]{8}T[0-9]{6}Z$"))]
+        | map(select(($m[.].system // $s) == $s)) | sort | reverse | .[]' <<<"${list:-[]}" 2>/dev/null || true)"
+    fi
+  fi
+  [[ -n $REUSE_POINTS ]] && printf '%s\n' "$REUSE_POINTS"
+}
+
+reuse_from_points() {
+  local tree=$1 out files bytes
+  local -a points
+  [[ -s $NEW_FILES ]] || return 0
+  mapfile -t points < <(reuse_points)
+  ((${#points[@]})) || return 0
+  progress phase "$tree" "Looking for files the backup disk already has"
+  if [[ $DEST_REMOTE == 1 ]]; then
+    out="$(rgate reuse "$tree" "${points[@]}" <"$NEW_FILES" 2>>"$OMARCHY_TM_LOG")"
+  else
+    out="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/reuse.py" "$MNT" "$tree" "${points[@]}" <"$NEW_FILES" 2>>"$OMARCHY_TM_LOG")"
+  fi || { log_file "couldn't look for $(tree_name "$tree") already on the backup disk; copying as usual"; return 0; }
+  read -r files bytes <<<"$out"
+  [[ $files =~ ^[0-9]+$ && $bytes =~ ^[0-9]+$ ]] || return 0
+  ((files > 0)) || return 0
+  progress reused "$tree" "$bytes"
+  step "Reused $files files ($(numfmt --to=iec --suffix=B "$bytes")) the backup disk already had, instead of sending them again"
+  log_file "reused $files files ($bytes bytes) of $(tree_name "$tree") from older restore points"
 }
 
 # A small file from the backup disk's meta/ folder, into OUT. Fails if there
