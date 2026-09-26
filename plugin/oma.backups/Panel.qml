@@ -27,8 +27,10 @@ Panel {
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   property string page: "home"
   property bool showAllSnaps: false
-  // The health check's own settings, behind its gear (Settings page).
+  // Settings behind gears: the defaults suit nearly everyone.
+  property bool autoMore: false
   property bool healthMore: false
+  property bool toolsMore: false
   readonly property string healthWhen: {
     var at = Number(svc.schedule.health_at) || 0
     var when = at === 0 ? "midnight" : (at === 12 ? "noon" : (at % 12) + (at < 12 ? " am" : " pm"))
@@ -1132,25 +1134,43 @@ Panel {
                 foreground: root.foreground
                 fontFamily: root.fontFamily
               }
-              Toggle {
+              Row {
                 width: parent.width
-                label: "Back up automatically"
-                description: svc.scheduleOn
-                  ? "Skips quietly when the backup disk isn’t reachable or the battery is under 20%."
-                  : (svc.hasCapsule
-                    ? "Asks for the backup disk password once, so backups can run while you’re away."
-                    : "Set up a backup disk first.")
-                checked: svc.scheduleOn
-                enabled: svc.hasCapsule || svc.scheduleOn
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onClicked: {
-                  if (svc.scheduleOn) svc.setSchedule("enabled", "false")
-                  else svc.enableSchedule()
+                spacing: Style.space(8)
+                Toggle {
+                  id: autoToggle
+                  width: parent.width - (autoGear.visible ? autoGear.width + parent.spacing : 0)
+                  label: "Back up automatically"
+                  description: svc.scheduleOn
+                    ? ({ hourly: "Every hour", daily: "Once a day", weekly: "Once a week" }[svc.schedule.every] || "Once a day")
+                      + ". Skips quietly when the backup disk isn’t reachable or the battery is under 20%."
+                    : (svc.hasCapsule
+                      ? "Asks for the backup disk password once, so backups can run while you’re away."
+                      : "Set up a backup disk first.")
+                  checked: svc.scheduleOn
+                  enabled: svc.hasCapsule || svc.scheduleOn
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    if (svc.scheduleOn) svc.setSchedule("enabled", "false")
+                    else svc.enableSchedule()
+                  }
+                }
+                Button {
+                  id: autoGear
+                  visible: svc.scheduleOn
+                  anchors.verticalCenter: autoToggle.verticalCenter
+                  text: "\uf013"
+                  bordered: true
+                  selected: root.autoMore
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  tooltipText: "How often"
+                  onClicked: root.autoMore = !root.autoMore
                 }
               }
               ButtonGroup {
-                visible: svc.scheduleOn
+                visible: svc.scheduleOn && root.autoMore
                 options: [
                   { value: "hourly", label: "Hourly" },
                   { value: "daily", label: "Daily" },
@@ -1428,8 +1448,27 @@ Panel {
             // sense once this laptop has made a backup on it, so the whole
             // section stays out of the way until there is one (or until a Pi
             // is already paired, so it can still be unpaired).
+            // Set once and rarely touched again: out of the way behind one gear.
             Column {
-              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.leaveOutMode
+              visible: !root.leaveOutMode
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              Button {
+                width: parent.width
+                leftAlign: true
+                bordered: true
+                selected: root.toolsMore
+                iconText: "\uf013"
+                text: (root.toolsMore ? "Hide" : "Show") + ": Pi, rescue stick, a different disk, start over"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.toolsMore = !root.toolsMore
+              }
+            }
+
+            Column {
+              visible: (svc.snapshotCount > 0 || svc.remote !== null) && !root.leaveOutMode && root.toolsMore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1482,7 +1521,7 @@ Panel {
 
             // Needs the Pi, something on it to restore, and a linked laptop.
             Column {
-              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.leaveOutMode
+              visible: svc.remote !== null && svc.snapshotCount > 0 && svc.linked && !root.leaveOutMode && root.toolsMore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1552,7 +1591,7 @@ Panel {
             }
 
             Column {
-              visible: svc.hasCapsule && !root.leaveOutMode
+              visible: svc.hasCapsule && !root.leaveOutMode && root.toolsMore
               width: parent.width
               spacing: Style.space(10)
               PanelSeparator { foreground: root.foreground }
@@ -1627,7 +1666,7 @@ Panel {
               // Nothing here can be acted on until a restored system has its
               // files back, and a control that cannot be pressed is just noise.
               // The restore card on the home page is the way through.
-              visible: !root.leaveOutMode
+              visible: !root.leaveOutMode && root.toolsMore
               width: parent.width
               spacing: Style.space(12)
               PanelSeparator { foreground: root.foreground }
