@@ -1,6 +1,6 @@
 # OmaBackups — technical guide
 
-**v1.6.0.** The full detail: how each part works, what it changes on your
+**v1.6.1.** The full detail: how each part works, what it changes on your
 computer and on a Pi, and the command line. For what OmaBackups is and how to
 get started, see the [README](../README.md).
 
