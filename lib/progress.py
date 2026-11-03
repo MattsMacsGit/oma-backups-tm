@@ -331,7 +331,8 @@ class NewFiles:
                 self.f = None
 
     def feed(self, m: re.Match) -> None:
-        if (self.f is None or m.group("y") != ">" or m.group("x") != "f"
+        # ">" on a disk plugged into this computer, "<" when sending to a Pi.
+        if (self.f is None or m.group("y") not in ("<", ">") or m.group("x") != "f"
                 or m.group("flags") != "+" * 9 or not m.group("name")):
             return
         size = int(m.group("size"))
