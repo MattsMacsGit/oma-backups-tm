@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""oma-migrate picker: choose what comes back after a clean install.
+"""oma-migrate picker: choose what comes back after a fresh install.
 
 A full-screen list in the terminal, grouped like the scan (settings, apps,
 files, extras). Everything suggested "keep" starts ticked. Arrow keys or the
@@ -9,7 +9,7 @@ and saving waits until every page has been looked at to the bottom.
 
 Picks are saved to ~/.config/omarchy-backups/migrate.json, inside the home
 folder, so every backup carries them. Running the picker again opens that
-saved list rather than scanning, so after a clean install it is still the
+saved list rather than scanning, so after a fresh install it is still the
 old system's list and anything left behind can be picked later. "Scan
 again" (n) replaces it with a fresh scan of this computer, after a warning,
 and only once the new list is saved. The list records which install it came
@@ -274,7 +274,7 @@ class Picker:
 
         # Title
         x = self.put(0, 1, "oma-migrate", self.col(C_ACCENT, curses.A_BOLD))
-        self.put(0, x + 2, "Pick what comes back after a clean install")
+        self.put(0, x + 2, "Prepare for a fresh install")
         when = nice_date(self.m.scan["scanned_at"])
         if self.m.from_other_install:
             ver = f"Your old system's list · scanned {when} on Omarchy {self.m.scan['omarchy_version']}"
@@ -434,7 +434,7 @@ class Picker:
                 f"This replaces the saved list from {when} with a fresh scan of this",
                 "computer, and your picks start again from the suggestions.",
                 "",
-                "Only do this when you're planning your next clean install.",
+                "Only do this when you're planning your next fresh install.",
             ]
             if self.m.from_other_install:
                 body += [
@@ -660,7 +660,7 @@ def show() -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Pick what comes back after a clean install.")
+    ap = argparse.ArgumentParser(description="Pick what comes back after a fresh install.")
     ap.add_argument("--show", action="store_true", help="print the saved picks")
     a = ap.parse_args()
     if a.show:
@@ -670,7 +670,7 @@ def main() -> int:
         return 1
     previous = load_previous()
     if previous and previous.get("items"):
-        # The saved list, not a new scan: after a clean install this is the
+        # The saved list, not a new scan: after a fresh install this is the
         # only record of the old system. "Scan again" in the picker replaces it.
         model = Model(previous, previous)
     else:

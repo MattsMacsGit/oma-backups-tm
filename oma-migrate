@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# oma-migrate — pick what comes back after a clean install of Omarchy.
+# oma-migrate — pick what comes back after a fresh install of Omarchy.
 # Part of OmaBackups: the picks are saved in the home folder, so backups carry them.
 set -euo pipefail
 
@@ -9,7 +9,7 @@ PY="${OMARCHY_TM_PYTHON:-/usr/bin/python3}"
 
 usage() {
   cat <<USAGE
-oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back after a clean install
+oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back after a fresh install
 
   oma-migrate             go through the list and pick (saves your picks)
   oma-migrate show        print the picks you saved
@@ -18,9 +18,9 @@ oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back 
 
 Your picks are saved in ~/.config/omarchy-backups/migrate.json, so your next
 backup carries them. Opening the picker again shows that saved list, also
-after a clean install, so you can pick something you left behind. "Scan
+after a fresh install, so you can pick something you left behind. "Scan
 again" in the picker replaces it with a fresh scan of this computer: do that
-when you're planning your next clean install.
+when you're planning your next fresh install.
 USAGE
 }
 

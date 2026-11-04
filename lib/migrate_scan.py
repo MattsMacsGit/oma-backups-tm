@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """oma-migrate scanner: what the user added on top of Omarchy, and what
-each thing would bring back after a clean install.
+each thing would bring back after a fresh install.
 
 Read-only. It asks pacman, flatpak and a few tool managers what is
 installed, takes away everything Omarchy installs by itself, and looks for
@@ -169,7 +169,7 @@ class Sizer:
 # ------------------------------------------------- what Omarchy installs
 
 def install_id() -> str:
-    """Changes with every clean install (machine-id is made fresh by the
+    """Changes with every fresh install (machine-id is made fresh by the
     installer), so a saved list can tell this system from an earlier one.
     Only a hash is kept."""
     import hashlib
