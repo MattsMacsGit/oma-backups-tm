@@ -2134,7 +2134,7 @@ migrate_cleanup() {
 }
 
 migrate_open_list() {
-  local ts=${1:-} user=${SUDO_USER:-} home want label where c found="" rc out
+  local ts=${1:-} user=${SUDO_USER:-} home label where c found="" rc out
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose list to read (run it with sudo from your own account)"
   home="$(getent passwd "$user" | cut -d: -f6)"
@@ -2143,40 +2143,30 @@ migrate_open_list() {
   FAIL_TITLE="Couldn't read your list."
   backup_running && fail_backup "A backup is running. Try again once it has finished."
 
-  # Which restore points to look in: the one asked for, or the newest few
-  # from the same place (the newest is usually the one holding the list).
-  local -a cands=()
-  local snaps
-  snaps="$("$OMARCHY_TM_ROOT/omarchy-backups" snapshots --json 2>>"$OMARCHY_TM_LOG" || echo '[]')"
-  if [[ -n $ts ]]; then
-    [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups migrate-plan [TIMESTAMP]"
-    cands=("$ts")
-  else
-    mapfile -t cands < <(jq -r '[.[] | select(.valid and .has_home)] | .[:6] | .[].timestamp' <<<"$snaps")
-    ((${#cands[@]})) || fail_backup "There are no restore points to read your list from."
-  fi
-  want="$(source_for_ts "${cands[0]}")"
-
+  [[ -z $ts || $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-migrate apply [--dry-run] [TIMESTAMP]"
   MIGRATE_TMP="$(mktemp -d /run/oma-migrate.XXXXXX)"
   chmod 700 "$MIGRATE_TMP"
   trap migrate_cleanup EXIT
 
-  # After a Migrate my picks, the old system's list lives on in this home
-  # folder, where the picker adds to it. Then that list is the one to use,
-  # against the restore point the migration came from (kept since), not
-  # whatever is newest by now.
-  local local_list="$home/.config/omarchy-backups/migrate.json" this_id local_id earlier=""
+  # Which restore points to look in: the one asked for; after an earlier
+  # Migrate my picks, the one it came from (kept since), with the old
+  # system's list that now lives in this home folder, where the picker adds
+  # to it; otherwise the newest few on the backup (the newest is usually the
+  # one holding the list).
+  local -a cands=()
+  local snaps="[]" local_list="$home/.config/omarchy-backups/migrate.json" this_id local_id earlier=""
   this_id="$("$OMARCHY_TM_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); import migrate_scan as m; print(m.install_id())' "$OMARCHY_TM_ROOT/lib")"
   local_id="$(jq -r '.install_id // ""' "$local_list" 2>/dev/null || true)"
   earlier="$(jq -r '.snapshot // ""' "$OMARCHY_TM_STATE/migrated.json" 2>/dev/null || true)"
   M_LOCAL_LIST=0
-  if [[ -z ${1:-} && -n $local_id && $local_id != "$this_id" && $earlier =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+  if [[ -n $ts ]]; then
+    cands=("$ts")
+  elif [[ -n $local_id && $local_id != "$this_id" && $earlier =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
     cands=("$earlier")
-    want="$(source_for_ts "$earlier")"
     M_LOCAL_LIST=1
   fi
   close_stale_mapper "$LUKS_MAPPER"
-  pick_source "${cands[0]}"
+  if ((${#cands[@]})); then pick_source "${cands[0]}"; else pick_destination; fi
   rsync_link_flags
   open_destination
   # open_destination sets its own EXIT trap (remote_close) for a Pi, which
@@ -2186,11 +2176,23 @@ migrate_open_list() {
   where="the backup disk"
   [[ $DEST_REMOTE == 1 ]] && where="the Pi ($REMOTE_HOST)"
 
+  # The restore points, asked of the backup itself: on a computer that was
+  # only just connected, the list the panel keeps is still empty.
+  if [[ $DEST_REMOTE == 1 ]]; then
+    snaps="$(rgate list 2>>"$OMARCHY_TM_LOG" |
+      "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" --stdin --json 2>>"$OMARCHY_TM_LOG" || echo '[]')"
+  else
+    snaps="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/list_snapshots.py" "$MNT" --json 2>>"$OMARCHY_TM_LOG" || echo '[]')"
+  fi
+  if ((${#cands[@]} == 0)); then
+    mapfile -t cands < <(jq -r '[.[] | select(.valid and .has_home)] | sort_by(.timestamp) | reverse | .[:6] | .[].timestamp' <<<"$snaps" 2>/dev/null || true)
+    ((${#cands[@]})) || fail_backup "There are no restore points on $where to read your list from."
+  fi
+
   # No -s (--protect-args): the Pi's rrsync refuses it, and these paths
   # have no spaces to protect.
   local err="" ferr
   for c in "${cands[@]}"; do
-    [[ $(source_for_ts "$c") == "$want" ]] || continue
     if ((M_LOCAL_LIST)); then
       cp "$local_list" "$MIGRATE_TMP/list.json"
       found=$c
