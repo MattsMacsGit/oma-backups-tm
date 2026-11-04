@@ -183,13 +183,23 @@ def plan(lst: dict, user: str, home: str, check: bool = True) -> dict:
 
 # ----------------------------------------------------------------- report
 
+def nice_time(stamp: str | None) -> str:
+    import calendar
+    import time
+    try:
+        t = calendar.timegm(time.strptime(stamp or "", "%Y-%m-%dT%H:%M:%SZ"))
+        return time.strftime("%A %-d %b %H:%M", time.localtime(t))
+    except ValueError:
+        return stamp or "?"
+
+
 def report(pl: dict, results: dict[str, dict], label: str) -> str:
     L: list[str] = []
     w = L.append
     w("Migrate my picks: dry run. Nothing was changed.")
     w("")
     w(f"Restore point:  {label}")
-    w(f"Your list:      saved {pl.get('list_saved_at') or '?'} on Omarchy {pl.get('list_omarchy') or '?'}")
+    w(f"Your list:      saved {nice_time(pl.get('list_saved_at'))} on Omarchy {pl.get('list_omarchy') or '?'}")
     for warn in pl["warnings"]:
         w(f"Note:           {warn}")
     w("")
@@ -256,9 +266,16 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
     w(f"== Left behind ({len(lb)}), still in the backup if you change your mind")
     w("  " + ", ".join(x["name"] for x in lb))
     w("")
-    problems = missing_apps + missing_jobs
-    if problems:
-        w(f"{problems} thing(s) couldn't be found. Everything else is ready to migrate.")
+    unchecked = sum(1 for j in pl["jobs"] if results.get(j["id"], {}).get("error") or j["id"] not in results)
+    if missing_apps or missing_jobs or unchecked:
+        bits = []
+        if missing_apps:
+            bits.append(f"{missing_apps} app(s) couldn't be found")
+        if missing_jobs:
+            bits.append(f"{missing_jobs} setting(s) aren't in the restore point")
+        if unchecked:
+            bits.append(f"{unchecked} setting(s) couldn't be checked")
+        w("Not ready yet: " + "; ".join(bits) + ". Everything else is ready to migrate.")
     else:
         w("Everything on your list was found. Ready to migrate.")
     return "\n".join(L)

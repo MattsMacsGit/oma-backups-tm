@@ -2082,6 +2082,22 @@ cmd_files() {
 # guessed. Run as root: the backup is opened the way Restore my files opens
 # it (pick_source / open_destination), and the system side (os/) is read too.
 MIGRATE_TMP=""
+
+# rsync source and filters that fetch exactly one thing out of a restore
+# point by its folder: first line the folder (with a trailing /), then the
+# filter options. A name with filter wildcards in it ([ * ? \) is asked for
+# directly instead, since escaping those in filters is unreliable.
+migrate_pick_args() {
+  local rel=$1 parent base
+  parent="${rel%/*}"
+  base="${rel##*/}"
+  if [[ $parent == "$rel" || $base == *[][*?\\]* ]]; then
+    printf '%s\n' "$rel"
+    return 0
+  fi
+  printf '%s\n' "$parent/" "--include=/$base" "--include=/$base/***" "--exclude=*"
+}
+
 migrate_cleanup() {
   local rc=$?
   trap - EXIT
@@ -2161,12 +2177,21 @@ cmd_migrate_plan() {
     rel="$(jq -r --argjson i "$i" '.jobs[$i].rel' "$MIGRATE_TMP/plan.json")"
     [[ $tree == os || $tree == home ]] || continue
     [[ $rel != *..* ]] || continue
-    out="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --stats \
-      "$(d_target "$tree/$ts/$rel")" "$MIGRATE_TMP/empty/" 2>&1)" && rc=0 || rc=$?
+    # Ask for the folder it sits in, filtered down to this one name. Asked
+    # for directly, a link pointing outside the restore point (a script in
+    # ~/.local/bin linked into a venv) is refused by the Pi's rrsync, and
+    # the link itself is what comes back anyway.
+    local -a pick=()
+    mapfile -t pick < <(migrate_pick_args "$tree/$ts/$rel")
+    out="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --stats "${pick[@]:1}" \
+      "$(d_target "${pick[0]}")" "$MIGRATE_TMP/empty/" 2>&1)" && rc=0 || rc=$?
     bytes="$(sed -n 's/^Total file size: \([0-9,]*\) bytes.*/\1/p' <<<"$out" | tr -d ,)"
     files="$(sed -n 's/^Number of files: \([0-9,]*\).*/\1/p' <<<"$out" | tr -d ,)"
     missing=false
     grep -q 'No such file or directory' <<<"$out" && missing=true
+    # Fetched by its folder, a name that isn't there is no error to rsync:
+    # only the folder itself is counted (the item would make it 2 or more).
+    [[ $rc == 0 && ${#pick[@]} -gt 1 && ${files:-0} -le 1 ]] && missing=true
     jq -cn --arg id "$id" --argjson rc "$rc" --arg b "${bytes:-}" --arg f "${files:-}" --argjson m "$missing" \
       '{id: $id, rc: $rc, missing: $m, error: ($rc != 0 and ($m | not))}
         + (if $b != "" then {bytes: ($b | tonumber)} else {} end)
