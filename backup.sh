@@ -1096,6 +1096,12 @@ refuse_if_partial_restore() {
     gum style --foreground 8 "  would delete them from the backup's current copy."
     echo
     gum style --foreground 8 "  Bring them back first: open the plugin and press \"Put AI models back\"."
+  elif [[ $(jq -r '.level // ""' "$m" 2>/dev/null) == migrate ]]; then
+    gum style --foreground 8 "  Migrate my picks brought back your apps and settings from $snap. The"
+    gum style --foreground 8 "  folders you picked are still on the backup and not on this system yet,"
+    gum style --foreground 8 "  so backing up now would delete them from the backup's current copy."
+    echo
+    gum style --foreground 8 "  Bring them back first: open the plugin and press \"Restore my files\"."
   else
     gum style --foreground 8 "  Only your settings came back from $snap. Your documents, photos and"
     gum style --foreground 8 "  other files are still on the backup and not on this system, so backing"
@@ -1772,6 +1778,23 @@ cmd_restore_files() {
   # root's, and never an old uid that means someone else on this machine.
   TREE_FLAGS=(-a --ignore-existing --chown="$user:$group")
   for i in "${ex[@]}"; do [[ -n $i ]] && TREE_FLAGS+=("--exclude=$i"); done
+  # After Migrate my picks, only the folders ticked in the list come back
+  # (the marker's "only"); after a Quick System Rescue there is no "only"
+  # and everything does. The leave-out list above still applies inside them.
+  local -a only=()
+  local marker="$OMARCHY_TM_STATE/partial-restore.json" o
+  if [[ $(jq -r '.snapshot // ""' "$marker" 2>/dev/null) == "$ts" ]]; then
+    mapfile -t only < <(jq -r '(.only // [])[] | tostring | gsub("[\\n\\r]"; "")' "$marker" 2>/dev/null || true)
+  fi
+  if ((${#only[@]})); then
+    for o in "${only[@]}"; do
+      [[ -n $o && $o != */* && $o != . && $o != .. ]] || continue
+      o="$(printf '%s' "$o" | sed 's/[][*?\\]/\\&/g')"
+      TREE_FLAGS+=("--include=/$o" "--include=/$o/***")
+    done
+    TREE_FLAGS+=("--exclude=*")
+    log_file "restoring only the folders picked for the migration: ${only[*]}"
+  fi
 
   restore_state copying
   log_file "restoring files from $ts for $user (${#ex[@]} left out)"
@@ -2485,6 +2508,23 @@ cmd_migrate_apply() {
         done: ($before + ($items | split("\n") | map(select(. != ""))) | unique)}' >"$mf.tmp"
     mv "$mf.tmp" "$mf"
     chown --reference="$OMARCHY_TM_STATE" "$OMARCHY_TM_STATE"/kept-points.json "$mf" 2>/dev/null || true
+    # Restore my files comes next, through the same marker a Quick System
+    # Rescue leaves (the panel shows the button, automatic backups wait
+    # until the files are back), with one difference: "only" -- the folders
+    # ticked in the list, so what was left behind doesn't come back with
+    # them. Written once, by the first Migrate my picks, and never over a
+    # rescue's own marker.
+    local pm="$OMARCHY_TM_STATE/partial-restore.json"
+    if ((! M_LOCAL_LIST)) && [[ ! -e $pm ]]; then
+      local -a only=()
+      mapfile -t only < <(jq -r '.files[].paths[]' "$plan" | sed -n 's|^~/\([^/][^/]*\)$|\1|p' | grep -vx '\.\{1,2\}' || true)
+      if ((${#only[@]})); then
+        jq -n --arg s "$M_TS" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg src "$(dest_id)" --args \
+          '{snapshot: $s, level: "migrate", restored_at: $at, skipped_system: [], source: $src, only: $ARGS.positional}' \
+          "${only[@]}" >"$pm"
+        chown --reference="$OMARCHY_TM_STATE" "$pm" 2>/dev/null || true
+      fi
+    fi
     # The old system's list comes along, so the picker can add to it here.
     local ll="$home/.config/omarchy-backups/migrate.json"
     if ((! M_LOCAL_LIST)) && [[ ! -e $ll ]]; then
