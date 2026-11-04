@@ -2125,16 +2125,25 @@ cmd_migrate_plan() {
   where="the backup disk"
   [[ $DEST_REMOTE == 1 ]] && where="the Pi ($REMOTE_HOST)"
 
+  # No -s (--protect-args): the Pi's rrsync refuses it, and these paths
+  # have no spaces to protect.
+  local err="" ferr
   for c in "${cands[@]}"; do
     [[ $(source_for_ts "$c") == "$want" ]] || continue
-    if rsync "${RSYNC_RSH[@]}" -s --no-motd -q \
-      "$(d_target "home/$c/$user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>>"$OMARCHY_TM_LOG"; then
+    if ferr="$(rsync "${RSYNC_RSH[@]}" --no-motd -q \
+      "$(d_target "home/$c/$user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>&1)"; then
       found=$c
       break
     fi
+    printf '%s\n' "$ferr" >>"$OMARCHY_TM_LOG"
+    # "Not in this restore point" is expected for older ones; anything else
+    # means the reading itself went wrong, and the user should hear that.
+    grep -q 'No such file or directory' <<<"$ferr" || err="$ferr"
   done
-  [[ -n $found ]] ||
+  if [[ -z $found ]]; then
+    [[ -n $err ]] && fail_backup "Couldn't read from $where: $(tail -1 <<<"$err")"
     fail_backup "None of the newest restore points holds your list. Run oma-migrate, save your list, back up, then try again."
+  fi
   ts=$found
   label="$(jq -r --arg t "$ts" '(.[] | select(.timestamp == $t) | .label) // $t' <<<"$snaps") on $where"
 
@@ -2152,7 +2161,7 @@ cmd_migrate_plan() {
     rel="$(jq -r --argjson i "$i" '.jobs[$i].rel' "$MIGRATE_TMP/plan.json")"
     [[ $tree == os || $tree == home ]] || continue
     [[ $rel != *..* ]] || continue
-    out="$(rsync "${RSYNC_RSH[@]}" -s --no-motd -n -a --stats \
+    out="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --stats \
       "$(d_target "$tree/$ts/$rel")" "$MIGRATE_TMP/empty/" 2>&1)" && rc=0 || rc=$?
     bytes="$(sed -n 's/^Total file size: \([0-9,]*\) bytes.*/\1/p' <<<"$out" | tr -d ,)"
     files="$(sed -n 's/^Number of files: \([0-9,]*\).*/\1/p' <<<"$out" | tr -d ,)"
