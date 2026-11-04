@@ -290,6 +290,37 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
     return "\n".join(L)
 
 
+def done_items(pl: dict, applied: Path, user: str) -> list[str]:
+    """Items that are fully back: their app is installed now (if they are an
+    app) and every one of their settings went in."""
+    results: dict[str, bool] = {}
+    try:
+        for line in applied.read_text().splitlines():
+            if line.strip():
+                r = json.loads(line)
+                results[r["job"]] = bool(r.get("ok"))
+    except OSError:
+        pass
+    jobs_of: dict[str, list[str]] = {}
+    for j in pl["jobs"]:
+        jobs_of.setdefault(j["id"].split("#")[0], []).append(j["id"])
+    installed: dict[str, bool] = {}
+    for a in pl["installs"]:
+        if a["how"] == "pacman":
+            installed[a["id"]] = all(run(["pacman", "-Q", p])[0] == 0 for p in a["packages"])
+        elif a["how"] == "flatpak":
+            installed[a["id"]] = run(["flatpak", "info", a["packages"][0]])[0] == 0
+        else:
+            installed[a["id"]] = True  # a tool: its installer said so, or a problem was listed
+    out = []
+    for item in set(jobs_of) | set(installed):
+        if not installed.get(item, True):
+            continue
+        if all(results.get(j, False) for j in jobs_of.get(item, [])):
+            out.append(item)
+    return sorted(out)
+
+
 def main() -> int:
     if len(sys.argv) >= 5 and sys.argv[1] == "plan":
         lst = json.loads(Path(sys.argv[2]).read_text())
@@ -311,6 +342,9 @@ def main() -> int:
                 r = json.loads(line)
                 results[r["id"]] = r
         print(report(pl, results, sys.argv[4]))
+        return 0
+    if len(sys.argv) == 5 and sys.argv[1] == "done":
+        print("\n".join(done_items(json.loads(Path(sys.argv[2]).read_text()), Path(sys.argv[3]), sys.argv[4])))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

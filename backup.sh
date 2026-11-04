@@ -2262,7 +2262,7 @@ cmd_migrate_apply() {
   local into="" force=0 ts=""
   while (($#)); do
     case $1 in
-      --into) into=${2:-}; shift 2 ;;
+      --into) [[ -n ${2:-} ]] || die "--into needs a folder"; into=$2; shift 2 ;;
       --force) force=1; shift ;;
       *) ts=$1; shift ;;
     esac
@@ -2339,36 +2339,36 @@ cmd_migrate_apply() {
     done < <(jq -r '.installs[] | select(.command // "" != "") | [.name, .command] | @tsv' "$plan")
   fi
 
-  # Services: stopped while their settings go in, then back as the old
-  # system had them.
+  # Which services the old system had switched on: every *.wants link in its
+  # /etc/systemd/system, in one listing (they live under different targets:
+  # tailscaled in multi-user, bluetooth in bluetooth.target...).
   local -a services=() was_on=() turn_on=()
-  local svc
+  local svc enabled=""
   if [[ -z $into ]]; then
     mapfile -t services < <(jq -r '.services[]' "$plan")
-    # Which services the old system had switched on: every *.wants link in
-    # its /etc/systemd/system, in one listing (they live under different
-    # targets: tailscaled in multi-user, bluetooth in bluetooth.target...).
-    local enabled=""
     ((${#services[@]})) && enabled="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --out-format='%n' \
       "$(d_target "os/$M_TS/etc/systemd/system/")" "$MIGRATE_TMP/empty/" 2>>"$OMARCHY_TM_LOG" || true)"
-    for svc in "${services[@]}"; do
-      if systemctl is-active -q "$svc.service" 2>/dev/null; then
-        was_on+=("$svc")
-        systemctl stop "$svc.service" || problems+=("couldn't stop $svc")
-      fi
-      grep -qE "\.wants/$svc\.service\$" <<<"$enabled" && turn_on+=("$svc")
-    done
   fi
 
+  # Step 1: fetch everything from the backup while every service still runs.
+  # Stopping one mid-way could cut the way to the backup itself
+  # (NetworkManager, or tailscaled when the Pi is reached over Tailscale), so
+  # a service's own settings are fetched into a holding folder on disk
+  # (not /run: AI models can be many GB) and only put in place in step 2.
+  local stage=""
+  [[ -z $into && ${#services[@]} -gt 0 ]] && { stage="$(mktemp -d /var/tmp/oma-migrate.XXXXXX)"; chmod 700 "$stage"; }
   log "bringing your settings back from $M_LABEL"
-  local tree rel dest parent item rc done_items="" ok=0 failed=0
+  local tree rel dest parent item rc jid jsvc ok=0
   local -a pick=() flags=()
+  : >"$MIGRATE_TMP/applied.jsonl"
   n="$(jq '.jobs | length' "$plan")"
   for ((i = 0; i < n; i++)); do
+    jid="$(jq -r --argjson i "$i" '.jobs[$i].id' "$plan")"
     tree="$(jq -r --argjson i "$i" '.jobs[$i].tree' "$plan")"
     rel="$(jq -r --argjson i "$i" '.jobs[$i].rel' "$plan")"
     dest="$(jq -r --argjson i "$i" '.jobs[$i].dest' "$plan")"
     item="$(jq -r --argjson i "$i" '.jobs[$i].item' "$plan")"
+    jsvc="$(jq -r --argjson i "$i" '.jobs[$i].service // ""' "$plan")"
     [[ $tree == os || $tree == home ]] || continue
     [[ $rel != *..* && $dest == /* && $dest != *..* ]] || { problems+=("skipped an odd path: $dest"); continue; }
     if [[ $tree == home ]]; then
@@ -2377,8 +2377,16 @@ cmd_migrate_apply() {
     else
       flags=(-a --numeric-ids)
     fi
-    migrate_present "$tree/$M_TS/$rel" || { problems+=("$item: ${dest/#$home/\~} isn't in the restore point"); continue; }
-    parent="${into}$(dirname "$dest")"
+    if ! migrate_present "$tree/$M_TS/$rel"; then
+      problems+=("$item: ${dest/#$home/\~} isn't in the restore point")
+      jq -cn --arg j "$jid" '{job: $j, ok: false}' >>"$MIGRATE_TMP/applied.jsonl"
+      continue
+    fi
+    if [[ -n $stage && -n $jsvc ]]; then
+      parent="$stage/$i"
+    else
+      parent="${into}$(dirname "$dest")"
+    fi
     if [[ ! -d $parent ]]; then
       mkdir -p "$parent"
       # Folders made in the home folder belong to the user, not root.
@@ -2391,23 +2399,70 @@ cmd_migrate_apply() {
     rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" --no-motd "${flags[@]}" "${pick[@]:1}" \
       "$(d_target "${pick[0]}")" "$parent/" 2>>"$OMARCHY_TM_LOG" && rc=0 || rc=$?
     if ((rc == 0)); then
-      ok=$((ok + 1))
-      printf '  %s  %s\n' "done" "${dest/#$home/\~}"
-      done_items+="$(jq -r --argjson i "$i" '.jobs[$i].id | split("#")[0]' "$plan")"$'\n'
+      if [[ $parent == "$stage"/* ]]; then
+        printf '  %s  %s\n' "fetched" "$dest (goes in once $jsvc is stopped)"
+        jq -cn --arg j "$jid" --arg s "$jsvc" --arg p "$parent" --arg d "$dest" \
+          '{job: $j, staged: $p, service: $s, dest: $d}' >>"$MIGRATE_TMP/staged.jsonl"
+      else
+        ok=$((ok + 1))
+        printf '  %s  %s\n' "done" "${dest/#$home/\~}"
+        jq -cn --arg j "$jid" '{job: $j, ok: true}' >>"$MIGRATE_TMP/applied.jsonl"
+      fi
     else
-      failed=$((failed + 1))
       problems+=("$item: copying ${dest/#$home/\~} failed (rsync $rc)")
+      jq -cn --arg j "$jid" '{job: $j, ok: false}' >>"$MIGRATE_TMP/applied.jsonl"
     fi
   done
 
-  for svc in "${turn_on[@]}"; do
-    systemctl enable "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't switch $svc on")
-  done
+  # Nothing more is needed from the backup: let it go before any service
+  # stops (the trap's second close is harmless).
+  release_source
+  remote_close || true
+
+  # Step 2: each service's settings go in with it stopped, then it comes back
+  # as the old system had it. The network managers are never stopped (that
+  # would drop the network) or switched on (a new release may use the other
+  # one); they are told to reload instead. A service is only switched on if
+  # this system has it installed.
+  local staged sjob spath sdest
   for svc in "${services[@]}"; do
+    [[ -f $MIGRATE_TMP/staged.jsonl ]] && grep -q "\"service\":\"$svc\"" "$MIGRATE_TMP/staged.jsonl" || continue
+    local live=0
+    [[ $svc == NetworkManager || $svc == iwd ]] && live=1
+    if ((!live)) && systemctl is-active -q "$svc.service" 2>/dev/null; then
+      was_on+=("$svc")
+      systemctl stop "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't stop $svc")
+    fi
+    while IFS=$'\t' read -r sjob spath sdest; do
+      mkdir -p "$(dirname "$sdest")"
+      if rsync -a --numeric-ids "$spath/" "$(dirname "$sdest")/" 2>>"$OMARCHY_TM_LOG"; then
+        ok=$((ok + 1))
+        printf '  %s  %s\n' "done" "$sdest"
+        jq -cn --arg j "$sjob" '{job: $j, ok: true}' >>"$MIGRATE_TMP/applied.jsonl"
+      else
+        problems+=("putting $sdest in place failed")
+        jq -cn --arg j "$sjob" '{job: $j, ok: false}' >>"$MIGRATE_TMP/applied.jsonl"
+      fi
+    done < <(jq -r --arg s "$svc" 'select(.service == $s) | [.job, .staged, .dest] | @tsv' "$MIGRATE_TMP/staged.jsonl")
+    if ((live)); then
+      [[ $svc == NetworkManager ]] && systemctl is-active -q NetworkManager.service 2>/dev/null &&
+        { nmcli connection reload 2>>"$OMARCHY_TM_LOG" || problems+=("NetworkManager didn't reload its connections"); }
+      continue
+    fi
+    if grep -qE "\.wants/$svc\.service\$" <<<"$enabled" && systemctl cat "$svc.service" >/dev/null 2>&1; then
+      turn_on+=("$svc")
+      systemctl enable "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't switch $svc on")
+    fi
     if [[ " ${was_on[*]} ${turn_on[*]} " == *" $svc "* ]]; then
       systemctl start "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't start $svc")
     fi
   done
+  [[ -n $stage ]] && rm -rf "$stage"
+
+  # Which items are back: app installed (if it is one) and every one of its
+  # settings in place.
+  local done_items=""
+  done_items="$("$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" done "$plan" "$MIGRATE_TMP/applied.jsonl" "$user" 2>>"$OMARCHY_TM_LOG" || true)"
 
   if [[ -z $into ]]; then
     # Keep the restore point: what was left behind is only there now.
