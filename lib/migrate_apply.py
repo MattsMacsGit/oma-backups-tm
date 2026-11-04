@@ -246,8 +246,12 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
                 parts.append(f"{j['path']} ({human(b) if b is not None else '?'})")
         extra = ""
         svc = sorted({j["service"] for j in jobs if j.get("service")})
-        if svc:
-            extra = f"   stops {', '.join(svc)} while copying"
+        live = [x for x in svc if x in ("NetworkManager", "iwd")]
+        stop = [x for x in svc if x not in live]
+        if stop:
+            extra = f"   goes in with {', '.join(stop)} stopped"
+        elif live:
+            extra = f"   {', '.join(live)} reloads it (never stopped)"
         w(f"  {name}{extra}")
         for p in parts:
             w(f"      {p}")
