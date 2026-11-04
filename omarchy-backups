@@ -38,6 +38,8 @@ Every day
 Setting up
   disks [--json]          every disk, and what is on it
   first-run /dev/sdX      set up a disk, ready for its first backup
+  connect [/dev/sdX]      Connect to your old backup: an existing backup disk
+                          becomes this computer's again (nothing is formatted)
   format-disk /dev/sdX [--yes] [--force] [--skip-live] [--iso PATH]
                           set up a disk and nothing else
   link [--refresh]        stop everyday actions asking for a password
@@ -175,6 +177,43 @@ case "$cmd" in
     exec "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/doctor.py" "$@"
     ;;
   disks) disks_cmd "$@" ;;
+  connect)
+    # Connect to your old backup, on a USB disk: an existing OmaBackups disk
+    # becomes this computer's backup disk again -- after a fresh install, or
+    # on another computer. Nothing is formatted or copied; it takes the disk
+    # password once to add this computer's unlock key, records the disk, and
+    # links. (A Pi: oma-backups remote pair HOST, which pairs over the network.)
+    require_root connect "$@"
+    part=""
+    if [[ -n ${1:-} ]]; then
+      [[ -b $1 ]] || die "$1 isn't a disk."
+      lsblk -nr -o LABEL "$1" 2>/dev/null | grep -qxE "$(IFS='|'; echo "${OMA_LABELS_EFI[*]}|${OMA_LABELS_LIVE[*]}")" ||
+        die "$1 isn't an OmaBackups backup disk (it has none of its partitions)."
+      part="$(lsblk -n -p -o PATH,FSTYPE "$1" 2>/dev/null | awk '$2=="crypto_LUKS"{print $1; exit}')"
+    else
+      part="$(capsule_luks_partition 2>/dev/null || true)"
+    fi
+    [[ -n $part && -b $part ]] ||
+      die "No OmaBackups backup disk is plugged in. Plug it in and try again. (Backups on a Pi? Use: oma-backups remote pair PI-NAME)"
+    uuid="$(luks_uuid_of "$part")"
+    [[ -n $uuid ]] || die "Couldn't read the backup disk's encryption ID."
+    init_config
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/compile_excludes.py" >/dev/null
+    echo
+    gum style --bold "Connect to your old backup"
+    gum style --foreground 8 "  The backup disk on $part. Nothing on it is changed or formatted."
+    ensure_capsule_key "$part" || die "That password didn't open the backup disk."
+    set_current_capsule "$uuid"
+    "$OMARCHY_TM_ROOT/link.sh" --quiet || echo "Couldn't link this computer; backups will ask for your password. Try: oma-backups link"
+    echo
+    gum style --bold --foreground 2 "● Connected to your backup disk."
+    if [[ -f /etc/omarchy-backups/remote.json ]]; then
+      gum style --foreground 8 "  This computer is paired with a Pi too: backups go to this disk while"
+      gum style --foreground 8 "  it's plugged in, and to the Pi when it isn't."
+    fi
+    gum style --foreground 8 "  Next: Migrate my picks (oma-migrate apply), then Restore my files."
+    [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
+    ;;
   first-run)
     disk=${1:-}
     [[ -n $disk ]] || die "usage: oma-backups first-run /dev/sdX"

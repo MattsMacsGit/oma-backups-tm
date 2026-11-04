@@ -15,6 +15,10 @@ oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back 
   oma-migrate show        print the picks you saved
   oma-migrate scan        what you added on top of Omarchy, as a plain list
   oma-migrate scan --json the same, for scripts
+  oma-migrate connect PI-NAME
+                          Connect to your old backup on a Pi (pairs over the
+                          network; the backup disk stays in the Pi)
+  oma-migrate connect     Connect to your old backup on the USB disk plugged in
   oma-migrate apply --dry-run [TIMESTAMP]
                           Migrate my picks, as a dry run: read your list out of
                           the newest restore point and say what it would do
@@ -36,6 +40,14 @@ USAGE
 case "${1:-}" in
   "" | pick) exec "$PY" "$ROOT/lib/migrate_pick.py" ;;
   show) exec "$PY" "$ROOT/lib/migrate_pick.py" --show ;;
+  connect)
+    # Connect to your old backup: a Pi by name (pairs over the network), or
+    # the OmaBackups disk plugged in here.
+    shift
+    if [[ -n ${1:-} && ${1:-} != /dev/* ]]; then
+      exec sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$1"
+    fi
+    exec sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect "$@" ;;
   scan) shift; exec "$PY" "$ROOT/lib/migrate_scan.py" "$@" ;;
   apply)
     shift
