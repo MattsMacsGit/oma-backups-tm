@@ -168,6 +168,18 @@ class Sizer:
 
 # ------------------------------------------------- what Omarchy installs
 
+def install_id() -> str:
+    """Changes with every clean install (machine-id is made fresh by the
+    installer), so a saved list can tell this system from an earlier one.
+    Only a hash is kept."""
+    import hashlib
+    try:
+        mid = Path("/etc/machine-id").read_text().strip()
+    except OSError:
+        return ""
+    return hashlib.sha256(("oma-migrate:" + mid).encode()).hexdigest()[:16]
+
+
 def omarchy_version() -> str:
     out = run(["pacman", "-Q", "omarchy"]).split()
     if len(out) > 1:
@@ -728,6 +740,7 @@ def scan(sizes: bool, quiet: bool) -> dict:
         "scanned_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "omarchy_version": omarchy_version(),
         "user": USER,
+        "install_id": install_id(),
         "sizes_measured": sizes,
         "ran_as_admin": os.geteuid() == 0,
         "groups": [{"id": g, "title": GROUP_TITLES[g]} for g in GROUP_ORDER],

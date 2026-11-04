@@ -8,8 +8,13 @@ whole list doesn't fit on one screen it is split into pages, one per group,
 and saving waits until every page has been looked at to the bottom.
 
 Picks are saved to ~/.config/omarchy-backups/migrate.json, inside the home
-folder, so every backup carries them. Running the picker again starts from
-the saved picks.
+folder, so every backup carries them. Running the picker again opens that
+saved list rather than scanning, so after a clean install it is still the
+old system's list and anything left behind can be picked later. "Scan
+again" (n) replaces it with a fresh scan of this computer, after a warning,
+and only once the new list is saved. The list records which install it came
+from (a hash of /etc/machine-id), so the picker can say when it's showing an
+old system's list.
 
   migrate_pick.py           pick
   migrate_pick.py --show    print the saved picks
@@ -62,6 +67,8 @@ class Model:
         self.by_group = {g["id"]: [i for i in self.items if i["group"] == g["id"]] for g in self.groups}
         self.seen: set[str] = set()
         self.dirty = False
+        sid = scan.get("install_id", "")
+        self.from_other_install = bool(sid) and sid != ms.install_id()
 
     def kept(self) -> list[dict]:
         return [i for i in self.items if i["keep"]]
@@ -96,6 +103,7 @@ class Model:
             "scanned_at": self.scan["scanned_at"],
             "omarchy_version": self.scan["omarchy_version"],
             "user": self.scan["user"],
+            "install_id": self.scan.get("install_id", ""),
             "picks": {i["id"]: i["keep"] for i in self.items},
             "groups": self.groups,
             "items": self.items,
@@ -267,8 +275,12 @@ class Picker:
         # Title
         x = self.put(0, 1, "oma-migrate", self.col(C_ACCENT, curses.A_BOLD))
         self.put(0, x + 2, "Pick what comes back after a clean install")
-        ver = f"Omarchy {self.m.scan['omarchy_version']}"
-        self.put(0, w - len(ver) - 2, ver, self.col(C_MUTED))
+        when = nice_date(self.m.scan["scanned_at"])
+        if self.m.from_other_install:
+            ver = f"Your old system's list · scanned {when} on Omarchy {self.m.scan['omarchy_version']}"
+        else:
+            ver = f"Scanned {when} · Omarchy {self.m.scan['omarchy_version']}"
+        self.put(0, w - len(ver) - 2, ver, self.col(C_YELLOW if self.m.from_other_install else C_MUTED))
 
         # Tabs
         self.tab_spans = []
@@ -384,8 +396,12 @@ class Picker:
             x = self.put(y, x, k, self.col(C_ACCENT, curses.A_BOLD))
             x = self.put(y, x + 1, d, self.col(C_MUTED)) + 3
         self.button_spans = {}
-        save_l, quit_l = " Enter  Save picks ", " q  Quit "
+        save_l, quit_l, scan_l = " Enter  Save picks ", " q  Quit ", " n  Scan again "
         sx = w - len(save_l) - len(quit_l) - 4
+        if sx - len(scan_l) - 2 > x:
+            nx = sx - len(scan_l) - 2
+            self.button_spans["rescan"] = (nx, nx + len(scan_l), y)
+            self.put(y, nx, scan_l, curses.A_REVERSE)
         if sx > x:
             self.button_spans["quit"] = (sx, sx + len(quit_l), y)
             self.put(y, sx, quit_l, curses.A_REVERSE)
@@ -410,6 +426,25 @@ class Picker:
                 "",
                 "Enter  save        Esc  go back",
             ]
+        elif self.modal == "rescan":
+            when = nice_date(self.m.scan["scanned_at"])
+            body = [
+                "Scan this computer again?",
+                "",
+                f"This replaces the saved list from {when} with a fresh scan of this",
+                "computer, and your picks start again from the suggestions.",
+                "",
+                "Only do this when you're planning your next clean install.",
+            ]
+            if self.m.from_other_install:
+                body += [
+                    "",
+                    "This list is from your OLD system. Once replaced, you can't pick from it",
+                    "here any more. (A copy stays in the backup you made before the wipe.)",
+                ]
+            body += ["", "Nothing is replaced until you look through the new list and save.", "", "y  scan again        n  go back"]
+        elif self.modal == "scanning":
+            body = ["Scanning this computer …", "", "This takes a few seconds."]
         else:
             body = ["Quit without saving?", "", "Your changes on this screen will be lost.", "", "y  quit        n  go back"]
         bw = min(w - 4, max(len(s) for s in body) + 6)
@@ -431,6 +466,12 @@ class Picker:
             if key in (10, 13, curses.KEY_ENTER):
                 return "save"
             if key in (27, ord("n"), ord("q")):
+                self.modal = None
+            return None
+        if self.modal == "rescan":
+            if key in (ord("y"), ord("Y")):
+                return "rescan"
+            if key in (27, ord("n"), ord("N"), 10, 13, ord("q")):
                 self.modal = None
             return None
         if self.modal == "quit":
@@ -466,6 +507,8 @@ class Picker:
             self.go_page(self.page - 1)
         elif ord("1") <= key <= ord("9") and key - ord("1") < len(self.pages):
             self.go_page(key - ord("1"))
+        elif key == ord("n"):
+            self.modal = "rescan"
         elif key == ord("r"):
             for g in self.pages[self.page]:
                 self.m.reset(self.m.by_group[g["id"]])
@@ -483,6 +526,15 @@ class Picker:
             self.layout()
             self.scroll_to_cursor()
         return None
+
+    def replace_model(self, model: Model) -> None:
+        self.m = model
+        self.m.dirty = True
+        self.modal = None
+        self.page = 0
+        self.cursor, self.offset = {}, {}
+        self.layout()
+        self.flash("Fresh scan of this computer. Look through every page, then save to replace the old list.", C_ACCENT)
 
     def try_save(self) -> None:
         todo = self.m.unseen()
@@ -525,6 +577,8 @@ class Picker:
             if my == y and x0 <= mx < x1:
                 if name == "save":
                     self.try_save()
+                elif name == "rescan":
+                    self.modal = "rescan"
                 else:
                     return self.handle(ord("q"))
                 return None
@@ -540,8 +594,17 @@ class Picker:
         return None
 
 
-def run_picker(model: Model) -> str:
-    def main(scr) -> str:
+def nice_date(stamp: str) -> str:
+    try:
+        import calendar
+        t = time.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ")
+        return time.strftime("%-d %b %Y", time.localtime(calendar.timegm(t)))
+    except (ValueError, TypeError):
+        return stamp or "an earlier date"
+
+
+def run_picker(model: Model) -> tuple[str, Model]:
+    def main(scr) -> tuple[str, Model]:
         curses.curs_set(0)
         if curses.has_colors():
             curses.start_color()
@@ -563,8 +626,13 @@ def run_picker(model: Model) -> str:
         while True:
             p.draw()
             result = p.handle(scr.getch())
+            if result == "rescan":
+                p.modal = "scanning"
+                p.draw()
+                p.replace_model(Model(ms.scan(sizes=True, quiet=True), None))
+                continue
             if result:
-                return result
+                return result, p.m
 
     os.environ.setdefault("ESCDELAY", "25")
     return curses.wrapper(main)
@@ -598,10 +666,14 @@ def main() -> int:
         print("oma-migrate: the picker needs a terminal. Use 'oma-migrate scan --json' from scripts.", file=sys.stderr)
         return 1
     previous = load_previous()
-    print("oma-migrate: looking at what's on this computer …", file=sys.stderr)
-    scan = ms.scan(sizes=True, quiet=True)
-    model = Model(scan, previous)
-    result = run_picker(model)
+    if previous and previous.get("items"):
+        # The saved list, not a new scan: after a clean install this is the
+        # only record of the old system. "Scan again" in the picker replaces it.
+        model = Model(previous, previous)
+    else:
+        print("oma-migrate: looking at what's on this computer …", file=sys.stderr)
+        model = Model(ms.scan(sizes=True, quiet=True), None)
+    result, model = run_picker(model)
     if result != "save":
         print("Nothing saved." + (f" Your earlier picks are still in {PICKS_FILE}." if previous else ""))
         return 0
