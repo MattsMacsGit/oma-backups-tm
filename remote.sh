@@ -26,7 +26,8 @@ press_enter() {
 # command when there was no terminal — after remote.json had already been
 # written, so the laptop was left thinking it had a Pi it had never checked.
 press_ready() {
-  [[ -r /dev/tty ]] && read -r -p "Press Enter once it says \"This Pi is ready\"." _ </dev/tty || true
+  local done=${PI_DONE_TEXT:-This Pi is ready}
+  [[ -r /dev/tty ]] && read -r -p "Press Enter once it says \"$done\"." _ </dev/tty || true
 }
 
 fail() {
@@ -130,8 +131,9 @@ cmd_pair() {
   mv "$OMA_REMOTE_CONF.tmp" "$OMA_REMOTE_CONF"
   rm -f "$OMA_REMOTE_KNOWN"
 
-  local setup ask
+  local setup ask PI_DONE_TEXT="This Pi is ready"
   if ((network)); then
+    PI_DONE_TEXT="Done. Gatekeeper version"
     setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --repo $OMA_REPO_RAW --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
     ask="Let this laptop in on $host now? You'll log in to it as usual and type its sudo password."
     echo
