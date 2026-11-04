@@ -35,6 +35,10 @@ case "${1:-}" in
     shift
     [[ ${1:-} == --dry-run ]] || { echo "oma-migrate apply: only --dry-run so far (Migrate my picks is being built)" >&2; exit 2; }
     shift
+    # sudo asks on the terminal itself, so this works with the output piped too.
+    if [[ $EUID -ne 0 ]]; then
+      exec sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" migrate-plan "$@"
+    fi
     exec "$ROOT/omarchy-backups" migrate-plan "$@" ;;
   -h | --help | help) usage ;;
   *) usage >&2; exit 2 ;;
