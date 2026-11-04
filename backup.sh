@@ -45,6 +45,7 @@ while [[ $# -gt 0 ]]; do
     --put-back-system) MODE=put_back_system; shift ;;
     --restore-files) MODE=restore_files; shift; break ;;
     --migrate-plan) MODE=migrate_plan; shift; break ;;
+    --migrate-apply) MODE=migrate_apply; shift; break ;;
     --health) MODE=health; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
@@ -2107,7 +2108,7 @@ migrate_cleanup() {
   exit "$rc"
 }
 
-cmd_migrate_plan() {
+migrate_open_list() {
   local ts=${1:-} user=${SUDO_USER:-} home want label where c found="" rc out
   OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
   [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose list to read (run it with sudo from your own account)"
@@ -2134,6 +2135,21 @@ cmd_migrate_plan() {
   MIGRATE_TMP="$(mktemp -d /run/oma-migrate.XXXXXX)"
   chmod 700 "$MIGRATE_TMP"
   trap migrate_cleanup EXIT
+
+  # After a Migrate my picks, the old system's list lives on in this home
+  # folder, where the picker adds to it. Then that list is the one to use,
+  # against the restore point the migration came from (kept since), not
+  # whatever is newest by now.
+  local local_list="$home/.config/omarchy-backups/migrate.json" this_id local_id earlier=""
+  this_id="$("$OMARCHY_TM_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); import migrate_scan as m; print(m.install_id())' "$OMARCHY_TM_ROOT/lib")"
+  local_id="$(jq -r '.install_id // ""' "$local_list" 2>/dev/null || true)"
+  earlier="$(jq -r '.snapshot // ""' "$OMARCHY_TM_STATE/migrated.json" 2>/dev/null || true)"
+  M_LOCAL_LIST=0
+  if [[ -z ${1:-} && -n $local_id && $local_id != "$this_id" && $earlier =~ ^[0-9]{8}T[0-9]{6}Z$ ]]; then
+    cands=("$earlier")
+    want="$(source_for_ts "$earlier")"
+    M_LOCAL_LIST=1
+  fi
   close_stale_mapper "$LUKS_MAPPER"
   pick_source "${cands[0]}"
   rsync_link_flags
@@ -2146,6 +2162,11 @@ cmd_migrate_plan() {
   local err="" ferr
   for c in "${cands[@]}"; do
     [[ $(source_for_ts "$c") == "$want" ]] || continue
+    if ((M_LOCAL_LIST)); then
+      cp "$local_list" "$MIGRATE_TMP/list.json"
+      found=$c
+      break
+    fi
     if ferr="$(rsync "${RSYNC_RSH[@]}" --no-motd -q \
       "$(d_target "home/$c/$user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>&1)"; then
       found=$c
@@ -2163,9 +2184,17 @@ cmd_migrate_plan() {
   ts=$found
   label="$(jq -r --arg t "$ts" '(.[] | select(.timestamp == $t) | .label) // $t' <<<"$snaps") on $where"
 
-  log "found your list in the restore point from $label; checking each thing on it (nothing is copied)"
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" \
+  log "found your list in the restore point from $label"
+  local -a done_arg=()
+  [[ $(jq -r '.snapshot // ""' "$OMARCHY_TM_STATE/migrated.json" 2>/dev/null) == "$ts" ]] &&
+    done_arg=(--done="$OMARCHY_TM_STATE/migrated.json")
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" "${done_arg[@]}" \
     >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your list."
+  M_TS=$ts M_USER=$user M_HOME=$home M_LABEL=$label M_WHERE=$where
+}
+
+migrate_check_jobs() {
+  local ts=$M_TS rc out
 
   mkdir -p "$MIGRATE_TMP/empty"
   : >"$MIGRATE_TMP/results.jsonl"
@@ -2197,9 +2226,228 @@ cmd_migrate_plan() {
         + (if $b != "" then {bytes: ($b | tonumber)} else {} end)
         + (if $f != "" then {files: ($f | tonumber)} else {} end)' >>"$MIGRATE_TMP/results.jsonl"
   done
+}
+
+cmd_migrate_plan() {
+  migrate_open_list "${1:-}"
+  log "checking each thing on it (nothing is copied)"
+  migrate_check_jobs
   echo
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" report \
-    "$MIGRATE_TMP/plan.json" "$MIGRATE_TMP/results.jsonl" "$label"
+    "$MIGRATE_TMP/plan.json" "$MIGRATE_TMP/results.jsonl" "$M_LABEL"
+}
+
+# Is one thing in the restore point? Same fetch-by-folder as the checks.
+migrate_present() {
+  local -a pick=()
+  local out files
+  mapfile -t pick < <(migrate_pick_args "$1")
+  out="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --stats "${pick[@]:1}" \
+    "$(d_target "${pick[0]}")" "$MIGRATE_TMP/empty/" 2>&1)" || return 1
+  files="$(sed -n 's/^Number of files: \([0-9,]*\).*/\1/p' <<<"$out" | tr -d ,)"
+  ((${#pick[@]} == 1 || ${files:-0} > 1))
+}
+
+# Migrate my picks, for real: install the apps on the list, then copy each
+# setting back from the restore point, with its service stopped while it
+# goes in, and switched back on if the old system had it on. The restore
+# point is then kept, so what was left behind can still be picked later.
+#
+#   --into DIR  copy the settings into DIR instead (DIR/home/..., DIR/var/...):
+#               no installs, no services, nothing outside DIR touched. For
+#               trying it out on the computer the list came from.
+#   --force     run on the computer the list came from (refused otherwise:
+#               it would pour older settings over the ones in use).
+cmd_migrate_apply() {
+  local into="" force=0 ts=""
+  while (($#)); do
+    case $1 in
+      --into) into=${2:-}; shift 2 ;;
+      --force) force=1; shift ;;
+      *) ts=$1; shift ;;
+    esac
+  done
+  if [[ -n $into ]]; then
+    [[ $into == /* && $into != / ]] || die "--into needs a full path to a folder (not /)"
+    [[ ! -e $into || -d $into ]] || die "--into: $into is not a folder"
+  fi
+  migrate_open_list "$ts"
+  FAIL_TITLE="Migrate my picks stopped."
+  local plan="$MIGRATE_TMP/plan.json" user=$M_USER home=$M_HOME group
+  group="$(id -gn "$user")"
+  mkdir -p "$MIGRATE_TMP/empty"
+
+  # The computer the list came from still has those settings, newer.
+  local list_id this_id
+  list_id="$(jq -r '.install_id // ""' "$MIGRATE_TMP/list.json")"
+  this_id="$("$OMARCHY_TM_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); import migrate_scan as m; print(m.install_id())' "$OMARCHY_TM_ROOT/lib")"
+  if [[ -z $into && $force != 1 && -n $list_id && $list_id == "$this_id" ]]; then
+    fail_backup "This is the computer your list came from. Migrate my picks is for a fresh install; here it would put older settings over the ones you use. To try it out, use --into a folder."
+  fi
+
+  local app
+  if [[ -z $into ]]; then
+    while read -r app; do
+      [[ -n $app ]] || continue
+      pgrep -u "$user" -x "$app" >/dev/null 2>&1 &&
+        fail_backup "Close $app first: it rewrites its settings when it quits. Then run Migrate my picks again."
+    done < <(jq -r '.close_first[]' "$plan")
+  fi
+
+  # One plain question before anything changes (not the typed YES of the
+  # disk-wiping commands: nothing is erased here).
+  if [[ -z $into && ${OMARCHY_TM_YES:-0} != 1 ]]; then
+    local apps jobs ans
+    apps="$(jq '[.installs[] | select([.state[]] | any(. == "repo" or . == "aur" or . == "flathub" or . == "tool"))] | length' "$plan")"
+    jobs="$(jq '.jobs | length' "$plan")"
+    echo
+    echo "Migrate my picks from $M_LABEL:"
+    echo "  install $apps app(s), then bring back $jobs setting(s) into this system."
+    [[ -r /dev/tty ]] || die "refusing to run without a terminal to ask in (use --yes)"
+    read -r -p "Go ahead? [y/N] " ans </dev/tty || ans=""
+    [[ $ans == [yY]* ]] || { echo "Nothing changed."; return 0; }
+  fi
+
+  local -a problems=() repo=() aur=() flat=()
+  local n i name how state pkg cmd
+  if [[ -z $into ]]; then
+    log "installing the apps on your list"
+    mapfile -t repo < <(jq -r '.installs[] | select(.how == "pacman") | .state | to_entries[] | select(.value == "repo") | .key' "$plan")
+    mapfile -t aur < <(jq -r '.installs[] | select(.how == "pacman") | .state | to_entries[] | select(.value == "aur") | .key' "$plan")
+    mapfile -t flat < <(jq -r '.installs[] | select(.how == "flatpak") | .state | to_entries[] | select(.value == "flathub") | .key' "$plan")
+    while read -r pkg; do [[ -n $pkg ]] && problems+=("$pkg isn't in the repos, the AUR or Flathub any more"); done \
+      < <(jq -r '.installs[] | .state | to_entries[] | select(.value == "missing" or .value == "no-flatpak") | .key' "$plan")
+    if ((${#repo[@]})); then
+      pacman -S --needed --noconfirm "${repo[@]}" || problems+=("pacman couldn't install some of: ${repo[*]}")
+    fi
+    if ((${#aur[@]})); then
+      # yay builds as the user and asks for the password itself to install.
+      runuser -u "$user" -- yay -S --needed --noconfirm "${aur[@]}" || problems+=("yay couldn't build some of: ${aur[*]}")
+    fi
+    if ((${#flat[@]})); then
+      flatpak install -y --noninteractive flathub "${flat[@]}" || problems+=("flatpak couldn't install some of: ${flat[*]}")
+    fi
+    # Tools from other installers, as the user. Only the exact command the
+    # scanner writes, with a plain name, is ever run.
+    while IFS=$'\t' read -r name cmd; do
+      [[ -n $cmd ]] || continue
+      if [[ $cmd =~ ^(uv\ tool\ install|npm\ install\ -g|pipx\ install|cargo\ install|mise\ use\ -g)\ [A-Za-z0-9@._/:+-]+$ ]]; then
+        runuser -u "$user" -- bash -lc "$cmd" || problems+=("couldn't install $name ($cmd)")
+      else
+        problems+=("skipped $name: not a command this runs ($cmd)")
+      fi
+    done < <(jq -r '.installs[] | select(.command // "" != "") | [.name, .command] | @tsv' "$plan")
+  fi
+
+  # Services: stopped while their settings go in, then back as the old
+  # system had them.
+  local -a services=() was_on=() turn_on=()
+  local svc
+  if [[ -z $into ]]; then
+    mapfile -t services < <(jq -r '.services[]' "$plan")
+    # Which services the old system had switched on: every *.wants link in
+    # its /etc/systemd/system, in one listing (they live under different
+    # targets: tailscaled in multi-user, bluetooth in bluetooth.target...).
+    local enabled=""
+    ((${#services[@]})) && enabled="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --out-format='%n' \
+      "$(d_target "os/$M_TS/etc/systemd/system/")" "$MIGRATE_TMP/empty/" 2>>"$OMARCHY_TM_LOG" || true)"
+    for svc in "${services[@]}"; do
+      if systemctl is-active -q "$svc.service" 2>/dev/null; then
+        was_on+=("$svc")
+        systemctl stop "$svc.service" || problems+=("couldn't stop $svc")
+      fi
+      grep -qE "\.wants/$svc\.service\$" <<<"$enabled" && turn_on+=("$svc")
+    done
+  fi
+
+  log "bringing your settings back from $M_LABEL"
+  local tree rel dest parent item rc done_items="" ok=0 failed=0
+  local -a pick=() flags=()
+  n="$(jq '.jobs | length' "$plan")"
+  for ((i = 0; i < n; i++)); do
+    tree="$(jq -r --argjson i "$i" '.jobs[$i].tree' "$plan")"
+    rel="$(jq -r --argjson i "$i" '.jobs[$i].rel' "$plan")"
+    dest="$(jq -r --argjson i "$i" '.jobs[$i].dest' "$plan")"
+    item="$(jq -r --argjson i "$i" '.jobs[$i].item' "$plan")"
+    [[ $tree == os || $tree == home ]] || continue
+    [[ $rel != *..* && $dest == /* && $dest != *..* ]] || { problems+=("skipped an odd path: $dest"); continue; }
+    if [[ $tree == home ]]; then
+      [[ $dest == "$home"/* ]] || { problems+=("skipped $dest: not in your home folder"); continue; }
+      flags=(-a --chown="$user:$group")
+    else
+      flags=(-a --numeric-ids)
+    fi
+    migrate_present "$tree/$M_TS/$rel" || { problems+=("$item: ${dest/#$home/\~} isn't in the restore point"); continue; }
+    parent="${into}$(dirname "$dest")"
+    if [[ ! -d $parent ]]; then
+      mkdir -p "$parent"
+      # Folders made in the home folder belong to the user, not root.
+      if [[ $tree == home && -z $into ]]; then
+        local d=$parent
+        while [[ $d != "$home" && $d == "$home"/* ]]; do chown "$user:$group" "$d"; d="$(dirname "$d")"; done
+      fi
+    fi
+    mapfile -t pick < <(migrate_pick_args "$tree/$M_TS/$rel")
+    rsync "${RSYNC_RSH[@]}" "${RSYNC_LINK[@]}" --no-motd "${flags[@]}" "${pick[@]:1}" \
+      "$(d_target "${pick[0]}")" "$parent/" 2>>"$OMARCHY_TM_LOG" && rc=0 || rc=$?
+    if ((rc == 0)); then
+      ok=$((ok + 1))
+      printf '  %s  %s\n' "done" "${dest/#$home/\~}"
+      done_items+="$(jq -r --argjson i "$i" '.jobs[$i].id | split("#")[0]' "$plan")"$'\n'
+    else
+      failed=$((failed + 1))
+      problems+=("$item: copying ${dest/#$home/\~} failed (rsync $rc)")
+    fi
+  done
+
+  for svc in "${turn_on[@]}"; do
+    systemctl enable "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't switch $svc on")
+  done
+  for svc in "${services[@]}"; do
+    if [[ " ${was_on[*]} ${turn_on[*]} " == *" $svc "* ]]; then
+      systemctl start "$svc.service" 2>>"$OMARCHY_TM_LOG" || problems+=("couldn't start $svc")
+    fi
+  done
+
+  if [[ -z $into ]]; then
+    # Keep the restore point: what was left behind is only there now.
+    "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --add "$M_TS" --source "$(dest_id)" \
+      "what you left out of Migrate my picks" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+      problems+=("couldn't mark the restore point to be kept; thinning may take it")
+    # What came back, so the picker can show it and pick more later.
+    # Added to what earlier runs brought back from the same restore point.
+    mkdir -p "$OMARCHY_TM_STATE"
+    local before='[]' mf="$OMARCHY_TM_STATE/migrated.json"
+    [[ $(jq -r '.snapshot // ""' "$mf" 2>/dev/null) == "$M_TS" ]] && before="$(jq -c '.done // []' "$mf")"
+    jq -n --arg s "$M_TS" --arg src "$(dest_id)" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+      --arg items "$done_items" --argjson before "$before" '{snapshot: $s, source: $src, migrated_at: $at,
+        done: ($before + ($items | split("\n") | map(select(. != ""))) | unique)}' >"$mf.tmp"
+    mv "$mf.tmp" "$mf"
+    chown --reference="$OMARCHY_TM_STATE" "$OMARCHY_TM_STATE"/kept-points.json "$mf" 2>/dev/null || true
+    # The old system's list comes along, so the picker can add to it here.
+    local ll="$home/.config/omarchy-backups/migrate.json"
+    if ((! M_LOCAL_LIST)) && [[ ! -e $ll ]]; then
+      install -d -o "$user" -g "$group" -m 755 "$home/.config/omarchy-backups"
+      install -o "$user" -g "$group" -m 600 "$MIGRATE_TMP/list.json" "$ll"
+    fi
+  fi
+
+  echo
+  if [[ -n $into ]]; then
+    echo "Copied $ok settings into $into (nothing else on this computer was touched)."
+  else
+    echo "Migrate my picks: $ok settings back, apps installed."
+    echo "The restore point from $M_LABEL is kept, so you can pick more later with oma-migrate."
+    echo "Next: Restore my files, from the OmaBackups panel."
+  fi
+  if ((${#problems[@]})); then
+    echo
+    echo "${#problems[@]} thing(s) need a look:"
+    printf '  - %s\n' "${problems[@]}"
+    log_file "migrate: ${#problems[@]} problem(s): ${problems[*]}"
+    return 1
+  fi
+  return 0
 }
 
 cmd_copy() {
@@ -2224,5 +2472,6 @@ case "$MODE" in
   put_back_system) cmd_put_back_system ;;
   restore_files) cmd_restore_files "$@" ;;
   migrate_plan) cmd_migrate_plan "$@" ;;
+  migrate_apply) cmd_migrate_apply "$@" ;;
   health) cmd_health "$@" ;;
 esac

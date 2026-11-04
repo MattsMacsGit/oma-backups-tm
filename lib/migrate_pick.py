@@ -35,6 +35,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import migrate_scan as ms  # noqa: E402
 
 PICKS_FILE = ms.HOME / ".config" / "omarchy-backups" / "migrate.json"
+# Written by Migrate my picks: which items it has brought back, and from
+# which restore point.
+MIGRATED_FILE = ms.HOME / ".local" / "state" / "omarchy-backups" / "migrated.json"
 
 UTF8 = "utf" in (locale.getpreferredencoding(False) or "").lower()
 BOX_ON = "[✔]" if UTF8 else "[x]"
@@ -69,6 +72,13 @@ class Model:
         self.dirty = False
         sid = scan.get("install_id", "")
         self.from_other_install = bool(sid) and sid != ms.install_id()
+        # On the new system, what Migrate my picks already brought back.
+        self.back: set[str] = set()
+        if self.from_other_install:
+            try:
+                self.back = set(json.loads(MIGRATED_FILE.read_text()).get("done", []))
+            except (OSError, ValueError):
+                pass
 
     def kept(self) -> list[dict]:
         return [i for i in self.items if i["keep"]]
@@ -199,7 +209,7 @@ class Picker:
         c = self.cursor.get(self.page, rows[0])
         if c not in rows:
             c = rows[0]
-            self.cursor[self.page] = c
+        self.cursor[self.page] = c
         return self.lines(self.page)[c][1]  # type: ignore[return-value]
 
     def move(self, delta: int) -> None:
@@ -341,6 +351,10 @@ class Picker:
             st = size_text(i)
             self.put(y, x + size_w - len(st), st, self.col(C_MUTED, base))
             x += size_w + 2
+            if i["id"] in self.m.back:
+                x = self.put(y, x, f"{TICK} Back", self.col(C_GREEN, curses.A_BOLD | base))
+                self.put(y, x, "  already brought back", self.col(C_MUTED, base))
+                continue
             s = i["suggest"]
             tag = SUGG_TEXT[s]
             if s != "you":
@@ -363,7 +377,9 @@ class Picker:
             if i["kind"] == "package":
                 what = (what + "  " if what else "") + f"({'AUR' if i.get('source') == 'aur' else 'package'}: {' '.join(i['packages'])})"
             self.put(y, 2, what, self.col(C_MUTED))
-            if i["paths"]:
+            if i["id"] in self.m.back:
+                self.put(y + 1, 2, "Already brought back by Migrate my picks. Unticking it doesn't remove anything.", self.col(C_MUTED))
+            elif i["paths"]:
                 paths = ", ".join(p["path"] for p in i["paths"][:4]) + (" …" if len(i["paths"]) > 4 else "")
                 verb = "Brings back" if i["keep"] else "Would bring back"
                 x = self.put(y + 1, 2, verb + ": ", curses.A_BOLD)

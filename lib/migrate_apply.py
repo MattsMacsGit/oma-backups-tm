@@ -114,7 +114,8 @@ def check_flatpak(app_id: str) -> str:
     return "flathub" if rc == 0 else "missing"
 
 
-def plan(lst: dict, user: str, home: str, check: bool = True) -> dict:
+def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | None = None) -> dict:
+    done = done or set()
     out = {
         "list_saved_at": lst.get("saved_at"),
         "list_omarchy": lst.get("omarchy_version"),
@@ -128,6 +129,7 @@ def plan(lst: dict, user: str, home: str, check: bool = True) -> dict:
         "services": [],
         "close_first": [],
         "warnings": [],
+        "already_back": [],
     }
     if lst.get("format") != 1:
         out["warnings"].append("This list was saved by a newer or older oma-migrate; some things may be skipped.")
@@ -138,6 +140,9 @@ def plan(lst: dict, user: str, home: str, check: bool = True) -> dict:
     for i in lst.get("items", []):
         if not i.get("keep"):
             out["left_behind"].append({"name": i["name"], "group": i["group"], "bytes": i.get("bytes")})
+            continue
+        if i["id"] in done:
+            out["already_back"].append(i["name"])
             continue
         if i["group"] == "files":
             out["files"].append({"name": i["name"], "paths": [p["path"] for p in i["paths"]], "bytes": i.get("bytes")})
@@ -262,6 +267,10 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
     w(f"== Restore my files brings back afterwards ({len(pl['files'])} folders, about {human(fb)})")
     w("  " + ", ".join(f["name"] for f in pl["files"]))
     w("")
+    if pl.get("already_back"):
+        w(f"== Already back from an earlier Migrate my picks ({len(pl['already_back'])}), not copied again")
+        w("  " + ", ".join(pl["already_back"]))
+        w("")
     lb = pl["left_behind"]
     w(f"== Left behind ({len(lb)}), still in the backup if you change your mind")
     w("  " + ", ".join(x["name"] for x in lb))
@@ -285,7 +294,14 @@ def main() -> int:
     if len(sys.argv) >= 5 and sys.argv[1] == "plan":
         lst = json.loads(Path(sys.argv[2]).read_text())
         check = "--no-check" not in sys.argv
-        print(json.dumps(plan(lst, sys.argv[3], sys.argv[4], check=check), indent=1))
+        done: set[str] = set()
+        for a in sys.argv[5:]:
+            if a.startswith("--done="):
+                try:
+                    done = set(json.loads(Path(a[7:]).read_text()).get("done", []))
+                except (OSError, ValueError):
+                    pass
+        print(json.dumps(plan(lst, sys.argv[3], sys.argv[4], check=check, done=done), indent=1))
         return 0
     if len(sys.argv) == 5 and sys.argv[1] == "report":
         pl = json.loads(Path(sys.argv[2]).read_text())

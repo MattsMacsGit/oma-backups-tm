@@ -18,6 +18,12 @@ oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back 
   oma-migrate apply --dry-run [TIMESTAMP]
                           Migrate my picks, as a dry run: read your list out of
                           the newest restore point and say what it would do
+  oma-migrate apply [TIMESTAMP]
+                          Migrate my picks: install the apps on your list and
+                          bring their settings back (on a fresh install)
+  oma-migrate apply --into FOLDER
+                          copy the settings into FOLDER instead, to try it out:
+                          no installs, nothing else touched
 
 Your picks are saved in ~/.config/omarchy-backups/migrate.json, so your next
 backup carries them. Opening the picker again shows that saved list, also
@@ -33,13 +39,13 @@ case "${1:-}" in
   scan) shift; exec "$PY" "$ROOT/lib/migrate_scan.py" "$@" ;;
   apply)
     shift
-    [[ ${1:-} == --dry-run ]] || { echo "oma-migrate apply: only --dry-run so far (Migrate my picks is being built)" >&2; exit 2; }
-    shift
     # sudo asks on the terminal itself, so this works with the output piped too.
+    sub=migrate-apply
+    if [[ ${1:-} == --dry-run ]]; then sub=migrate-plan; shift; fi
     if [[ $EUID -ne 0 ]]; then
-      exec sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" migrate-plan "$@"
+      exec sudo --preserve-env=OMARCHY_TM_PYTHON,OMARCHY_TM_YES "$ROOT/omarchy-backups" "$sub" "$@"
     fi
-    exec "$ROOT/omarchy-backups" migrate-plan "$@" ;;
+    exec "$ROOT/omarchy-backups" "$sub" "$@" ;;
   -h | --help | help) usage ;;
   *) usage >&2; exit 2 ;;
 esac
