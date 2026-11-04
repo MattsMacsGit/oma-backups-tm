@@ -782,6 +782,28 @@ Item {
       + "\"Couldn't open one. Run this in a terminal instead: " + inner + "\""])
   }
 
+  // oma-migrate, in a terminal, as the user (it asks for sudo itself when it
+  // needs it). The window waits for Enter at the end, so what it says --
+  // "Saved your config", or what Migrate my saved config brought back --
+  // can be read before it closes.
+  function migrateTerminal(args) {
+    var cmd = root.shQuote([root.shareRoot + "/oma-migrate"].concat(args || []))
+    var inner = root.shQuote(["sh", "-c", cmd + "; echo; printf 'Press Enter to close.'; read _"])
+    var term = "omarchy-launch-floating-terminal-with-presentation"
+    Quickshell.execDetached(["sh", "-c",
+      "if command -v " + term + " >/dev/null 2>&1; then exec " + term + " " + inner + "; fi; "
+      + "notify-send -a OmaBackups 'OmaBackups needs a terminal window' "
+      + "\"Couldn't open one. Run this in a terminal instead: " + cmd + "\""])
+  }
+
+  // Prepare for a fresh install: the picker, which saves your config.
+  function prepareFreshInstall() { migrateTerminal([]) }
+
+  // Migrate my saved config: on a fresh install it first connects to the old
+  // backup (the disk plugged in, or a Pi by name), then brings back what the
+  // saved config says.
+  function migrateSavedConfig() { migrateTerminal(["apply"]) }
+
   function refresh() {
     refreshing = true
     if (!detectProc.running) {

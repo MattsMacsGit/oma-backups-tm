@@ -1068,6 +1068,27 @@ Panel {
                 fontFamily: root.fontFamily
                 onClicked: svc.startFirstRun(svc.selectedDisk)
               }
+              // A fresh install with backups from before: this is the way in.
+              // It connects to the old backup (the disk plugged in, or the Pi)
+              // as its first step, so nothing else here needs a Connect button.
+              PanelSeparator { foreground: root.foreground }
+              Text {
+                width: parent.width
+                text: "Moving from another Omarchy install?"
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Button {
+                width: parent.width
+                text: "Migrate my saved config"
+                bordered: true
+                enabled: !svc.backupRunning
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.migrateSavedConfig()
+              }
             }
           }
 
@@ -1503,7 +1524,7 @@ Panel {
                 width: parent.width
                 text: svc.remote !== null
                   ? "Paired with " + svc.remoteHost + ". Backups go there whenever the backup USB isn’t plugged into this laptop."
-                  : "Keep the backup USB in an always-on Raspberry Pi and back up over your network or Tailscale."
+                  : "Keep the backup USB in an always-on Raspberry Pi and back up over your network or Tailscale. If the Pi already has the disk, this computer pairs over the network."
                 color: root.dim
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.bodySmall
@@ -1522,9 +1543,12 @@ Panel {
                 id: pairBtn
                 visible: svc.remote === null
                 width: parent.width
-                text: svc.capsule !== null ? "Pair with this Pi" : "Plug the backup USB in here to pair"
+                // With the USB plugged in, pairing puts this laptop's key on it
+                // and the disk moves to the Pi; without it, it pairs over the
+                // network with a Pi that already has the disk.
+                text: "Pair with this Pi"
                 bordered: true
-                enabled: svc.capsule !== null && remoteHostField.text.trim() !== "" && !svc.backupRunning
+                enabled: remoteHostField.text.trim() !== "" && !svc.backupRunning
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onClicked: svc.pairRemote(remoteHostField.text)
@@ -1609,6 +1633,46 @@ Panel {
                   root.stickDisk = ""
                   root.stickConfirmed = false
                 }
+              }
+            }
+
+            // Before a fresh install: save your config, and the next backup
+            // carries it. Afterwards: bring it back, or anything left behind.
+            Column {
+              visible: svc.hasCapsule && !root.leaveOutMode
+              width: parent.width
+              spacing: Style.space(10)
+              PanelSeparator { foreground: root.foreground }
+              PanelSectionHeader {
+                text: "MIGRATE"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+              }
+              Text {
+                width: parent.width
+                text: "Moving to a fresh Omarchy install? Pick what comes with you, then back up. Afterwards, Migrate my saved config brings it back."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.bodySmall
+                wrapMode: Text.WordWrap
+              }
+              Button {
+                width: parent.width
+                text: "Prepare for a fresh install"
+                bordered: true
+                enabled: !svc.backupRunning
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.prepareFreshInstall()
+              }
+              Button {
+                width: parent.width
+                text: "Migrate my saved config"
+                bordered: true
+                enabled: !svc.backupRunning
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: svc.migrateSavedConfig()
               }
             }
 
