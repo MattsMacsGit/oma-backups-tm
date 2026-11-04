@@ -24,11 +24,12 @@ import shutil
 import subprocess
 import sys
 import syslog
+import tempfile
 import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "13"
+VERSION = "14"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -714,6 +715,58 @@ def v_check_pass(args: list[str]) -> None:
         raise Refused("that password doesn't open the backup disk")
 
 
+def v_add_unlock_key(args: list[str]) -> None:
+    """Add a laptop's unlock key to the backup disk, so a laptop paired over
+    the network (the disk never plugged into it) can unlock it on its own.
+
+    The proof is the backup disk's password: cryptsetup refuses a wrong one,
+    so nothing here judges it. Only a laptop already let in (by pi-setup,
+    run by someone with this Pi's sudo password) can ask, and never a rescue
+    stick (not in RESCUE_VERBS). Both secrets arrive on stdin, never in argv
+    or a file on a disk: a line with the password's length in bytes, the
+    password, then the new key. The new key is written to /run (RAM) only
+    for cryptsetup to read, then overwritten and removed."""
+    data = sys.stdin.buffer.read(MAX_KEY * 2 + 32)
+    head, sep, rest = data.partition(b"\n")
+    if not sep or not head.isdigit():
+        raise Refused("malformed request")
+    n = int(head)
+    if not 1 <= n <= 1024 or len(rest) <= n:
+        raise Refused("password missing or too large")
+    password, new = rest[:n], rest[n:]
+    if not 32 <= len(new) <= MAX_KEY:
+        raise Refused("new key missing or too large")
+    if not load_uuid():
+        raise Refused("this Pi has no backup disk set up")
+    dev = device()
+    if not dev.exists():
+        raise Refused("capsule not plugged in (or not powered)")
+    with capsule_turn():
+        fd, tmp = tempfile.mkstemp(prefix="oma-newkey.", dir="/run" if not TEST else None)
+        try:
+            os.write(fd, new)
+            os.close(fd)
+            # pbkdf2 with few iterations, as the laptop's own key slots: 4 KB
+            # of random data needs no slow derivation, and a Pi unlocks slowly.
+            r = subprocess.run(["cryptsetup", "luksAddKey", "--pbkdf", "pbkdf2", "--pbkdf-force-iterations", "1000",
+                                "--key-file=-", str(dev), tmp], input=password, stdout=sys.stderr)
+        finally:
+            try:
+                with open(tmp, "r+b") as f:
+                    f.write(b"\0" * len(new))
+            except OSError:
+                pass
+            os.unlink(tmp)
+    if r.returncode != 0:
+        # Slows down guessing; the caller already holds a key let in by the owner.
+        time.sleep(3)
+        if r.returncode == 2:
+            raise Refused("that password doesn't open the backup disk")
+        raise Refused(f"cryptsetup couldn't add the key (exit {r.returncode})")
+    log("unlock key added for a laptop paired over the network")
+    print("added")
+
+
 def v_addresses(args: list[str]) -> None:
     """This Pi's IP addresses, so a rescue stick can find it without DNS."""
     r = subprocess.run(["ip", "-o", "-4", "addr", "show", "scope", "global"], capture_output=True, text=True)
@@ -830,6 +883,7 @@ VERBS = {
     "check-pass": (v_check_pass, 0),
     "addresses": (v_addresses, 0),
     "set-rescue-key": (v_set_rescue_key, 0),
+    "add-unlock-key": (v_add_unlock_key, 0),
     "revoke-rescue-key": (v_revoke_rescue_key, 0),
     "browse": (v_browse, 2),
     # sshfs runs a custom SFTP server only if its name contains a "/".

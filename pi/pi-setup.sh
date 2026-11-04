@@ -4,6 +4,9 @@
 #
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --uuid UUID --key 'ssh-ed25519 ...'
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --update     (newer gatekeeper, same pairing)
+#   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --add-key 'ssh-ed25519 ...'
+#                                       (pair another laptop over the network: the
+#                                        backup disk stays in the Pi, nothing else changes)
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --uninstall
 #
 # Only installs what's missing (never upgrades), never touches Docker or any
@@ -26,11 +29,12 @@ die() {
   exit 1
 }
 
-UUID="" KEY="" UNINSTALL=0 UPDATE=0
+UUID="" KEY="" UNINSTALL=0 UPDATE=0 ADD=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --uuid) UUID=${2:-}; shift 2 ;;
     --key) KEY=${2:-}; shift 2 ;;
+    --add-key) KEY=${2:-}; ADD=1; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --update) UPDATE=1; shift ;;
     *) die "unknown option: $1" ;;
@@ -63,6 +67,12 @@ if [[ $UPDATE == 1 ]]; then
   [[ -f $CONF_DIR/gate.conf && -x $GATE ]] ||
     die "Nothing to update: this Pi isn't set up yet. Pair it from the laptop first."
   say "Updating OmaBackups on this Pi"
+elif [[ $ADD == 1 ]]; then
+  [[ -f $CONF_DIR/gate.conf && -x $GATE ]] ||
+    die "This Pi isn't set up for backups yet, so there's nothing to add a laptop to. Pair with the backup disk plugged into the laptop first."
+  [[ $KEY =~ ^ssh-ed25519\ [A-Za-z0-9+/=]+(\ [A-Za-z0-9@._-]+)?$ ]] ||
+    die "Missing or malformed --add-key (copy the full command from the laptop)."
+  say "Adding a laptop to this Pi's backups"
 else
   [[ $UUID =~ ^[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$ ]] ||
     die "Missing or malformed --uuid (copy the full command from the laptop)."
@@ -141,10 +151,51 @@ systemctl daemon-reload
 systemctl enable --now oma-gate-sweep.timer >/dev/null 2>&1 ||
   warn "Couldn't start the idle lock timer, so the disk locks the moment the last user lets go instead of after 10 quiet minutes."
 
+# Let a laptop in, next to the ones already here. Its key replaces only an
+# older key of its own (same name, as after a fresh install of the same
+# laptop) or the same key again; other laptops and the rescue stick keep
+# theirs. (Writing the file afresh used to drop the rescue stick's key.)
+add_laptop_key() {
+  local f="$ACCOUNT_HOME/.ssh/authorized_keys"
+  install -d -m 700 -o "$ACCOUNT" -g "$ACCOUNT" "$ACCOUNT_HOME/.ssh"
+  touch "$f"
+  python3 - "$f" "$GATE" "$KEY" <<'PY'
+import sys
+path, gate, key = sys.argv[1:]
+parts = key.split()
+blob, name = parts[1], (parts[2] if len(parts) > 2 else "")
+keep = []
+for line in open(path, encoding="utf-8").read().splitlines():
+    words = line.split()
+    if not words:
+        continue
+    if blob in words:
+        continue  # the same key again
+    if name and name != "oma-rescue" and words[-1] == name:
+        continue  # this laptop's older key
+    keep.append(line)
+keep.append(f'restrict,command="sudo -n {gate}" {key}')
+with open(path + ".tmp", "w", encoding="utf-8") as f:
+    f.write("".join(line + "\n" for line in keep))
+PY
+  chown "$ACCOUNT:$ACCOUNT" "$f.tmp"
+  chmod 600 "$f.tmp"
+  mv "$f.tmp" "$f"
+}
+
 if [[ $UPDATE == 1 ]]; then
   v=$(gate_as_account version) || die "Self-test failed: the gatekeeper didn't answer."
   echo
   say "Updated. Gatekeeper version $v."
+  exit 0
+fi
+
+if [[ $ADD == 1 ]]; then
+  step "Letting the new laptop in"
+  add_laptop_key
+  v=$(gate_as_account version) || die "Self-test failed: the gatekeeper didn't answer."
+  echo
+  say "Done. Gatekeeper version $v. The laptop finishes pairing by itself."
   exit 0
 fi
 
@@ -160,9 +211,7 @@ fi
 # "*" = no password but not "locked", which some sshd setups refuse keys for.
 usermod -p '*' "$ACCOUNT"
 install -d -m 700 -o "$ACCOUNT" -g "$ACCOUNT" "$ACCOUNT_HOME/.ssh"
-printf 'restrict,command="sudo -n %s" %s\n' "$GATE" "$KEY" >"$ACCOUNT_HOME/.ssh/authorized_keys"
-chown "$ACCOUNT:$ACCOUNT" "$ACCOUNT_HOME/.ssh/authorized_keys"
-chmod 600 "$ACCOUNT_HOME/.ssh/authorized_keys"
+add_laptop_key
 
 cat >"$tmp/sudoers" <<EOF
 Defaults!$GATE env_keep += "SSH_ORIGINAL_COMMAND"

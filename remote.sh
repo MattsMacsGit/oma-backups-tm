@@ -37,6 +37,43 @@ fail() {
   exit 1
 }
 
+# Pairing over the network, after the Pi has let this laptop in: learn the
+# backup disk's ID from the Pi, and have the Pi add this laptop's unlock key
+# to it. The disk password proves it; cryptsetup on the Pi checks it. The
+# password and the key go through ssh on stdin and are never kept.
+pair_network_key() {
+  local st=$1 ver uuid pass n tries=0
+  ver="$(jq -r '.version // 0' <<<"$st")"
+  ((ver >= 14)) ||
+    fail "The Pi's gatekeeper (version $ver) is too old to pair over the network. Update it on the Pi: $(pi_update_cmd)"
+  [[ $(jq -r '.present' <<<"$st") == true ]] ||
+    fail "The backup disk isn't plugged into $host (or it's not powered). Plug it in there, then pair again."
+  uuid="$(jq -r '.uuid // ""' <<<"$st")"
+  [[ $uuid =~ ^[0-9a-fA-F-]{36}$ ]] || fail "The Pi didn't say which backup disk it has."
+  jq --arg u "$uuid" '.luks_uuid = $u' "$OMA_REMOTE_CONF" >"$OMA_REMOTE_CONF.tmp" && mv "$OMA_REMOTE_CONF.tmp" "$OMA_REMOTE_CONF"
+  chmod 644 "$OMA_REMOTE_CONF"
+  if rgate check-pass <"$OMA_CAPSULE_KEY" >/dev/null 2>&1; then
+    step "This laptop's unlock key already opens the backup disk"
+    return 0
+  fi
+  step "Adding this laptop's unlock key to the backup disk on $host"
+  while :; do
+    gum style --foreground 8 "  Enter the backup disk password (the one you chose when setting it up)."
+    pass="$(gum input --password --placeholder "Backup disk password" </dev/tty)" || fail "Pairing stopped."
+    [[ -n $pass ]] || continue
+    n="$(printf '%s' "$pass" | wc -c)"
+    if { printf '%d\n' "$n"; printf '%s' "$pass"; cat "$OMA_CAPSULE_KEY"; } | rgate add-unlock-key >/dev/null 2>>"$OMARCHY_TM_LOG"; then
+      break
+    fi
+    tries=$((tries + 1))
+    ((tries < 3)) || { pass=""; fail "That password didn't open the backup disk. Pair again when you have it."; }
+    warn "That password didn't open the backup disk. Try again."
+  done
+  pass=""
+  rgate check-pass <"$OMA_CAPSULE_KEY" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+    fail "The Pi added the key, but it doesn't open the disk. Pair again; if it keeps happening, see $OMARCHY_TM_LOG."
+}
+
 cmd_pair() {
   local login=${1:-}
   [[ -n $login ]] || die "usage: oma-backups remote pair HOST"
@@ -56,19 +93,31 @@ cmd_pair() {
   gum style --bold "Pair the backup disk with $host"
   echo
 
-  local part uuid
+  # The backup disk plugged into this laptop: its unlock key goes on here,
+  # and the disk moves to the Pi afterwards. Not plugged in: pair over the
+  # network with a Pi that already has it (a fresh install, or another
+  # laptop) -- the Pi adds the key itself, once given the disk password.
+  local part uuid="" network=0
   part="$(capsule_luks_partition 2>/dev/null || true)"
-  [[ -n $part && -b $part ]] ||
-    fail "Plug the backup disk into this laptop first. Pairing adds this laptop's unlock key to it; it moves to the Pi afterwards."
-  uuid="$(luks_uuid_of "$part")"
-  [[ -n $uuid ]] || fail "Couldn't read the backup disk's encryption ID."
+  if [[ -n $part && -b $part ]]; then
+    uuid="$(luks_uuid_of "$part")"
+    [[ -n $uuid ]] || fail "Couldn't read the backup disk's encryption ID."
+  else
+    network=1
+    gum style --foreground 8 "  The backup disk isn't plugged in here, so this pairs over the network"
+    gum style --foreground 8 "  with a Pi that already has it."
+  fi
 
   install -d -m 700 "$OMA_REMOTE_DIR"
   if [[ ! -f $OMA_REMOTE_KEY ]]; then
     step "Creating this laptop's backup key"
     ssh-keygen -q -t ed25519 -N "" -C "oma-backups@$(hostname)" -f "$OMA_REMOTE_KEY"
   fi
-  ensure_capsule_key "$part" || fail "Couldn't add the unlock key (wrong password?)."
+  if ((network)); then
+    create_capsule_key
+  else
+    ensure_capsule_key "$part" || fail "Couldn't add the unlock key (wrong password?)."
+  fi
 
   jq -n --arg host "$host" --argjson port "$port" --arg uuid "$uuid" --arg laptop "$(hostname)" --arg at "$(ts)" \
     '{host: $host, port: $port, luks_uuid: $uuid, laptop: $laptop, paired_at: $at}' >"$OMA_REMOTE_CONF.tmp"
@@ -76,11 +125,19 @@ cmd_pair() {
   mv "$OMA_REMOTE_CONF.tmp" "$OMA_REMOTE_CONF"
   rm -f "$OMA_REMOTE_KNOWN"
 
-  local setup
-  setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
-  echo
-  step "Next, the Pi needs a one-time setup."
-  if gum confirm "Set up $host now? You'll log in to it as usual and type its sudo password."; then
+  local setup ask
+  if ((network)); then
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    ask="Let this laptop in on $host now? You'll log in to it as usual and type its sudo password."
+    echo
+    step "Next, the Pi needs to let this laptop in."
+  else
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    ask="Set up $host now? You'll log in to it as usual and type its sudo password."
+    echo
+    step "Next, the Pi needs a one-time setup."
+  fi
+  if gum confirm "$ask"; then
     if ! as_user ssh -t "$login" "$setup"; then
       warn "That didn't work. Run this on the Pi yourself instead:"
       echo; echo "$setup"; echo
@@ -97,15 +154,18 @@ cmd_pair() {
   local st
   st="$(rgate status 2>&1)" || fail "Couldn't reach the Pi as $OMA_REMOTE_ACCOUNT@$host: $st"
   note_pi_gate "$(jq -r '.version // 0' <<<"$st")"
+  ((network)) && pair_network_key "$st"
   # Remember where the Pi lives on the local network, so backups at home can
   # go straight there instead of round through Tailscale.
   remote_refresh_addresses || true
   "$OMARCHY_TM_ROOT/link.sh" --quiet || warn "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
   # It's about to be unplugged; pulling it while mounted leaves a dead mount.
-  "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
+  ((network)) || "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
   echo
   gum style --bold --foreground 2 "● Paired with $host."
-  if [[ $(jq -r .present <<<"$st") == true ]]; then
+  if ((network)); then
+    gum style --foreground 8 "  Backups go to the backup disk on the Pi from now on."
+  elif [[ $(jq -r .present <<<"$st") == true ]]; then
     gum style --foreground 8 "  The backup disk is already plugged into the Pi. Backups go there from now on."
   else
     gum style --foreground 8 "  The backup disk is locked and safe to unplug. Plug it into the Pi;"
