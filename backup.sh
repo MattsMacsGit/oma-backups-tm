@@ -2083,6 +2083,7 @@ cmd_files() {
 # guessed. Run as root: the backup is opened the way Restore my files opens
 # it (pick_source / open_destination), and the system side (os/) is read too.
 MIGRATE_TMP=""
+MIGRATE_STAGE=""
 
 # rsync source and filters that fetch exactly one thing out of a restore
 # point by its folder: first line the folder (with a trailing /), then the
@@ -2103,6 +2104,7 @@ migrate_cleanup() {
   local rc=$?
   trap - EXIT
   [[ -n $MIGRATE_TMP && -d $MIGRATE_TMP ]] && rm -rf "$MIGRATE_TMP"
+  [[ -n $MIGRATE_STAGE && -d $MIGRATE_STAGE ]] && rm -rf "$MIGRATE_STAGE"
   release_source
   remote_close || true
   exit "$rc"
@@ -2154,6 +2156,10 @@ migrate_open_list() {
   pick_source "${cands[0]}"
   rsync_link_flags
   open_destination
+  # open_destination sets its own EXIT trap (remote_close) for a Pi, which
+  # replaced this one and left the working folder behind in /run.
+  # migrate_cleanup closes the connection too.
+  trap migrate_cleanup EXIT
   where="the backup disk"
   [[ $DEST_REMOTE == 1 ]] && where="the Pi ($REMOTE_HOST)"
 
@@ -2356,7 +2362,7 @@ cmd_migrate_apply() {
   # a service's own settings are fetched into a holding folder on disk
   # (not /run: AI models can be many GB) and only put in place in step 2.
   local stage=""
-  [[ -z $into && ${#services[@]} -gt 0 ]] && { stage="$(mktemp -d /var/tmp/oma-migrate.XXXXXX)"; chmod 700 "$stage"; }
+  [[ -z $into && ${#services[@]} -gt 0 ]] && { stage="$(mktemp -d /var/tmp/oma-migrate.XXXXXX)"; chmod 700 "$stage"; MIGRATE_STAGE=$stage; }
   log "bringing your settings back from $M_LABEL"
   local tree rel dest parent item rc jid jsvc ok=0
   local -a pick=() flags=()
