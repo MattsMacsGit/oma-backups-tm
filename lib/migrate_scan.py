@@ -647,7 +647,7 @@ def scan_home(known: dict, finder: Finder, sizer: Sizer, quiet: bool) -> list[di
     for p in sorted(HOME.iterdir()):
         if p.name.startswith(".") or not p.is_dir() or p.is_symlink() or p in finder.claimed:
             continue
-        if not quiet:
+        if not quiet and sizer.enabled:
             print(f"  measuring ~/{p.name} …", file=sys.stderr)
         size = sizer.size([p])
         if size is not None and size < 512:
@@ -712,7 +712,7 @@ def scan(sizes: bool, quiet: bool) -> dict:
     items += scan_webapps(sizer)
     items += scan_plugins(sizer)
     items += scan_tools(sizer)
-    if not quiet:
+    if not quiet and sizes:
         print("Measuring your folders (the big ones take a moment) …", file=sys.stderr)
     items += scan_home(known, finder, sizer, quiet)
     # A web app named like an app on the list (Omarchy's Tailscale admin page

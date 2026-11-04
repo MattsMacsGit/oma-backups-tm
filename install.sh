@@ -36,6 +36,7 @@ fi
 ln -sfn "$SHARE/omarchy-backups" "$BINDIR/oma-backups"
 ln -sfn "$SHARE/omarchy-backups" "$BINDIR/omarchy-backups"
 ln -sfn "$SHARE/omarchy-backups" "$BINDIR/omarchy-tm"
+ln -sfn "$SHARE/oma-migrate" "$BINDIR/oma-migrate"
 
 # Plugin folder cannot be a symlink (omarchy plugin validate). Copy files.
 rm -rf "$PLUGIN"

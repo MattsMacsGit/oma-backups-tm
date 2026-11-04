@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# oma-migrate — pick what comes back after a clean install of Omarchy.
+# Part of OmaBackups: the picks are saved in the home folder, so backups carry them.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+PY="${OMARCHY_TM_PYTHON:-/usr/bin/python3}"
+[[ -x $PY ]] || PY="$(command -v python3)"
+
+usage() {
+  cat <<USAGE
+oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back after a clean install
+
+  oma-migrate             go through the list and pick (saves your picks)
+  oma-migrate show        print the picks you saved
+  oma-migrate scan        what you added on top of Omarchy, as a plain list
+  oma-migrate scan --json the same, for scripts
+
+Your picks are saved in ~/.config/omarchy-backups/migrate.json, so your next
+backup carries them.
+USAGE
+}
+
+case "${1:-}" in
+  "" | pick) exec "$PY" "$ROOT/lib/migrate_pick.py" ;;
+  show) exec "$PY" "$ROOT/lib/migrate_pick.py" --show ;;
+  scan) shift; exec "$PY" "$ROOT/lib/migrate_scan.py" "$@" ;;
+  -h | --help | help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
