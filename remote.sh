@@ -119,6 +119,11 @@ cmd_pair() {
     ensure_capsule_key "$part" || fail "Couldn't add the unlock key (wrong password?)."
   fi
 
+  # Over the network the disk's ID comes from the Pi a few steps on. Until
+  # then keep the one already known for this Pi, so a pairing that stops
+  # half way doesn't leave the backups without it.
+  ((network)) && [[ -z $uuid ]] &&
+    uuid="$(jq -r --arg h "$host" 'select(.host == $h) | .luks_uuid // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true)"
   jq -n --arg host "$host" --argjson port "$port" --arg uuid "$uuid" --arg laptop "$(hostname)" --arg at "$(ts)" \
     '{host: $host, port: $port, luks_uuid: $uuid, laptop: $laptop, paired_at: $at}' >"$OMA_REMOTE_CONF.tmp"
   chmod 644 "$OMA_REMOTE_CONF.tmp"
