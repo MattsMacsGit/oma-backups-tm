@@ -564,7 +564,10 @@ class Picker:
         if bstate & wheel_down:
             self.move(3)
             return None
-        clicked = bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_RELEASED | curses.BUTTON1_DOUBLE_CLICKED)
+        # One click arrives as a press and then a release (mouseinterval is 0,
+        # so curses doesn't merge them). Act on the press only, or a click
+        # on the box ticks it and unticks it again straight away.
+        clicked = bstate & (curses.BUTTON1_PRESSED | curses.BUTTON1_CLICKED)
         if not clicked:
             return None
         if self.modal:
@@ -589,7 +592,7 @@ class Picker:
             if n < len(lines) and lines[n][0] == "item":
                 self.cursor[self.page] = n
                 # A click on the box itself ticks it, like a checkbox.
-                if 1 <= mx <= 6 or bstate & curses.BUTTON1_DOUBLE_CLICKED:
+                if 1 <= mx <= 6:
                     self.m.toggle(lines[n][1])  # type: ignore[arg-type]
         return None
 
