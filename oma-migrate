@@ -55,6 +55,28 @@ case "${1:-}" in
     # sudo asks on the terminal itself, so this works with the output piped too.
     sub=migrate-apply
     if [[ ${1:-} == --dry-run ]]; then sub=migrate-plan; shift; fi
+    # On a fresh install nothing is connected yet: Connect to your old backup
+    # first (the backup disk plugged in here, or a Pi by name), then go on.
+    if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
+      echo
+      gum style --bold "First: Connect to your old backup"
+      if lsblk -nr -o LABEL 2>/dev/null | grep -qxE 'OMABOOT|OMARCHY-EFI|OmaRescue|OMARCHY-LIVE'; then
+        gum style --foreground 8 "  A backup disk is plugged in here."
+        if gum confirm "Use the backup disk plugged in here?"; then
+          sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect || exit 1
+        fi
+      fi
+      if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
+        gum style --foreground 8 "  Backups on a Pi? Type its name or address. (Or plug in the backup disk and start again.)"
+        pi="$(gum input --placeholder "Pi name or IP, e.g. my-pi")" || exit 1
+        [[ $pi =~ ^[A-Za-z0-9@._:-]+$ ]] || { echo "That doesn't look like a Pi's name."; exit 1; }
+        sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$pi" || exit 1
+      fi
+      [[ -f /etc/omarchy-backups/capsule.json || -f /etc/omarchy-backups/remote.json ]] ||
+        { echo "Not connected to a backup, so there's nothing to migrate from yet."; exit 1; }
+      echo
+      gum style --bold "Now: Migrate my saved config"
+    fi
     if [[ $EUID -ne 0 ]]; then
       exec sudo --preserve-env=OMARCHY_TM_PYTHON,OMARCHY_TM_YES "$ROOT/omarchy-backups" "$sub" "$@"
     fi
