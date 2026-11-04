@@ -1097,7 +1097,7 @@ refuse_if_partial_restore() {
     echo
     gum style --foreground 8 "  Bring them back first: open the plugin and press \"Put AI models back\"."
   elif [[ $(jq -r '.level // ""' "$m" 2>/dev/null) == migrate ]]; then
-    gum style --foreground 8 "  Migrate my picks brought back your apps and settings from $snap. The"
+    gum style --foreground 8 "  Migrate my saved config brought back your apps and settings from $snap. The"
     gum style --foreground 8 "  folders you picked are still on the backup and not on this system yet,"
     gum style --foreground 8 "  so backing up now would delete them from the backup's current copy."
     echo
@@ -1778,7 +1778,7 @@ cmd_restore_files() {
   # root's, and never an old uid that means someone else on this machine.
   TREE_FLAGS=(-a --ignore-existing --chown="$user:$group")
   for i in "${ex[@]}"; do [[ -n $i ]] && TREE_FLAGS+=("--exclude=$i"); done
-  # After Migrate my picks, only the folders ticked in the list come back
+  # After Migrate my saved config, only the folders ticked in the list come back
   # (the marker's "only"); after a Quick System Rescue there is no "only"
   # and everything does. The leave-out list above still applies inside them.
   local -a only=()
@@ -2097,7 +2097,7 @@ cmd_files() {
   fi
 }
 
-# Migrate my picks, dry run: read the user's list out of a restore point and
+# Migrate my saved config, dry run: read the user's list out of a restore point and
 # say what migrating it would do, without changing anything. The list is
 # the one the picker saved (~/.config/omarchy-backups/migrate.json), carried
 # into the restore point by an ordinary backup. Each setting is asked about
@@ -2140,7 +2140,7 @@ migrate_open_list() {
   home="$(getent passwd "$user" | cut -d: -f6)"
   [[ -n $home ]] || die "no home folder for $user"
   NOT_A_BACKUP=1
-  FAIL_TITLE="Couldn't read your list."
+  FAIL_TITLE="Couldn't read your saved config."
   backup_running && fail_backup "A backup is running. Try again once it has finished."
 
   [[ -z $ts || $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-migrate apply [--dry-run] [TIMESTAMP]"
@@ -2149,7 +2149,7 @@ migrate_open_list() {
   trap migrate_cleanup EXIT
 
   # Which restore points to look in: the one asked for; after an earlier
-  # Migrate my picks, the one it came from (kept since), with the old
+  # Migrate my saved config, the one it came from (kept since), with the old
   # system's list that now lives in this home folder, where the picker adds
   # to it; otherwise the newest few on the backup (the newest is usually the
   # one holding the list).
@@ -2186,7 +2186,7 @@ migrate_open_list() {
   fi
   if ((${#cands[@]} == 0)); then
     mapfile -t cands < <(jq -r '[.[] | select(.valid and .has_home)] | sort_by(.timestamp) | reverse | .[:6] | .[].timestamp' <<<"$snaps" 2>/dev/null || true)
-    ((${#cands[@]})) || fail_backup "There are no restore points on $where to read your list from."
+    ((${#cands[@]})) || fail_backup "There are no restore points on $where to read your saved config from."
   fi
 
   # No -s (--protect-args): the Pi's rrsync refuses it, and these paths
@@ -2210,17 +2210,17 @@ migrate_open_list() {
   done
   if [[ -z $found ]]; then
     [[ -n $err ]] && fail_backup "Couldn't read from $where: $(tail -1 <<<"$err")"
-    fail_backup "None of the newest restore points holds your list. Run oma-migrate, save your list, back up, then try again."
+    fail_backup "None of the newest restore points holds your saved config. Run oma-migrate, save your config, back up, then try again."
   fi
   ts=$found
   label="$(jq -r --arg t "$ts" '(.[] | select(.timestamp == $t) | .label) // $t' <<<"$snaps") on $where"
 
-  log "found your list in the restore point from $label"
+  log "found your saved config in the restore point from $label"
   local -a done_arg=()
   [[ $(jq -r '.snapshot // ""' "$OMARCHY_TM_STATE/migrated.json" 2>/dev/null) == "$ts" ]] &&
     done_arg=(--done="$OMARCHY_TM_STATE/migrated.json")
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" "${done_arg[@]}" \
-    >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your list."
+    >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your saved config."
   M_TS=$ts M_USER=$user M_HOME=$home M_LABEL=$label M_WHERE=$where
 }
 
@@ -2279,7 +2279,7 @@ migrate_present() {
   ((${#pick[@]} == 1 || ${files:-0} > 1))
 }
 
-# Migrate my picks, for real: install the apps on the list, then copy each
+# Migrate my saved config, for real: install the apps on the list, then copy each
 # setting back from the restore point, with its service stopped while it
 # goes in, and switched back on if the old system had it on. The restore
 # point is then kept, so what was left behind can still be picked later.
@@ -2303,7 +2303,7 @@ cmd_migrate_apply() {
     [[ ! -e $into || -d $into ]] || die "--into: $into is not a folder"
   fi
   migrate_open_list "$ts"
-  FAIL_TITLE="Migrate my picks stopped."
+  FAIL_TITLE="Migrate my saved config stopped."
   local plan="$MIGRATE_TMP/plan.json" user=$M_USER home=$M_HOME group
   group="$(id -gn "$user")"
   mkdir -p "$MIGRATE_TMP/empty"
@@ -2313,7 +2313,7 @@ cmd_migrate_apply() {
   list_id="$(jq -r '.install_id // ""' "$MIGRATE_TMP/list.json")"
   this_id="$("$OMARCHY_TM_PYTHON" -c 'import sys; sys.path.insert(0, sys.argv[1]); import migrate_scan as m; print(m.install_id())' "$OMARCHY_TM_ROOT/lib")"
   if [[ -z $into && $force != 1 && -n $list_id && $list_id == "$this_id" ]]; then
-    fail_backup "This is the computer your list came from. Migrate my picks is for a fresh install; here it would put older settings over the ones you use. To try it out, use --into a folder."
+    fail_backup "This is the computer your saved config came from. Migrate my saved config is for a fresh install; here it would put older settings over the ones you use. To try it out, use --into a folder."
   fi
 
   local app
@@ -2321,7 +2321,7 @@ cmd_migrate_apply() {
     while read -r app; do
       [[ -n $app ]] || continue
       pgrep -u "$user" -x "$app" >/dev/null 2>&1 &&
-        fail_backup "Close $app first: it rewrites its settings when it quits. Then run Migrate my picks again."
+        fail_backup "Close $app first: it rewrites its settings when it quits. Then run Migrate my saved config again."
     done < <(jq -r '.close_first[]' "$plan")
   fi
 
@@ -2332,7 +2332,7 @@ cmd_migrate_apply() {
     apps="$(jq '[.installs[] | select([.state[]] | any(. == "repo" or . == "aur" or . == "flathub" or . == "tool"))] | length' "$plan")"
     jobs="$(jq '.jobs | length' "$plan")"
     echo
-    echo "Migrate my picks from $M_LABEL:"
+    echo "Migrate my saved config from $M_LABEL:"
     echo "  install $apps app(s), then bring back $jobs setting(s) into this system."
     [[ -r /dev/tty ]] || die "refusing to run without a terminal to ask in (use --yes)"
     read -r -p "Go ahead? [y/N] " ans </dev/tty || ans=""
@@ -2342,7 +2342,7 @@ cmd_migrate_apply() {
   local -a problems=() repo=() aur=() flat=()
   local n i name how state pkg cmd
   if [[ -z $into ]]; then
-    log "installing the apps on your list"
+    log "installing the apps in your saved config"
     mapfile -t repo < <(jq -r '.installs[] | select(.how == "pacman") | .state | to_entries[] | select(.value == "repo") | .key' "$plan")
     mapfile -t aur < <(jq -r '.installs[] | select(.how == "pacman") | .state | to_entries[] | select(.value == "aur") | .key' "$plan")
     mapfile -t flat < <(jq -r '.installs[] | select(.how == "flatpak") | .state | to_entries[] | select(.value == "flathub") | .key' "$plan")
@@ -2498,7 +2498,7 @@ cmd_migrate_apply() {
   if [[ -z $into ]]; then
     # Keep the restore point: what was left behind is only there now.
     "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --add "$M_TS" --source "$(dest_id)" \
-      "what you left out of Migrate my picks" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
+      "what you left out of Migrate my saved config" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
       problems+=("couldn't mark the restore point to be kept; thinning may take it")
     # What came back, so the picker can show it and pick more later.
     # Added to what earlier runs brought back from the same restore point.
@@ -2514,7 +2514,7 @@ cmd_migrate_apply() {
     # Rescue leaves (the panel shows the button, automatic backups wait
     # until the files are back), with one difference: "only" -- the folders
     # ticked in the list, so what was left behind doesn't come back with
-    # them. Written once, by the first Migrate my picks, and never over a
+    # them. Written once, by the first Migrate my saved config, and never over a
     # rescue's own marker.
     local pm="$OMARCHY_TM_STATE/partial-restore.json"
     if ((! M_LOCAL_LIST)) && [[ ! -e $pm ]]; then
@@ -2539,7 +2539,7 @@ cmd_migrate_apply() {
   if [[ -n $into ]]; then
     echo "Copied $ok settings into $into (nothing else on this computer was touched)."
   else
-    echo "Migrate my picks: $ok settings back, apps installed."
+    echo "Migrate my saved config: $ok settings back, apps installed."
     echo "The restore point from $M_LABEL is kept, so you can pick more later with oma-migrate."
     echo "Next: Restore my files, from the OmaBackups panel."
   fi

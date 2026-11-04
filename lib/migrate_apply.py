@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Migrate my picks: turn the user's list into a plan, and report on it.
+"""Migrate my saved config: turn the user's saved config into a plan, and report on it.
 
-The list (saved by the picker, read back out of a restore point) says what
+The saved config (saved by the picker, read back out of a restore point) says what
 the user ticked. This works out what that means on this computer:
 
   - apps to install again (pacman, the AUR through yay, Flatpak, and tools
@@ -134,7 +134,7 @@ def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | N
     if lst.get("format") != 1:
         out["warnings"].append("This list was saved by a newer or older oma-migrate; some things may be skipped.")
     if lst.get("user") and lst["user"] != user:
-        out["warnings"].append(f"The list was made for {lst['user']}; bringing it back into {user}'s home.")
+        out["warnings"].append(f"This config was saved by {lst['user']}; bringing it back into {user}'s home.")
 
     services: set[str] = set()
     for i in lst.get("items", []):
@@ -201,10 +201,10 @@ def nice_time(stamp: str | None) -> str:
 def report(pl: dict, results: dict[str, dict], label: str) -> str:
     L: list[str] = []
     w = L.append
-    w("Migrate my picks: dry run. Nothing was changed.")
+    w("Migrate my saved config: dry run. Nothing was changed.")
     w("")
     w(f"Restore point:  {label}")
-    w(f"Your list:      saved {nice_time(pl.get('list_saved_at'))} on Omarchy {pl.get('list_omarchy') or '?'}")
+    w(f"Saved config:   saved {nice_time(pl.get('list_saved_at'))} on Omarchy {pl.get('list_omarchy') or '?'}")
     for warn in pl["warnings"]:
         w(f"Note:           {warn}")
     w("")
@@ -272,7 +272,7 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
     w("  " + ", ".join(f["name"] for f in pl["files"]))
     w("")
     if pl.get("already_back"):
-        w(f"== Already back from an earlier Migrate my picks ({len(pl['already_back'])}), not copied again")
+        w(f"== Already back from an earlier Migrate my saved config ({len(pl['already_back'])}), not copied again")
         w("  " + ", ".join(pl["already_back"]))
         w("")
     lb = pl["left_behind"]
@@ -290,7 +290,7 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
             bits.append(f"{unchecked} setting(s) couldn't be checked")
         w("Not ready yet: " + "; ".join(bits) + ". Everything else is ready to migrate.")
     else:
-        w("Everything on your list was found. Ready to migrate.")
+        w("Everything in your saved config was found. Ready to migrate.")
     return "\n".join(L)
 
 

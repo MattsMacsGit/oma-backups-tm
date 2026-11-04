@@ -9,12 +9,12 @@ and saving waits until every page has been looked at to the bottom.
 
 Picks are saved to ~/.config/omarchy-backups/migrate.json, inside the home
 folder, so every backup carries them. Running the picker again opens that
-saved list rather than scanning, so after a fresh install it is still the
-old system's list and anything left behind can be picked later. "Scan
+saved config rather than scanning, so after a fresh install it is still the
+old system's config and anything left behind can be picked later. "Scan
 again" (n) replaces it with a fresh scan of this computer, after a warning,
-and only once the new list is saved. The list records which install it came
+and only once the new scan is saved. The saved config records which install it came
 from (a hash of /etc/machine-id), so the picker can say when it's showing an
-old system's list.
+old system's config.
 
   migrate_pick.py           pick
   migrate_pick.py --show    print the saved picks
@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import migrate_scan as ms  # noqa: E402
 
 PICKS_FILE = ms.HOME / ".config" / "omarchy-backups" / "migrate.json"
-# Written by Migrate my picks: which items it has brought back, and from
+# Written by Migrate my saved config: which items it has brought back, and from
 # which restore point.
 MIGRATED_FILE = ms.HOME / ".local" / "state" / "omarchy-backups" / "migrated.json"
 
@@ -72,7 +72,7 @@ class Model:
         self.dirty = False
         sid = scan.get("install_id", "")
         self.from_other_install = bool(sid) and sid != ms.install_id()
-        # On the new system, what Migrate my picks already brought back.
+        # On the new system, what Migrate my saved config already brought back.
         self.back: set[str] = set()
         if self.from_other_install:
             try:
@@ -286,11 +286,16 @@ class Picker:
         x = self.put(0, 1, "oma-migrate", self.col(C_ACCENT, curses.A_BOLD))
         self.put(0, x + 2, "Prepare for a fresh install")
         when = nice_date(self.m.scan["scanned_at"])
+        ov = self.m.scan["omarchy_version"]
         if self.m.from_other_install:
-            ver = f"Your old system's list · scanned {when} on Omarchy {self.m.scan['omarchy_version']}"
+            choices = [f"Your old system's saved config · scanned {when} on Omarchy {ov}",
+                       f"Your old system's saved config · {when}", f"Old system · {when}"]
         else:
-            ver = f"Scanned {when} · Omarchy {self.m.scan['omarchy_version']}"
-        self.put(0, w - len(ver) - 2, ver, self.col(C_YELLOW if self.m.from_other_install else C_MUTED))
+            choices = [f"Scanned {when} · Omarchy {ov}", f"Scanned {when}"]
+        room = w - (x + 2 + len("Prepare for a fresh install")) - 4
+        ver = next((c for c in choices if len(c) <= room), "")
+        if ver:
+            self.put(0, w - len(ver) - 2, ver, self.col(C_YELLOW if self.m.from_other_install else C_MUTED))
 
         # Tabs
         self.tab_spans = []
@@ -378,7 +383,7 @@ class Picker:
                 what = (what + "  " if what else "") + f"({'AUR' if i.get('source') == 'aur' else 'package'}: {' '.join(i['packages'])})"
             self.put(y, 2, what, self.col(C_MUTED))
             if i["id"] in self.m.back:
-                self.put(y + 1, 2, "Already brought back by Migrate my picks. Unticking it doesn't remove anything.", self.col(C_MUTED))
+                self.put(y + 1, 2, "Already brought back by Migrate my saved config. Unticking it doesn't remove anything.", self.col(C_MUTED))
             elif i["paths"]:
                 paths = ", ".join(p["path"] for p in i["paths"][:4]) + (" …" if len(i["paths"]) > 4 else "")
                 verb = "Brings back" if i["keep"] else "Would bring back"
@@ -435,7 +440,7 @@ class Picker:
         if self.modal == "save":
             b, unknown = self.m.kept_bytes()
             body = [
-                "Save your picks?",
+                "Save your config?",
                 "",
                 f"Keeping {len(self.m.kept())} of {len(self.m.items)} things, about {ms.human(b)} to copy back.",
                 "They are saved in your home folder, so your next backup carries them.",
@@ -447,18 +452,18 @@ class Picker:
             body = [
                 "Scan this computer again?",
                 "",
-                f"This replaces the saved list from {when} with a fresh scan of this",
-                "computer, and your picks start again from the suggestions.",
+                f"This replaces your saved config from {when} with a fresh scan of this",
+                "computer, and your choices start again from the suggestions.",
                 "",
                 "Only do this when you're planning your next fresh install.",
             ]
             if self.m.from_other_install:
                 body += [
                     "",
-                    "This list is from your OLD system. Once replaced, you can't pick from it",
+                    "This saved config is from your OLD system. Once replaced, you can't pick from it",
                     "here any more. (A copy stays in the backup you made before the wipe.)",
                 ]
-            body += ["", "Nothing is replaced until you look through the new list and save.", "", "y  scan again        n  go back"]
+            body += ["", "Nothing is replaced until you look through the new scan and save.", "", "y  scan again        n  go back"]
         elif self.modal == "scanning":
             body = ["Scanning this computer …", "", "This takes a few seconds."]
         else:
@@ -660,9 +665,9 @@ def run_picker(model: Model) -> tuple[str, Model]:
 def show() -> int:
     data = load_previous()
     if not data:
-        print(f"No picks saved yet. Run oma-migrate to make them ({PICKS_FILE}).")
+        print(f"No saved config yet. Run oma-migrate to make one ({PICKS_FILE}).")
         return 1
-    print(f"Picks saved {data['saved_at']} on Omarchy {data['omarchy_version']}  ({PICKS_FILE})\n")
+    print(f"Config saved {data['saved_at']} on Omarchy {data['omarchy_version']}  ({PICKS_FILE})\n")
     items = data["items"]
     for g in data["groups"]:
         rows = [i for i in items if i["group"] == g["id"]]
@@ -686,7 +691,7 @@ def main() -> int:
         return 1
     previous = load_previous()
     if previous and previous.get("items"):
-        # The saved list, not a new scan: after a fresh install this is the
+        # The saved config, not a new scan: after a fresh install this is the
         # only record of the old system. "Scan again" in the picker replaces it.
         model = Model(previous, previous)
     else:
@@ -694,11 +699,11 @@ def main() -> int:
         model = Model(ms.scan(sizes=True, quiet=True), None)
     result, model = run_picker(model)
     if result != "save":
-        print("Nothing saved." + (f" Your earlier picks are still in {PICKS_FILE}." if previous else ""))
+        print("Nothing saved." + (f" Your saved config is still in {PICKS_FILE}." if previous else ""))
         return 0
     path = save(model)
     b, _ = model.kept_bytes()
-    print(f"Saved your picks: keeping {len(model.kept())} of {len(model.items)} things (about {ms.human(b)}).")
+    print(f"Saved your config: keeping {len(model.kept())} of {len(model.items)} things (about {ms.human(b)}).")
     print(f"  {ms.tilde(path)}")
     print("Your next backup carries this file. Run oma-migrate again any time to change your mind.")
     return 0

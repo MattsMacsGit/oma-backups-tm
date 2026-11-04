@@ -211,7 +211,7 @@ case "$cmd" in
       gum style --foreground 8 "  This computer is paired with a Pi too: backups go to this disk while"
       gum style --foreground 8 "  it's plugged in, and to the Pi when it isn't."
     fi
-    gum style --foreground 8 "  Next: Migrate my picks (oma-migrate apply), then Restore my files."
+    gum style --foreground 8 "  Next: Migrate my saved config (oma-migrate apply), then Restore my files."
     [[ -r /dev/tty ]] && read -r -p "Press Enter to close." _ </dev/tty
     ;;
   first-run)
