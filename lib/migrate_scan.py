@@ -654,6 +654,256 @@ def scan_tools(sizer: Sizer) -> list[dict]:
     return items
 
 
+# ---------------------------------------------------------- system tweaks
+
+# Where people change the system itself by hand. Only files no package owns
+# are offered, and not the ones Omarchy's own install scripts and migrations
+# write (a fresh install makes those again, newer).
+TWEAK_DIRS = [
+    ("/usr/local/bin", "command"), ("/usr/local/sbin", "command"),
+    ("/etc/systemd/system", "unit"), ("/etc/systemd/user", "unit"),
+    ("/etc/systemd", "systemd-conf"),
+    ("/etc/udev/rules.d", "udev"), ("/etc/modprobe.d", "modprobe"),
+    ("/etc/modules-load.d", "modules"), ("/etc/sysctl.d", "sysctl"),
+    ("/etc/tmpfiles.d", "tmpfiles"), ("/etc/profile.d", "profile"),
+    ("/etc/X11/xorg.conf.d", "xorg"), ("/etc/NetworkManager/conf.d", "nm"),
+    ("/etc/NetworkManager/dispatcher.d", "nm-dispatcher"),
+    ("/etc/polkit-1/rules.d", "polkit"), ("/usr/share/polkit-1/actions", "polkit-action"),
+]
+UNIT_SUFFIXES = (".service", ".timer", ".path", ".socket", ".mount", ".automount", ".target")
+TWEAK_WHAT = {
+    "command": "Command",
+    "udev": "Device rule",
+    "modprobe": "Driver option",
+    "modules": "Driver loaded at start-up",
+    "sysctl": "Kernel setting",
+    "tmpfiles": "Folder or file made at start-up",
+    "profile": "Login shell setting",
+    "xorg": "X11 setting",
+    "nm": "Network setting",
+    "nm-dispatcher": "Runs when the network changes",
+    "polkit": "Permission rule",
+    "polkit-action": "Permission",
+}
+SYSTEMD_CONF = {
+    "logind.conf.d": "Lid, power button and idle",
+    "sleep.conf.d": "Sleep and hibernate",
+    "system.conf.d": "Start-up and shutdown",
+    "user.conf.d": "Your own services",
+    "journald.conf.d": "System log",
+    "resolved.conf.d": "Name lookups (DNS)",
+    "timesyncd.conf.d": "Clock",
+    "networkd.conf.d": "Network",
+    "coredump.conf.d": "Crash dumps",
+    "homed.conf.d": "Home folders",
+    "oomd.conf.d": "Out-of-memory handling",
+    "zram-generator.conf.d": "Compressed swap",
+}
+# OmaBackups puts its own back when it is set up again.
+OMA_OWN = re.compile(r"^(oma-backups|omarchy-backups|omarchy-tm|oma-migrate|oma-gate)|^99-oma-backups\.rules$")
+
+
+def tweak_candidates() -> list[tuple[Path, str]]:
+    """(file, kind) for every file in the tweak places this user can see."""
+    out: list[tuple[Path, str]] = []
+
+    def files_in(d: Path) -> list[Path]:
+        try:
+            return sorted(f for f in d.iterdir() if f.is_file() or f.is_symlink())
+        except OSError:
+            return []
+
+    for d, kind in TWEAK_DIRS:
+        base = Path(d)
+        if kind == "systemd-conf":
+            # /etc/systemd/<name>.conf.d/*.conf
+            try:
+                subs = sorted(x for x in base.iterdir() if x.is_dir() and x.name.endswith(".conf.d"))
+            except OSError:
+                subs = []
+            for sub in subs:
+                out += [(f, kind) for f in files_in(sub) if f.name.endswith(".conf")]
+            continue
+        if kind == "unit":
+            # Unit files, and drop-ins (<unit>.d/*.conf). Links here are what
+            # switches a unit on, or an alias: that comes back with the unit.
+            for f in files_in(base):
+                if f.name.endswith(UNIT_SUFFIXES) and not f.is_symlink():
+                    out.append((f, "unit"))
+            try:
+                subs = sorted(x for x in base.iterdir() if x.is_dir() and x.name.endswith(UNIT_SUFFIXES + tuple(s + ".d" for s in UNIT_SUFFIXES)))
+            except OSError:
+                subs = []
+            for sub in subs:
+                if sub.name.endswith(".d"):
+                    out += [(f, "dropin") for f in files_in(sub) if f.name.endswith(".conf") and not f.is_symlink()]
+            continue
+        out += [(f, kind) for f in files_in(base)]
+    return out
+
+
+def owned_by_packages(paths: list[Path]) -> set[str]:
+    if not paths or not shutil.which("pacman"):
+        return set()
+    owned: set[str] = set()
+    for n in range(0, len(paths), 200):
+        chunk = [str(p) for p in paths[n:n + 200]]
+        try:
+            r = subprocess.run(["pacman", "-Qo", *chunk], capture_output=True, text=True, timeout=60)
+        except (OSError, subprocess.TimeoutExpired):
+            return set(str(p) for p in paths)  # can't tell: offer nothing rather than everything
+        for line in r.stdout.splitlines():
+            m = re.match(r"^(/.+) is owned by ", line)
+            if m:
+                owned.add(m.group(1))
+    return owned
+
+
+def tweak_key(p: Path) -> str:
+    """How Omarchy's scripts would name this file: folder + name, with one
+    more level for commands (bin/x would match Omarchy's own /usr/bin/x)."""
+    parts = p.parts
+    keep = 3 if p.parent.name in ("bin", "sbin") else 2
+    return "/".join(parts[-keep:])
+
+
+def made_by_omarchy(keys: list[str]) -> set[str]:
+    """The keys Omarchy's install scripts, migrations or commands mention."""
+    roots = [str(d) for d in (Path("/usr/share/omarchy/install"), Path("/usr/share/omarchy/migrations"),
+                              Path("/usr/share/omarchy/bin"), Path("/usr/share/omarchy/default"),
+                              expand("~/.local/share/omarchy/install"), expand("~/.local/share/omarchy/migrations"))
+             if d.is_dir()]
+    if not keys or not roots:
+        return set()
+    try:
+        r = subprocess.run(["grep", "-rhoIF", *[a for k in sorted(set(keys)) for a in ("-e", k)], *roots],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return set()
+    return set(r.stdout.split())
+
+
+def first_comment(p: Path) -> str:
+    """The first comment line of a small text file: often what it is for."""
+    try:
+        if p.stat().st_size > 256 * 1024:
+            return ""
+        for line in p.read_text(errors="replace").splitlines()[:30]:
+            t = line.strip()
+            if t.startswith("#!") or not t:
+                continue
+            if t.startswith(("#", "//", ";")):
+                t = t.lstrip("#/; ").strip()
+                if len(t) > 8:
+                    return t[:140]
+            elif not t.startswith("["):
+                break
+    except OSError:
+        pass
+    return ""
+
+
+def unit_info(p: Path) -> tuple[str, list[str]]:
+    """Description= and the absolute paths in Exec*= lines."""
+    desc, execs = "", []
+    try:
+        for line in p.read_text(errors="replace").splitlines():
+            t = line.strip()
+            if t.startswith("Description=") and not desc:
+                desc = t.split("=", 1)[1].strip()
+            elif t.startswith("Exec") and "=" in t:
+                for w in t.split("=", 1)[1].split():
+                    w = w.lstrip("-@:+!")
+                    if w.startswith("/"):
+                        execs.append(w)
+    except OSError:
+        pass
+    return desc, execs
+
+
+def scan_tweaks(sizer: Sizer) -> list[dict]:
+    cands = [(f, k) for f, k in tweak_candidates() if not OMA_OWN.search(f.name)]
+    # Links into OmaBackups's own copy, or into what packages installed.
+    keep: list[tuple[Path, str]] = []
+    for f, k in cands:
+        if f.is_symlink():
+            t = os.path.realpath(f)
+            if t.startswith(("/usr/local/lib/oma-backups", "/usr/lib/", "/usr/bin/", "/usr/share/")):
+                continue
+        keep.append((f, k))
+    owned = owned_by_packages([f for f, _ in keep])
+    keep = [(f, k) for f, k in keep if str(f) not in owned]
+    omarchy = made_by_omarchy([tweak_key(f) for f, _ in keep])
+    keep = [(f, k) for f, k in keep if tweak_key(f) not in omarchy]
+
+    # A service and the command it runs are one tweak.
+    by_path = {str(f): (f, k) for f, k in keep}
+    used: set[str] = set()
+    items = []
+    for f, k in keep:
+        if k != "unit" or str(f) in used:
+            continue
+        desc, execs = unit_info(f)
+        group = [f] + [by_path[e][0] for e in execs if e in by_path and e not in used and e != str(f)]
+        used.update(str(x) for x in group)
+        scope = "user" if f.parent.name == "user" else "system"
+        what = desc or first_comment(f) or f"A {scope} service you added"
+        if len(group) > 1:
+            what += " (runs " + ", ".join(str(x) for x in group[1:]) + ")"
+        entries, admin = path_entries(group)
+        items.append(item(
+            id="tweak:" + str(f), group="tweaks", kind="tweak", name=f"{f.stem} ({f.suffix[1:]})",
+            what=what, paths=entries, bytes=sizer.size(group), needs_admin=admin,
+            unit=f.name if scope == "system" else None, user_unit=f.name if scope == "user" else None,
+            suggest="keep", why="you set this up yourself; a fresh install won't have it",
+            score=30.0,
+        ))
+    # A permission and the command it lets run (polkit's exec.path) too.
+    for f, k in keep:
+        if k != "polkit-action" or str(f) in used:
+            continue
+        try:
+            names = re.findall(r'org\.freedesktop\.policykit\.exec\.path">\s*([^<\s]+)', f.read_text(errors="replace"))
+        except OSError:
+            names = []
+        group = [f] + [by_path[n][0] for n in names if n in by_path and n not in used]
+        if len(group) == 1:
+            continue
+        used.update(str(x) for x in group)
+        entries, admin = path_entries(group[1:] + group[:1])
+        items.append(item(
+            id="tweak:" + str(f), group="tweaks", kind="tweak", name=f"Command: {group[1].name}",
+            what=(first_comment(group[1]) or str(group[1])) + f" (with its permission {f.name})",
+            paths=entries, bytes=sizer.size(group), needs_admin=admin,
+            suggest="you", why="it changes what may run as admin; bring it back if you still use it",
+            score=21.0,
+        ))
+    for f, k in keep:
+        if str(f) in used:
+            continue
+        if k == "dropin":
+            name = f"Change to {f.parent.name[:-2]}"
+            what = first_comment(f) or f"Your change to how {f.parent.name[:-2]} runs ({f.name})"
+        elif k == "systemd-conf":
+            area = SYSTEMD_CONF.get(f.parent.name, f.parent.name[:-7])
+            name = f"{area}: {f.stem}"
+            what = first_comment(f) or f"Your systemd setting {f.parent.name}/{f.name}"
+        else:
+            name = f"{TWEAK_WHAT.get(k, 'File')}: {f.name}"
+            what = first_comment(f) or str(f)
+        entries, admin = path_entries([f])
+        items.append(item(
+            id="tweak:" + str(f), group="tweaks", kind="tweak", name=name, what=what,
+            paths=entries, bytes=sizer.size([f]), needs_admin=admin,
+            restart=k in ("systemd-conf", "modprobe", "modules", "udev", "sysctl", "xorg"),
+            suggest="you" if k.startswith("polkit") else "keep",
+            why=("it changes what may run as admin; bring it back if you still use it" if k.startswith("polkit")
+                 else "you set this up yourself; a fresh install won't have it"),
+            score=20.0 if k == "command" else 22.0,
+        ))
+    return items
+
+
 def scan_home(known: dict, finder: Finder, sizer: Sizer, quiet: bool) -> list[dict]:
     items = []
     for p in sorted(HOME.iterdir()):
@@ -698,11 +948,12 @@ def scan_home(known: dict, finder: Finder, sizer: Sizer, quiet: bool) -> list[di
     return items
 
 
-GROUP_ORDER = ["settings", "apps", "files", "extras"]
+GROUP_ORDER = ["settings", "apps", "files", "tweaks", "extras"]
 GROUP_TITLES = {
     "settings": "Settings & logins",
     "apps": "Apps you installed",
     "files": "Your files",
+    "tweaks": "System tweaks",
     "extras": "Plugins, web apps & tools",
 }
 
@@ -724,6 +975,7 @@ def scan(sizes: bool, quiet: bool) -> dict:
     items += scan_webapps(sizer)
     items += scan_plugins(sizer)
     items += scan_tools(sizer)
+    items += scan_tweaks(sizer)
     if not quiet and sizes:
         print("Measuring your folders (the big ones take a moment) …", file=sys.stderr)
     items += scan_home(known, finder, sizer, quiet)

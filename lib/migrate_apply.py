@@ -130,6 +130,8 @@ def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | N
         "close_first": [],
         "warnings": [],
         "already_back": [],
+        "units": [],
+        "restart": False,
     }
     if lst.get("format") != 1:
         out["warnings"].append("This list was saved by a newer or older oma-migrate; some things may be skipped.")
@@ -159,6 +161,13 @@ def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | N
             app = i["packages"][0]
             out["installs"].append({"id": i["id"], "name": i["name"], "how": "flatpak", "packages": [app],
                                     "state": {app: check_flatpak(app) if check else "unchecked"}})
+        elif kind == "tweak":
+            # A service of the user's own: switched on again if the old
+            # system had it on. Some settings only take effect at start-up.
+            if i.get("unit"):
+                out["units"].append(i["unit"])
+            if i.get("restart") or i.get("unit") or i.get("user_unit"):
+                out["restart"] = True
         elif kind == "tool":
             out["installs"].append({"id": i["id"], "name": i["name"], "how": i.get("source", "tool"), "packages": i["packages"],
                                     "state": {i["packages"][0]: "tool"}, "command": i.get("reinstall", "")})
@@ -258,6 +267,10 @@ def report(pl: dict, results: dict[str, dict], label: str) -> str:
     w(f"  Total: about {human(total)}")
     if pl["close_first"]:
         w(f"  Close first: {', '.join(pl['close_first'])}")
+    if pl.get("units"):
+        w(f"  Switched on again if they were on before: {', '.join(pl['units'])}")
+    if pl.get("restart"):
+        w("  Some system tweaks only take effect after a restart.")
     w("")
 
     if pl["merges"]:

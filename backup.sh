@@ -2373,11 +2373,12 @@ cmd_migrate_apply() {
   # Which services the old system had switched on: every *.wants link in its
   # /etc/systemd/system, in one listing (they live under different targets:
   # tailscaled in multi-user, bluetooth in bluetooth.target...).
-  local -a services=() was_on=() turn_on=()
+  local -a services=() was_on=() turn_on=() units=()
   local svc enabled=""
   if [[ -z $into ]]; then
     mapfile -t services < <(jq -r '.services[]' "$plan")
-    ((${#services[@]})) && enabled="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --out-format='%n' \
+    mapfile -t units < <(jq -r '.units // [] | .[]' "$plan")
+    ((${#services[@]} + ${#units[@]})) && enabled="$(rsync "${RSYNC_RSH[@]}" --no-motd -n -a --out-format='%n' \
       "$(d_target "os/$M_TS/etc/systemd/system/")" "$MIGRATE_TMP/empty/" 2>>"$OMARCHY_TM_LOG" || true)"
   fi
 
@@ -2490,6 +2491,21 @@ cmd_migrate_apply() {
   done
   [[ -n $stage ]] && rm -rf "$stage"
 
+  # System tweaks: services of the user's own are switched on again if the
+  # old system had them on (they start at the next start-up, like the rest
+  # of what changed in /etc).
+  if [[ -z $into ]] && jq -e '[.jobs[].dest | select(startswith("/etc/systemd/"))] | length > 0' "$plan" >/dev/null; then
+    systemctl daemon-reload 2>>"$OMARCHY_TM_LOG" || problems+=("systemd didn't reload its services")
+    local unit
+    for unit in "${units[@]}"; do
+      [[ $unit =~ ^[A-Za-z0-9@._:-]+$ ]] || continue
+      if grep -qE "\.wants/${unit//./\\.}\$" <<<"$enabled" && systemctl cat "$unit" >/dev/null 2>&1; then
+        systemctl enable "$unit" 2>>"$OMARCHY_TM_LOG" && printf '  %s  %s\n' "on" "$unit" ||
+          problems+=("couldn't switch $unit on")
+      fi
+    done
+  fi
+
   # Which items are back: app installed (if it is one) and every one of its
   # settings in place.
   local done_items=""
@@ -2542,6 +2558,8 @@ cmd_migrate_apply() {
     echo "Migrate my saved config: $ok settings back, apps installed."
     echo "The restore point from $M_LABEL is kept, so you can pick more later with oma-migrate."
     echo "Next: Restore my files, from the OmaBackups panel."
+    jq -e '.restart == true' "$plan" >/dev/null 2>&1 &&
+      echo "Then restart the computer: some of your system tweaks only take effect at start-up."
   fi
   if ((${#problems[@]})); then
     echo
