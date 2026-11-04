@@ -1,0 +1,755 @@
+{
+ "_about": "oma-migrate: what the scanner knows about common apps and settings. Apps are keyed by package (or Flatpak id). 'paths' are where the app keeps settings and data (~ = the user's home). 'weight' 0-100 is how much the user would miss it; it sets the list order together with size. 'suggest' is keep / leave / you. Anything not listed here is still found: the scanner guesses settings folders from the app's names.",
+ "apps": {
+  "tailscale": {
+   "name": "Tailscale",
+   "paths": [
+    "/var/lib/tailscale"
+   ],
+   "weight": 90,
+   "suggest": "keep",
+   "why": "keeps this computer's name and address on your network, so you don't have to approve it again"
+  },
+  "firefox": {
+   "name": "Firefox",
+   "paths": [
+    "~/.mozilla/firefox"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "why": "bookmarks, saved passwords and logins"
+  },
+  "thunderbird": {
+   "name": "Thunderbird",
+   "paths": [
+    "~/.thunderbird"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "why": "your email accounts and local mail"
+  },
+  "google-chrome": {
+   "name": "Google Chrome",
+   "paths": [
+    "~/.config/google-chrome"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "why": "bookmarks, saved passwords and logins"
+  },
+  "brave-bin": {
+   "name": "Brave",
+   "paths": [
+    "~/.config/BraveSoftware"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "why": "bookmarks, saved passwords and logins"
+  },
+  "zen-browser-bin": {
+   "name": "Zen Browser",
+   "paths": [
+    "~/.zen"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "why": "bookmarks, saved passwords and logins"
+  },
+  "keepassxc": {
+   "name": "KeePassXC",
+   "paths": [
+    "~/.config/keepassxc"
+   ],
+   "weight": 75,
+   "suggest": "keep",
+   "why": "your password app and its settings"
+  },
+  "1password": {
+   "name": "1Password",
+   "paths": [
+    "~/.config/1Password"
+   ],
+   "weight": 75,
+   "suggest": "keep",
+   "why": "saves signing in again"
+  },
+  "bitwarden": {
+   "name": "Bitwarden",
+   "paths": [
+    "~/.config/Bitwarden"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "saves signing in again"
+  },
+  "nextcloud-client": {
+   "name": "Nextcloud",
+   "paths": [
+    "~/.config/Nextcloud"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "your login and which folders sync where"
+  },
+  "syncthing": {
+   "name": "Syncthing",
+   "paths": [
+    "~/.local/state/syncthing",
+    "~/.config/syncthing"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "keeps this computer's identity, so your other devices still recognise it"
+  },
+  "arduino-ide-bin": {
+   "name": "Arduino IDE",
+   "paths": [
+    "~/.arduino15",
+    "~/Arduino",
+    "~/.config/arduino-ide"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "installed boards and libraries take a long time to set up again"
+  },
+  "arduino-ide": {
+   "name": "Arduino IDE",
+   "paths": [
+    "~/.arduino15",
+    "~/Arduino",
+    "~/.config/arduino-ide"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "installed boards and libraries take a long time to set up again"
+  },
+  "arduino-cli": {
+   "name": "Arduino CLI",
+   "paths": [
+    "~/.arduino15"
+   ],
+   "weight": 40,
+   "suggest": "keep",
+   "why": "goes with your Arduino boards and libraries"
+  },
+  "platformio-core": {
+   "name": "PlatformIO",
+   "paths": [
+    "~/.platformio"
+   ],
+   "weight": 55,
+   "suggest": "keep",
+   "why": "board toolchains are a big download"
+  },
+  "freecad": {
+   "name": "FreeCAD",
+   "paths": [
+    "~/.config/FreeCAD",
+    "~/.local/share/FreeCAD"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "your preferences, workbenches and add-ons"
+  },
+  "bambustudio-bin": {
+   "name": "Bambu Studio",
+   "paths": [
+    "~/.config/BambuStudio"
+   ],
+   "weight": 65,
+   "suggest": "keep",
+   "why": "printer and filament profiles are fiddly to set up again"
+  },
+  "bambustudio": {
+   "name": "Bambu Studio",
+   "paths": [
+    "~/.config/BambuStudio"
+   ],
+   "weight": 65,
+   "suggest": "keep",
+   "why": "printer and filament profiles are fiddly to set up again"
+  },
+  "orca-slicer-bin": {
+   "name": "OrcaSlicer",
+   "paths": [
+    "~/.config/OrcaSlicer"
+   ],
+   "weight": 65,
+   "suggest": "keep",
+   "why": "printer and filament profiles are fiddly to set up again"
+  },
+  "prusa-slicer": {
+   "name": "PrusaSlicer",
+   "paths": [
+    "~/.config/PrusaSlicer"
+   ],
+   "weight": 65,
+   "suggest": "keep",
+   "why": "printer and filament profiles are fiddly to set up again"
+  },
+  "cura-bin": {
+   "name": "Cura",
+   "paths": [
+    "~/.config/cura",
+    "~/.local/share/cura"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "printer profiles"
+  },
+  "kicad": {
+   "name": "KiCad",
+   "paths": [
+    "~/.config/kicad",
+    "~/.local/share/kicad"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "your libraries and settings"
+  },
+  "blender": {
+   "name": "Blender",
+   "paths": [
+    "~/.config/blender"
+   ],
+   "weight": 55,
+   "suggest": "keep",
+   "why": "your preferences and add-ons"
+  },
+  "gimp": {
+   "name": "GIMP",
+   "paths": [
+    "~/.config/GIMP"
+   ],
+   "weight": 45,
+   "suggest": "keep",
+   "why": "brushes, plug-ins and preferences"
+  },
+  "inkscape": {
+   "name": "Inkscape",
+   "paths": [
+    "~/.config/inkscape"
+   ],
+   "weight": 45,
+   "suggest": "keep",
+   "why": "preferences and extensions"
+  },
+  "obs-studio": {
+   "name": "OBS Studio",
+   "paths": [
+    "~/.config/obs-studio"
+   ],
+   "weight": 50,
+   "suggest": "keep",
+   "why": "your scenes and recording settings"
+  },
+  "kdenlive": {
+   "name": "Kdenlive",
+   "paths": [
+    "~/.config/kdenliverc",
+    "~/.local/share/kdenlive"
+   ],
+   "weight": 40,
+   "suggest": "you",
+   "why": ""
+  },
+  "davinci-resolve": {
+   "name": "DaVinci Resolve",
+   "paths": [
+    "~/.local/share/DaVinciResolve"
+   ],
+   "weight": 55,
+   "suggest": "keep",
+   "why": "your project database"
+  },
+  "steam": {
+   "name": "Steam",
+   "paths": [
+    "~/.local/share/Steam",
+    "~/.steam"
+   ],
+   "weight": 50,
+   "suggest": "you",
+   "why": "games can be downloaded again, but big ones take hours"
+  },
+  "heroic-games-launcher-bin": {
+   "name": "Heroic",
+   "paths": [
+    "~/.config/heroic",
+    "~/Games/Heroic"
+   ],
+   "weight": 45,
+   "suggest": "you",
+   "why": "games can be downloaded again"
+  },
+  "lutris": {
+   "name": "Lutris",
+   "paths": [
+    "~/.config/lutris",
+    "~/.local/share/lutris"
+   ],
+   "weight": 45,
+   "suggest": "you",
+   "why": ""
+  },
+  "discord": {
+   "name": "Discord",
+   "paths": [
+    "~/.config/discord"
+   ],
+   "weight": 25,
+   "suggest": "you",
+   "why": "you just sign in again"
+  },
+  "spotify": {
+   "name": "Spotify",
+   "paths": [
+    "~/.config/spotify"
+   ],
+   "weight": 20,
+   "suggest": "you",
+   "why": "you just sign in again"
+  },
+  "signal-desktop": {
+   "name": "Signal",
+   "paths": [
+    "~/.config/Signal"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "why": "your message history lives only on this computer"
+  },
+  "telegram-desktop": {
+   "name": "Telegram",
+   "paths": [
+    "~/.local/share/TelegramDesktop"
+   ],
+   "weight": 30,
+   "suggest": "you",
+   "why": "you just sign in again"
+  },
+  "visual-studio-code-bin": {
+   "name": "VS Code",
+   "paths": [
+    "~/.config/Code",
+    "~/.vscode"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "your extensions and settings"
+  },
+  "code": {
+   "name": "Code - OSS",
+   "paths": [
+    "~/.config/Code - OSS",
+    "~/.vscode-oss"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "your extensions and settings"
+  },
+  "cursor-bin": {
+   "name": "Cursor",
+   "paths": [
+    "~/.config/Cursor",
+    "~/.cursor"
+   ],
+   "weight": 60,
+   "suggest": "keep",
+   "why": "your extensions and settings"
+  },
+  "zed": {
+   "name": "Zed",
+   "paths": [
+    "~/.config/zed",
+    "~/.local/share/zed"
+   ],
+   "weight": 55,
+   "suggest": "keep",
+   "why": "your settings and extensions"
+  },
+  "lmstudio-bin": {
+   "name": "LM Studio",
+   "paths": [
+    "~/.lmstudio",
+    "~/.config/LM Studio"
+   ],
+   "weight": 35,
+   "suggest": "you",
+   "why": "mostly downloaded AI models, which can be downloaded again"
+  },
+  "lmstudio": {
+   "name": "LM Studio",
+   "paths": [
+    "~/.lmstudio",
+    "~/.config/LM Studio"
+   ],
+   "weight": 35,
+   "suggest": "you",
+   "why": "mostly downloaded AI models, which can be downloaded again"
+  },
+  "ollama": {
+   "name": "Ollama",
+   "paths": [
+    "/var/lib/ollama",
+    "~/.ollama"
+   ],
+   "weight": 35,
+   "suggest": "you",
+   "why": "mostly downloaded AI models, which can be downloaded again"
+  },
+  "sunshine": {
+   "name": "Sunshine",
+   "paths": [
+    "~/.config/sunshine"
+   ],
+   "weight": 40,
+   "suggest": "you",
+   "why": "keeps your paired devices"
+  },
+  "nordvpn-bin": {
+   "name": "NordVPN",
+   "paths": [
+    "/var/lib/nordvpn"
+   ],
+   "weight": 20,
+   "suggest": "you",
+   "why": "you just sign in again"
+  },
+  "mullvad-vpn-bin": {
+   "name": "Mullvad VPN",
+   "paths": [
+    "/etc/mullvad-vpn"
+   ],
+   "weight": 20,
+   "suggest": "you",
+   "why": "you just sign in again"
+  },
+  "fprintd": {
+   "name": "Fingerprint reader",
+   "paths": [
+    "/var/lib/fprint"
+   ],
+   "weight": 55,
+   "suggest": "keep",
+   "why": "keeps your enrolled fingers for login and sudo"
+  },
+  "xournalpp": {
+   "name": "Xournal++",
+   "paths": [
+    "~/.config/xournalpp"
+   ],
+   "weight": 25,
+   "suggest": "you",
+   "why": ""
+  },
+  "rpi-imager": {
+   "name": "Raspberry Pi Imager",
+   "paths": [
+    "~/.config/Raspberry Pi"
+   ],
+   "weight": 20,
+   "suggest": "you",
+   "why": ""
+  },
+  "virtualbox": {
+   "name": "VirtualBox",
+   "paths": [
+    "~/.config/VirtualBox",
+    "~/VirtualBox VMs"
+   ],
+   "weight": 50,
+   "suggest": "you",
+   "why": "your virtual machines can be very large"
+  },
+  "voxtype-bin": {
+   "name": "Voxtype dictation",
+   "paths": [
+    "~/.config/voxtype",
+    "~/.local/share/voxtype"
+   ],
+   "weight": 30,
+   "suggest": "leave",
+   "why": "Omarchy 4.5 has dictation built in"
+  },
+  "voxtype": {
+   "name": "Voxtype dictation",
+   "paths": [
+    "~/.config/voxtype",
+    "~/.local/share/voxtype"
+   ],
+   "weight": 30,
+   "suggest": "leave",
+   "why": "Omarchy 4.5 has dictation built in"
+  },
+  "pika-backup": {
+   "name": "Pika Backup",
+   "paths": [
+    "~/.config/pika-backup"
+   ],
+   "weight": 20,
+   "suggest": "leave",
+   "why": "OmaBackups does this job"
+  },
+  "timeshift": {
+   "name": "Timeshift",
+   "paths": [
+    "/etc/timeshift"
+   ],
+   "weight": 20,
+   "suggest": "leave",
+   "why": "OmaBackups does this job"
+  },
+  "deja-dup": {
+   "name": "Déjà Dup",
+   "paths": [],
+   "weight": 20,
+   "suggest": "leave",
+   "why": "OmaBackups does this job"
+  },
+  "restic": {
+   "name": "restic",
+   "paths": [],
+   "weight": 15,
+   "suggest": "you",
+   "why": "only if you set it up for something else"
+  }
+ },
+ "settings": [
+  {
+   "id": "ssh",
+   "name": "SSH keys",
+   "paths": [
+    "~/.ssh"
+   ],
+   "weight": 95,
+   "suggest": "keep",
+   "what": "How you log in to other computers and servers without a password.",
+   "why": "losing them means setting up every remote login again"
+  },
+  {
+   "id": "keyring",
+   "name": "Saved app passwords",
+   "paths": [
+    "~/.local/share/keyrings"
+   ],
+   "weight": 92,
+   "suggest": "keep",
+   "what": "The keyring where apps keep passwords.",
+   "why": "your browser's saved passwords can't be opened without it"
+  },
+  {
+   "id": "gnupg",
+   "name": "GPG keys",
+   "paths": [
+    "~/.gnupg"
+   ],
+   "weight": 90,
+   "suggest": "keep",
+   "what": "Keys for signing and encrypting.",
+   "why": "they can't be made again"
+  },
+  {
+   "id": "chromium",
+   "name": "Chromium profile",
+   "paths": [
+    "~/.config/chromium"
+   ],
+   "weight": 88,
+   "suggest": "keep",
+   "what": "Your browser: bookmarks, saved passwords, extensions and logins.",
+   "why": "saves signing in to every site again"
+  },
+  {
+   "id": "ai-agents",
+   "name": "AI coding assistants",
+   "paths": [
+    "~/.claude",
+    "~/.claude.json",
+    "~/.codex",
+    "~/.gemini",
+    "~/.grok",
+    "~/.config/opencode",
+    "~/.local/share/opencode",
+    "~/.config/amp",
+    "~/.cursor"
+   ],
+   "weight": 72,
+   "suggest": "keep",
+   "what": "Memory, settings and logins for Claude Code, Codex, Gemini and similar tools.",
+   "why": "Omarchy installs the tools again, but not what they remember about you and your projects"
+  },
+  {
+   "id": "wifi",
+   "name": "Wi-Fi networks",
+   "paths": [
+    "/var/lib/iwd",
+    "/etc/NetworkManager/system-connections"
+   ],
+   "weight": 85,
+   "suggest": "keep",
+   "what": "Saved Wi-Fi networks and their passwords.",
+   "why": ""
+  },
+  {
+   "id": "git",
+   "name": "Git identity",
+   "paths": [
+    "~/.gitconfig",
+    "~/.config/git"
+   ],
+   "weight": 75,
+   "suggest": "keep",
+   "what": "Your name and email on commits.",
+   "why": ""
+  },
+  {
+   "id": "gh",
+   "name": "GitHub login",
+   "paths": [
+    "~/.config/gh"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "what": "The GitHub command-line login.",
+   "why": "saves logging in again"
+  },
+  {
+   "id": "bluetooth",
+   "name": "Bluetooth pairings",
+   "paths": [
+    "/var/lib/bluetooth"
+   ],
+   "weight": 70,
+   "suggest": "keep",
+   "what": "Headphones, keyboards, mice and controllers.",
+   "why": "saves pairing everything again"
+  },
+  {
+   "id": "desktop",
+   "name": "Your desktop tweaks",
+   "paths": [
+    "~/.config/hypr",
+    "~/.config/omarchy"
+   ],
+   "weight": 60,
+   "suggest": "you",
+   "merge": true,
+   "skip_under": [
+    "~/.config/omarchy/plugins"
+   ],
+   "what": "Keybinds, monitors, theme and bar layout.",
+   "why": "on a new Omarchy release only your own changes should come across, not the old defaults"
+  },
+  {
+   "id": "shell",
+   "name": "Terminal setup",
+   "paths": [
+    "~/.bashrc",
+    "~/.bash_profile",
+    "~/.bash_history",
+    "~/.zshrc",
+    "~/.zsh_history",
+    "~/.config/fish",
+    "~/.inputrc"
+   ],
+   "weight": 40,
+   "suggest": "you",
+   "merge": true,
+   "what": "Your shell settings and command history.",
+   "why": ""
+  },
+  {
+   "id": "printers",
+   "name": "Printers",
+   "paths": [
+    "/etc/cups/printers.conf",
+    "/etc/cups/ppd"
+   ],
+   "weight": 40,
+   "suggest": "you",
+   "what": "Printers you set up.",
+   "why": ""
+  }
+ ],
+ "shared_dirs": [
+  "applications",
+  "autostart",
+  "systemd",
+  "dconf",
+  "fontconfig",
+  "fonts",
+  "icons",
+  "themes",
+  "mime",
+  "gtk-2.0",
+  "gtk-3.0",
+  "gtk-4.0",
+  "pulse",
+  "pipewire",
+  "wireplumber",
+  "omarchy",
+  "hypr",
+  "mise",
+  "git",
+  "nvim",
+  "uv",
+  "python",
+  "keyrings",
+  "recently-used.xbel",
+  "Trash",
+  "xdg-desktop-portal",
+  "user-dirs.dirs",
+  "menus",
+  "nautilus",
+  "go",
+  "cargo",
+  "npm",
+  "node",
+  "java",
+  "bin",
+  "lib",
+  "share",
+  "state",
+  "data",
+  "config",
+  "local",
+  "cache",
+  "desktop"
+ ],
+ "hidden": {
+  ".platformio": {
+   "name": "PlatformIO toolchains",
+   "suggest": "leave",
+   "why": "it downloads these again the first time you build"
+  },
+  ".vscode": {
+   "name": "VS Code extensions",
+   "suggest": "you",
+   "why": ""
+  },
+  ".npm": {
+   "skip": true
+  },
+  ".gradle": {
+   "name": "Gradle cache",
+   "suggest": "leave",
+   "why": "a download cache; it fills itself again"
+  },
+  ".m2": {
+   "name": "Maven cache",
+   "suggest": "leave",
+   "why": "a download cache; it fills itself again"
+  },
+  ".nuget": {
+   "name": "NuGet cache",
+   "suggest": "leave",
+   "why": "a download cache; it fills itself again"
+  },
+  ".wine": {
+   "name": "Wine (Windows apps)",
+   "suggest": "you",
+   "why": "Windows programs you installed through Wine live here"
+  }
+ }
+}
