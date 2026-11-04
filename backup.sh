@@ -44,6 +44,7 @@ while [[ $# -gt 0 ]]; do
     --copy) MODE=copy; shift; break ;;
     --put-back-system) MODE=put_back_system; shift ;;
     --restore-files) MODE=restore_files; shift; break ;;
+    --migrate-plan) MODE=migrate_plan; shift; break ;;
     --health) MODE=health; shift; break ;;
     *) die "unknown flag: $1" ;;
   esac
@@ -2072,6 +2073,101 @@ cmd_files() {
   fi
 }
 
+# Migrate my picks, dry run: read the user's list out of a restore point and
+# say what migrating it would do, without changing anything. The list is
+# the one the picker saved (~/.config/omarchy-backups/migrate.json), carried
+# into the restore point by an ordinary backup. Each setting is asked about
+# with a no-copy rsync (-n) from the restore point into an empty folder, so
+# the sizes are what would really cross, and a missing one is reported, not
+# guessed. Run as root: the backup is opened the way Restore my files opens
+# it (pick_source / open_destination), and the system side (os/) is read too.
+MIGRATE_TMP=""
+migrate_cleanup() {
+  local rc=$?
+  trap - EXIT
+  [[ -n $MIGRATE_TMP && -d $MIGRATE_TMP ]] && rm -rf "$MIGRATE_TMP"
+  release_source
+  remote_close || true
+  exit "$rc"
+}
+
+cmd_migrate_plan() {
+  local ts=${1:-} user=${SUDO_USER:-} home want label where c found="" rc out
+  OMARCHY_TM_ALLOW_USER_DRY_RUN=0 require_root "${ORIG_ARGS[@]}"
+  [[ $user =~ ^[a-z_][a-z0-9_-]*$ && $user != root ]] || die "couldn't tell whose list to read (run it with sudo from your own account)"
+  home="$(getent passwd "$user" | cut -d: -f6)"
+  [[ -n $home ]] || die "no home folder for $user"
+  NOT_A_BACKUP=1
+  FAIL_TITLE="Couldn't read your list."
+  backup_running && fail_backup "A backup is running. Try again once it has finished."
+
+  # Which restore points to look in: the one asked for, or the newest few
+  # from the same place (the newest is usually the one holding the list).
+  local -a cands=()
+  local snaps
+  snaps="$("$OMARCHY_TM_ROOT/omarchy-backups" snapshots --json 2>>"$OMARCHY_TM_LOG" || echo '[]')"
+  if [[ -n $ts ]]; then
+    [[ $ts =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || die "usage: oma-backups migrate-plan [TIMESTAMP]"
+    cands=("$ts")
+  else
+    mapfile -t cands < <(jq -r '[.[] | select(.valid and .has_home)] | .[:6] | .[].timestamp' <<<"$snaps")
+    ((${#cands[@]})) || fail_backup "There are no restore points to read your list from."
+  fi
+  want="$(source_for_ts "${cands[0]}")"
+
+  MIGRATE_TMP="$(mktemp -d /run/oma-migrate.XXXXXX)"
+  chmod 700 "$MIGRATE_TMP"
+  trap migrate_cleanup EXIT
+  close_stale_mapper "$LUKS_MAPPER"
+  pick_source "${cands[0]}"
+  rsync_link_flags
+  open_destination
+  where="the backup disk"
+  [[ $DEST_REMOTE == 1 ]] && where="the Pi ($REMOTE_HOST)"
+
+  for c in "${cands[@]}"; do
+    [[ $(source_for_ts "$c") == "$want" ]] || continue
+    if rsync "${RSYNC_RSH[@]}" -s --no-motd -q \
+      "$(d_target "home/$c/$user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>>"$OMARCHY_TM_LOG"; then
+      found=$c
+      break
+    fi
+  done
+  [[ -n $found ]] ||
+    fail_backup "None of the newest restore points holds your list. Run oma-migrate, save your list, back up, then try again."
+  ts=$found
+  label="$(jq -r --arg t "$ts" '(.[] | select(.timestamp == $t) | .label) // $t' <<<"$snaps") on $where"
+
+  log "found your list in the restore point from $label; checking each thing on it (nothing is copied)"
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" \
+    >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your list."
+
+  mkdir -p "$MIGRATE_TMP/empty"
+  : >"$MIGRATE_TMP/results.jsonl"
+  local n i id tree rel bytes files missing
+  n="$(jq '.jobs | length' "$MIGRATE_TMP/plan.json")"
+  for ((i = 0; i < n; i++)); do
+    id="$(jq -r --argjson i "$i" '.jobs[$i].id' "$MIGRATE_TMP/plan.json")"
+    tree="$(jq -r --argjson i "$i" '.jobs[$i].tree' "$MIGRATE_TMP/plan.json")"
+    rel="$(jq -r --argjson i "$i" '.jobs[$i].rel' "$MIGRATE_TMP/plan.json")"
+    [[ $tree == os || $tree == home ]] || continue
+    [[ $rel != *..* ]] || continue
+    out="$(rsync "${RSYNC_RSH[@]}" -s --no-motd -n -a --stats \
+      "$(d_target "$tree/$ts/$rel")" "$MIGRATE_TMP/empty/" 2>&1)" && rc=0 || rc=$?
+    bytes="$(sed -n 's/^Total file size: \([0-9,]*\) bytes.*/\1/p' <<<"$out" | tr -d ,)"
+    files="$(sed -n 's/^Number of files: \([0-9,]*\).*/\1/p' <<<"$out" | tr -d ,)"
+    missing=false
+    grep -q 'No such file or directory' <<<"$out" && missing=true
+    jq -cn --arg id "$id" --argjson rc "$rc" --arg b "${bytes:-}" --arg f "${files:-}" --argjson m "$missing" \
+      '{id: $id, rc: $rc, missing: $m, error: ($rc != 0 and ($m | not))}
+        + (if $b != "" then {bytes: ($b | tonumber)} else {} end)
+        + (if $f != "" then {files: ($f | tonumber)} else {} end)' >>"$MIGRATE_TMP/results.jsonl"
+  done
+  echo
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" report \
+    "$MIGRATE_TMP/plan.json" "$MIGRATE_TMP/results.jsonl" "$label"
+}
+
 cmd_copy() {
   local snap=${1:-} src=${2:-} dest=${3:-}
   [[ -n $snap && -n $src && -n $dest ]] || die "usage: oma-backups copy TIMESTAMP SRC DEST"
@@ -2093,5 +2189,6 @@ case "$MODE" in
   browse) cmd_browse "$@" ;;
   put_back_system) cmd_put_back_system ;;
   restore_files) cmd_restore_files "$@" ;;
+  migrate_plan) cmd_migrate_plan "$@" ;;
   health) cmd_health "$@" ;;
 esac

@@ -162,6 +162,7 @@ case "$cmd" in
   browse) exec "$OMARCHY_TM_ROOT/backup.sh" --browse "$@" ;;
   put-back-system) exec "$OMARCHY_TM_ROOT/backup.sh" --put-back-system "$@" ;;
   restore-files) exec "$OMARCHY_TM_ROOT/backup.sh" --restore-files "$@" ;;
+  migrate-plan) exec "$OMARCHY_TM_ROOT/backup.sh" --migrate-plan "$@" ;;
   prune) exec "$OMARCHY_TM_ROOT/backup.sh" --prune "$@" ;;
   rebuild-current) exec "$OMARCHY_TM_ROOT/backup.sh" --rebuild-current "$@" ;;
   health) exec "$OMARCHY_TM_ROOT/backup.sh" --health "$@" ;;
