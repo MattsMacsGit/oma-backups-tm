@@ -9,6 +9,10 @@
 #                                        backup disk stays in the Pi, nothing else changes)
 #   curl -fsSL .../pi/pi-setup.sh | sudo bash -s -- --uninstall
 #
+# --repo URL fetches the gatekeeper from that copy of the project (the laptop
+# passes the one it fetched this script from, so the two always match; an
+# environment variable didn't survive the sudo in front of bash).
+#
 # Only installs what's missing (never upgrades), never touches Docker or any
 # other disk. The laptop's key can only run oma-gate (see pi/oma-gate).
 set -euo pipefail
@@ -35,6 +39,9 @@ while [[ $# -gt 0 ]]; do
     --uuid) UUID=${2:-}; shift 2 ;;
     --key) KEY=${2:-}; shift 2 ;;
     --add-key) KEY=${2:-}; ADD=1; shift 2 ;;
+    --repo)
+      [[ ${2:-} =~ ^https://[A-Za-z0-9./_-]+$ ]] || die "--repo needs an https address"
+      REPO_RAW=${2%/}; shift 2 ;;
     --uninstall) UNINSTALL=1; shift ;;
     --update) UPDATE=1; shift ;;
     *) die "unknown option: $1" ;;

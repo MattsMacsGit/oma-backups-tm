@@ -133,7 +133,7 @@ OMA_GATE_WANT=13
 # OMA_REPO_RAW is where this copy came from, so someone testing another
 # branch points it there and gets that branch's gatekeeper.
 pi_update_cmd() {
-  printf 'curl -fsSL %s/pi/pi-setup.sh | sudo bash -s -- %s' "$OMA_REPO_RAW" "${1:---update}"
+  printf 'curl -fsSL %s/pi/pi-setup.sh | sudo bash -s -- --repo %s %s' "$OMA_REPO_RAW" "$OMA_REPO_RAW" "${1:---update}"
 }
 
 # Remember the version where the panel and doctor can read it. The SSH key

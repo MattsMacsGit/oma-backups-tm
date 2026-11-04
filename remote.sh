@@ -132,12 +132,12 @@ cmd_pair() {
 
   local setup ask
   if ((network)); then
-    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --repo $OMA_REPO_RAW --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
     ask="Let this laptop in on $host now? You'll log in to it as usual and type its sudo password."
     echo
     step "Next, the Pi needs to let this laptop in."
   else
-    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --repo $OMA_REPO_RAW --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
     ask="Set up $host now? You'll log in to it as usual and type its sudo password."
     echo
     step "Next, the Pi needs a one-time setup."
