@@ -203,7 +203,12 @@ main() {
     die "run this as your normal user; it asks for sudo itself"
 
   # Opening restore points on a paired Pi mounts them with sshfs.
-  if remote_configured; then ensure_deps sshfs; fi
+  # Only needed to open a restore point: a package mirror that doesn't answer
+  # must not stop the linking (backups and restores don't use it).
+  if remote_configured && ! command -v sshfs >/dev/null 2>&1; then
+    ( ensure_deps sshfs ) ||
+      warn "Couldn't install sshfs, which opening a restore point on the Pi needs. Backups work without it; to add it later: sudo pacman -S sshfs"
+  fi
 
   if [[ $REFRESH == 1 ]]; then
     [[ -f $OMA_LINKED ]] || die "this laptop isn't linked yet: run oma-backups link"

@@ -120,7 +120,7 @@ case "${1:-}" in
           fi
           echo
           gum style --bold "Your login name on the Pi"
-          gum style --foreground 8 "  The user name you sign in to the Pi with, e.g. pi or matt (as in ssh NAME@$pi)."
+          gum style --foreground 8 "  The user name you sign in to the Pi with, e.g. pi (as in ssh NAME@$pi)."
           gum style --foreground 8 "  Just the name here: its password is asked for in a moment."
           who="$(gum input --header "Login name on the Pi at $pi" --value "$USER")" || exit 1
           if [[ ! $who =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
