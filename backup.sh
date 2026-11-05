@@ -391,6 +391,32 @@ d_exists() {
   if [[ $DEST_REMOTE == 1 ]]; then rgate exists "$1" 2>>"$OMARCHY_TM_LOG"; else [[ -e $MNT/$1 ]]; fi
 }
 
+# Which user folder in a restore point holds this user's files. Normally
+# their own name. A fresh install made under another name (backed up as
+# matt, now test) has no folder by that name: then the restore point's only
+# user folder is theirs. Several folders and none by this name: this name,
+# so the caller's own "no copy of your home folder" still stands -- guessing
+# between two people's files would be worse.
+point_user() {
+  local ts=$1 user=$2
+  local -a users=()
+  if [[ $DEST_REMOTE == 1 ]]; then
+    # The gatekeeper's "exists" only answers two levels deep; rsync can list.
+    mapfile -t users < <(rsync "${RSYNC_RSH[@]}" --no-motd --list-only "$(d_target "home/$ts/")" 2>>"$OMARCHY_TM_LOG" |
+      awk '$1 ~ /^d/ && $NF != "." {print $NF}')
+  else
+    mapfile -t users < <(find "$MNT/home/$ts" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null)
+  fi
+  local u
+  for u in "${users[@]}"; do [[ $u == "$user" ]] && { printf '%s\n' "$user"; return 0; }; done
+  if ((${#users[@]} == 1)) && [[ ${users[0]} =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
+    log "no $user folder in $ts; its only user folder is ${users[0]}, so that's this user's"
+    printf '%s\n' "${users[0]}"
+    return 0
+  fi
+  printf '%s\n' "$user"
+}
+
 # Functions don't inherit the ERR trap, so these fail loudly themselves.
 d_mkdir() {
   if [[ $DEST_REMOTE == 1 ]]; then
@@ -1630,6 +1656,7 @@ cmd_browse() {
   close_stale_mapper "$LUKS_MAPPER"
   pick_source "$ts"
   open_destination
+  user="$(point_user "$ts" "$user")"
 
   if [[ $DEST_REMOTE != 1 ]]; then
     local path="$MNT/home/$ts/$user"
@@ -1770,9 +1797,14 @@ cmd_restore_files() {
   # deep); a missing home folder inside it is rsync's to report.
   if [[ $DEST_REMOTE == 1 ]]; then
     d_exists "home/$ts" || fail_backup "That restore point isn't on the backup any more."
-  else
-    [[ -d $MNT/home/$ts/$user ]] || fail_backup "No copy of your home folder in that restore point."
   fi
+  # Whose folder in the restore point: theirs, or the old name they had.
+  local from_user
+  from_user="$(point_user "$ts" "$user")"
+  if [[ $DEST_REMOTE != 1 ]]; then
+    [[ -d $MNT/home/$ts/$from_user ]] || fail_backup "No copy of your home folder in that restore point."
+  fi
+  [[ $from_user == "$user" ]] || log_file "the restore point has these files under $from_user; bringing them into $user's home"
 
   # As the user, the way the plugin's own copy always came back: never
   # root's, and never an old uid that means someone else on this machine.
@@ -1807,7 +1839,7 @@ cmd_restore_files() {
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/progress.py" steps \
     "files-check=Checking what's missing" "files=Bringing your files back" || true
   local from rc
-  from="$(d_target "home/$ts/$user")"
+  from="$(d_target "home/$ts/$from_user")"
   tree_rsync check files "$from" "$home"
   rc=$TREE_RC
   if ((rc == 0 || rc == 23 || rc == 24)); then
@@ -2191,15 +2223,17 @@ migrate_open_list() {
 
   # No -s (--protect-args): the Pi's rrsync refuses it, and these paths
   # have no spaces to protect.
-  local err="" ferr
+  local err="" ferr src_user=$user
   for c in "${cands[@]}"; do
+    # The old system's user may have had another name (matt then, test now).
+    src_user="$(point_user "$c" "$user")"
     if ((M_LOCAL_LIST)); then
       cp "$local_list" "$MIGRATE_TMP/list.json"
       found=$c
       break
     fi
     if ferr="$(rsync "${RSYNC_RSH[@]}" --no-motd -q \
-      "$(d_target "home/$c/$user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>&1)"; then
+      "$(d_target "home/$c/$src_user/.config/omarchy-backups/migrate.json")" "$MIGRATE_TMP/list.json" 2>&1)"; then
       found=$c
       break
     fi
@@ -2219,7 +2253,8 @@ migrate_open_list() {
   local -a done_arg=()
   [[ $(jq -r '.snapshot // ""' "$OMARCHY_TM_STATE/migrated.json" 2>/dev/null) == "$ts" ]] &&
     done_arg=(--done="$OMARCHY_TM_STATE/migrated.json")
-  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" "${done_arg[@]}" \
+  [[ $src_user == "$user" ]] || log "your saved config is under $src_user in that restore point; it comes back into $user's home"
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" "${done_arg[@]}" --from-user="$src_user" \
     >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your saved config."
   M_TS=$ts M_USER=$user M_HOME=$home M_LABEL=$label M_WHERE=$where
 }

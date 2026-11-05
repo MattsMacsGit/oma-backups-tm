@@ -70,11 +70,13 @@ def run(cmd: list[str], timeout: int = 60) -> tuple[int, str]:
         return 1, ""
 
 
-def job_for(path: str, user: str, home: str) -> dict:
-    """Where one saved path lives in a restore point, and where it goes."""
+def job_for(path: str, user: str, home: str, from_user: str | None = None) -> dict:
+    """Where one saved path lives in a restore point, and where it goes.
+    from_user is the folder it's under in the restore point, when the old
+    system's user had another name than this one's."""
     if path == "~" or path.startswith("~/"):
         rel = path[2:]
-        return {"tree": "home", "rel": f"{user}/{rel}", "dest": f"{home}/{rel}", "owner": "user", "path": path}
+        return {"tree": "home", "rel": f"{from_user or user}/{rel}", "dest": f"{home}/{rel}", "owner": "user", "path": path}
     if path.startswith("/") and ".." not in path.split("/"):
         return {"tree": "os", "rel": path.lstrip("/"), "dest": path, "owner": "root", "path": path}
     raise ValueError(f"not a path this can bring back: {path!r}")
@@ -114,7 +116,8 @@ def check_flatpak(app_id: str) -> str:
     return "flathub" if rc == 0 else "missing"
 
 
-def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | None = None) -> dict:
+def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | None = None,
+         from_user: str | None = None) -> dict:
     done = done or set()
     out = {
         "list_saved_at": lst.get("saved_at"),
@@ -135,7 +138,10 @@ def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | N
     }
     if lst.get("format") != 1:
         out["warnings"].append("This list was saved by a newer or older oma-migrate; some things may be skipped.")
-    if lst.get("user") and lst["user"] != user:
+    if from_user and from_user != user:
+        out["from_user"] = from_user
+        out["warnings"].append(f"Your old files are under {from_user} in the backup; they come back into {user}'s home.")
+    elif lst.get("user") and lst["user"] != user:
         out["warnings"].append(f"This config was saved by {lst['user']}; bringing it back into {user}'s home.")
 
     services: set[str] = set()
@@ -174,7 +180,7 @@ def plan(lst: dict, user: str, home: str, check: bool = True, done: set[str] | N
 
         for p in i.get("paths", []):
             try:
-                j = job_for(p["path"], user, home)
+                j = job_for(p["path"], user, home, from_user)
             except ValueError as e:
                 out["warnings"].append(str(e))
                 continue
@@ -343,13 +349,16 @@ def main() -> int:
         lst = json.loads(Path(sys.argv[2]).read_text())
         check = "--no-check" not in sys.argv
         done: set[str] = set()
+        from_user = None
         for a in sys.argv[5:]:
+            if a.startswith("--from-user=") and re.fullmatch(r"[a-z_][a-z0-9_.-]*", a[12:]):
+                from_user = a[12:]
             if a.startswith("--done="):
                 try:
                     done = set(json.loads(Path(a[7:]).read_text()).get("done", []))
                 except (OSError, ValueError):
                     pass
-        print(json.dumps(plan(lst, sys.argv[3], sys.argv[4], check=check, done=done), indent=1))
+        print(json.dumps(plan(lst, sys.argv[3], sys.argv[4], check=check, done=done, from_user=from_user), indent=1))
         return 0
     if len(sys.argv) == 5 and sys.argv[1] == "report":
         pl = json.loads(Path(sys.argv[2]).read_text())
