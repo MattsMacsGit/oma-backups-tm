@@ -638,6 +638,21 @@ system_id() {
   findmnt -n -o UUID / 2>/dev/null | head -1
 }
 
+# Where this system came from: a Quick System Rescue or Full Unattended
+# Restore (restore-to-disk.sh writes the record), or Migrate my saved config
+# on a fresh install (it takes over the old system's backup). Fields:
+# snapshot, system (this system's own ID: the record only counts here),
+# level, and after a migration from_system and from_user (the old system,
+# and the name its user had). Prints one field, or fails if there is no
+# record for this system.
+takeover_field() {
+  [[ -r ${OMA_RESTORED_FROM:-/etc/omarchy-backups/restored-from.json} ]] || return 1
+  local f=${OMA_RESTORED_FROM:-/etc/omarchy-backups/restored-from.json} id
+  id="$(system_id)"
+  [[ -n $id && $(jq -r '.system // ""' "$f" 2>/dev/null) == "$id" ]] || return 1
+  jq -r --arg k "$1" '.[$k] // "" | tostring' "$f" 2>/dev/null
+}
+
 # Where a restore records which restore point it came from, inside the
 # system it made (restore-to-disk.sh writes it, backup.sh reads it).
 # shellcheck disable=SC2034 # used by the scripts that source this
@@ -773,8 +788,11 @@ OMA_SCHEDULE_UNIT=/etc/systemd/system/oma-backups-scheduled.service
 refresh_root_copy() {
   [[ ${EUID:-$(id -u)} -eq 0 && $OMARCHY_TM_ROOT != "$OMA_ROOT_COPY" ]] || return 0
   mkdir -p "$OMA_ROOT_COPY"
-  rsync -a --delete --exclude .git/ --exclude __pycache__/ --exclude .claude-notes/ \
+  rsync -a --delete --exclude .git/ --exclude __pycache__/ --exclude .claude-notes/ --exclude BRANCH \
     "$OMARCHY_TM_ROOT/" "$OMA_ROOT_COPY/"
+  # Which branch this copy came from (it has no .git): the Pi's setup script
+  # is fetched from the same one.
+  sed -n 's|^ref: refs/heads/||p' "$OMARCHY_TM_ROOT/.git/HEAD" 2>/dev/null >"$OMA_ROOT_COPY/BRANCH" || true
   chown -R root:root "$OMA_ROOT_COPY"
   chmod -R go-w "$OMA_ROOT_COPY"
   # install.sh only ever put `oma-backups` in the user's own ~/.local/bin,

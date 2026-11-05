@@ -393,7 +393,7 @@ d_exists() {
 
 # Which user folder in a restore point holds this user's files. Normally
 # their own name. A fresh install made under another name (backed up as
-# matt, now test) has no folder by that name: then the restore point's only
+# alex, now sam) has no folder by that name: then the restore point's only
 # user folder is theirs. Several folders and none by this name: this name,
 # so the caller's own "no copy of your home folder" still stands -- guessing
 # between two people's files would be worse.
@@ -407,8 +407,14 @@ point_user() {
   else
     mapfile -t users < <(find "$MNT/home/$ts" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null)
   fi
-  local u
+  local u rec
   for u in "${users[@]}"; do [[ $u == "$user" ]] && { printf '%s\n' "$user"; return 0; }; done
+  # Migrated here from a system where this user had another name: the record
+  # says which.
+  rec="$(takeover_field from_user 2>/dev/null || true)"
+  if [[ -n $rec && $(takeover_field user 2>/dev/null || true) == "$user" ]]; then
+    for u in "${users[@]}"; do [[ $u == "$rec" ]] && { printf '%s\n' "$rec"; return 0; }; done
+  fi
   if ((${#users[@]} == 1)) && [[ ${users[0]} =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
     log "no $user folder in $ts; its only user folder is ${users[0]}, so that's this user's"
     printf '%s\n' "${users[0]}"
@@ -684,12 +690,15 @@ reuse_points() {
     if [[ $DEST_REMOTE == 1 && $(rgate version 2>/dev/null || echo 0) -lt 12 ]]; then
       log_file "the Pi's gatekeeper is older than 12: not looking for files it already has"
     else
-      local list manifests
+      local list manifests lineage
       list="$(d_list_json 2>/dev/null || true)"
       manifests="$(d_manifests)"
-      REUSE_POINTS="$(jq -r --arg s "${SYSTEM_ID:-}" --argjson m "${manifests:-"{}"}" '
+      # Also the restore points of the system this one carries on from (a
+      # migration or a rescue): the same files, stored once.
+      lineage="$(system_lineage "${manifests:-"{}"}")"
+      REUSE_POINTS="$(jq -r --arg s "${SYSTEM_ID:-}" --argjson m "${manifests:-"{}"}" --argjson anc "${lineage:-[]}" '
         [.[]? | .timestamp // empty | select(test("^[0-9]{8}T[0-9]{6}Z$"))]
-        | map(select(($m[.].system // $s) == $s)) | sort | reverse | .[]' <<<"${list:-[]}" 2>/dev/null || true)"
+        | map(select(($m[.].system // $s) as $x | $x == $s or ($anc | index($x)) != null)) | sort | reverse | .[]' <<<"${list:-[]}" 2>/dev/null || true)"
     fi
   fi
   [[ -n $REUSE_POINTS ]] && printf '%s\n' "$REUSE_POINTS"
@@ -775,8 +784,25 @@ d_manifests() {
 # by it instead of walking the backup first; a backup finds this system's own
 # restore points by it. Best effort: without it a restore measures instead,
 # so it never fails a backup.
+# The systems this one carries on from, as a JSON list: the one it was
+# restored or migrated from, and the ones that one carried on from (each
+# restore point's manifest lists them under "follows"). Their restore points
+# count as this system's own: their files can be reused, and the panel's
+# history is one history. MANIFESTS is d_manifests' output, or empty to
+# fetch it (only when there is a record to follow).
+system_lineage() {
+  local m=${1:-} snap from
+  snap="$(takeover_field snapshot 2>/dev/null || true)"
+  [[ $snap =~ ^[0-9]{8}T[0-9]{6}Z$ ]] || { echo '[]'; return 0; }
+  from="$(takeover_field from_system 2>/dev/null || true)"
+  [[ -n $m ]] || m="$(d_manifests 2>/dev/null || echo '{}')"
+  jq -c --arg s "$snap" --arg from "$from" --arg own "${SYSTEM_ID:-}" '
+    ([$from, (.[$s].system // ""), ((.[$s].follows // [])[]?)]
+      | map(select(type == "string" and . != "" and . != $own)) | unique)' <<<"$m" 2>/dev/null || echo '[]'
+}
+
 write_manifest() {
-  local ts=$1 t b f json='{}' tmp
+  local ts=$1 t b f json='{}' tmp lineage
   for t in os home esp; do
     is_done "$t" || continue
     b="$(step_size "$t")" f="$(step_files "$t")"
@@ -784,8 +810,10 @@ write_manifest() {
     json="$(jq -c --arg t "$t" --argjson b "$b" --argjson f "$f" '.[$t] = {bytes: $b, files: $f}' <<<"$json")"
   done
   tmp="$(mktemp)"
-  jq -n --arg ts "$ts" --argjson trees "$json" --arg s "${SYSTEM_ID:-}" --arg h "$HOSTNAME" \
-    '{version: 1, timestamp: $ts, trees: $trees} + (if $s != "" then {system: $s, host: $h} else {} end)' >"$tmp"
+  lineage="$(system_lineage)"
+  jq -n --arg ts "$ts" --argjson trees "$json" --arg s "${SYSTEM_ID:-}" --arg h "$HOSTNAME" --argjson f "${lineage:-[]}" \
+    '{version: 1, timestamp: $ts, trees: $trees} + (if $s != "" then {system: $s, host: $h} else {} end)
+      + (if ($f | length) > 0 then {follows: $f} else {} end)' >"$tmp"
   d_meta_put "$tmp" "$ts.json" ||
     log_file "couldn't save the manifest for $ts (a restore will measure instead)"
   rm -f "$tmp"
@@ -827,9 +855,20 @@ base_point_for() {
 
 # Replace KIND's working copy with a writable snapshot of restore point TS.
 # Built beside the old one and swapped in, so it is never left with none.
+# With FROM and TO (home only): the user folder FROM becomes TO in it -- a
+# migration onto a system where the user has another name -- so the next
+# backup finds the files where this system has them and sends only changes.
 d_reseed() {
-  local kind=$1 ts=$2
+  local kind=$1 ts=$2 from=${3:-} to=${4:-}
+  if [[ $kind != home || $from == "$to" ]] || [[ ! $from =~ ^[a-z_][a-z0-9_.-]*$ || ! $to =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
+    from="" to=""
+  fi
   if [[ $DEST_REMOTE == 1 ]]; then
+    if [[ -n $from && $(rgate version 2>/dev/null || echo 0) -ge 15 ]]; then
+      rgate reseed "$kind" "$ts" "$from" "$to" 2>>"$OMARCHY_TM_LOG"
+      return
+    fi
+    [[ -n $from ]] && warn "Update the Pi so your files there follow your new user name ($from is $to now); until then this backup sends them again. $(pi_update_cmd)"
     rgate reseed "$kind" "$ts" 2>>"$OMARCHY_TM_LOG"
     return
   fi
@@ -839,6 +878,9 @@ d_reseed() {
     btrfs subvolume delete "$new" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
   fi
   btrfs subvolume snapshot "$MNT/$kind/$ts" "$new" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
+  if [[ -n $from && -d $new/$from && ! -L $new/$from && ! -e $new/$to ]]; then
+    mv "$new/$from" "$new/$to" && log_file "the working copy follows the new user name: $from is $to now"
+  fi
   if [[ -e $MNT/$kind/current ]]; then
     btrfs subvolume delete "$MNT/$kind/current" >>"$OMARCHY_TM_LOG" 2>&1 || return 1
   fi
@@ -907,7 +949,14 @@ adopt_working_copies() {
         base=""
       else
         step "Another computer backed up here since this one did; starting $(tree_name "$kind") from restore point $base"
-        if d_reseed "$kind" "$base"; then
+        # Migrated onto a system where the user has another name: their folder
+        # in the working copy takes the new name (the record says which).
+        local rn_from="" rn_to=""
+        if [[ $kind == home && $base == "$(takeover_field snapshot 2>/dev/null || true)" ]]; then
+          rn_from="$(takeover_field from_user 2>/dev/null || true)"
+          rn_to="$(takeover_field user 2>/dev/null || true)"
+        fi
+        if d_reseed "$kind" "$base" "$rn_from" "$rn_to"; then
           step_undone "$kind"
           WORKING_COPY_REBUILT=1
           log_file "rebuilt $kind/current from $base (last written by $owner)"
@@ -2225,7 +2274,7 @@ migrate_open_list() {
   # have no spaces to protect.
   local err="" ferr src_user=$user
   for c in "${cands[@]}"; do
-    # The old system's user may have had another name (matt then, test now).
+    # The old system's user may have had another name (alex then, sam now).
     src_user="$(point_user "$c" "$user")"
     if ((M_LOCAL_LIST)); then
       cp "$local_list" "$MIGRATE_TMP/list.json"
@@ -2256,7 +2305,7 @@ migrate_open_list() {
   [[ $src_user == "$user" ]] || log "your saved config is under $src_user in that restore point; it comes back into $user's home"
   "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/migrate_apply.py" plan "$MIGRATE_TMP/list.json" "$user" "$home" "${done_arg[@]}" --from-user="$src_user" \
     >"$MIGRATE_TMP/plan.json" || fail_backup "Couldn't make sense of your saved config."
-  M_TS=$ts M_USER=$user M_HOME=$home M_LABEL=$label M_WHERE=$where
+  M_TS=$ts M_USER=$user M_HOME=$home M_LABEL=$label M_WHERE=$where M_FROM_USER=$src_user
 }
 
 migrate_check_jobs() {
@@ -2312,6 +2361,57 @@ migrate_present() {
     "$(d_target "${pick[0]}")" "$MIGRATE_TMP/empty/" 2>&1)" || return 1
   files="$(sed -n 's/^Number of files: \([0-9,]*\).*/\1/p' <<<"$out" | tr -d ,)"
   ((${#pick[@]} == 1 || ${files:-0} > 1))
+}
+
+# This computer takes over the old system's backup, before anything else
+# changes: like switching to another backup disk, the history carries on.
+#  - The record (restored-from.json, the one a rescue leaves too) says this
+#    system carries on from the restore point, which system made it, and the
+#    name its user had. The first backup starts the backup's working copy from
+#    that point (a snapshot: nothing copied), with the user folder renamed if
+#    the name changed, so only real changes are sent. The old system's
+#    restore points count as this one's: their files are reused, never stored
+#    twice.
+#  - The restore point is kept, so thinning never takes it.
+#  - Automatic backups wait until Restore my files has brought the picked
+#    folders back (the same marker a Quick System Rescue leaves); backing up
+#    before that would drop them from the backup's working copy.
+# Never over a rescue's own record for this system.
+migrate_take_over() {
+  local id rec="$OMA_RESTORED_FROM" from_sys="" level
+  id="$(system_id)"
+  [[ -n $id ]] || return 1
+  level="$(takeover_field level 2>/dev/null || true)"
+  if [[ -n $level && $level != migrate ]]; then
+    log_file "this system was restored ($level), so its rescue record stays as it is"
+  else
+    from_sys="$(d_manifests 2>/dev/null | jq -r --arg t "$M_TS" '.[$t].system // ""' 2>/dev/null || true)"
+    mkdir -p "${rec%/*}"
+    jq -n --arg s "$M_TS" --arg id "$id" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg fs "$from_sys" \
+      --arg fu "${M_FROM_USER:-$M_USER}" --arg u "$M_USER" --arg src "$(dest_id)" \
+      '{snapshot: $s, system: $id, restored_at: $at, level: "migrate", from_system: $fs, from_user: $fu, user: $u, source: $src}' \
+      >"$rec.tmp" && chmod 644 "$rec.tmp" && mv "$rec.tmp" "$rec" || return 1
+    log_file "this system carries on from $M_TS (system ${from_sys:-unknown}, user ${M_FROM_USER:-$M_USER} -> $M_USER)"
+  fi
+  "$OMARCHY_TM_PYTHON" "$OMARCHY_TM_ROOT/lib/kept_points.py" --add "$M_TS" --source "$(dest_id)" \
+    "what you left out of Migrate my saved config" >/dev/null 2>>"$OMARCHY_TM_LOG" || return 1
+  chown --reference="$OMARCHY_TM_STATE" "$OMARCHY_TM_STATE"/kept-points.json 2>/dev/null || true
+  migrate_mark_files_pending
+}
+
+# The Restore my files marker, with "only": the folders ticked in the list.
+# Written once, by the first Migrate my saved config, never over a rescue's.
+migrate_mark_files_pending() {
+  local pm="$OMARCHY_TM_STATE/partial-restore.json" plan="$MIGRATE_TMP/plan.json"
+  [[ -e $pm ]] && return 0
+  mkdir -p "$OMARCHY_TM_STATE"
+  local -a only=()
+  mapfile -t only < <(jq -r '.files[].paths[]' "$plan" | sed -n 's|^~/\([^/][^/]*\)$|\1|p' | grep -vx '\.\{1,2\}' || true)
+  ((${#only[@]})) || return 0
+  jq -n --arg s "$M_TS" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg src "$(dest_id)" --args \
+    '{snapshot: $s, level: "migrate", restored_at: $at, skipped_system: [], source: $src, only: $ARGS.positional}' \
+    "${only[@]}" >"$pm"
+  chown --reference="$OMARCHY_TM_STATE" "$pm" 2>/dev/null || true
 }
 
 # Migrate my saved config, for real: install the apps on the list, then copy each
@@ -2376,6 +2476,9 @@ cmd_migrate_apply() {
 
   local -a problems=() repo=() aur=() flat=()
   local n i name how state pkg cmd
+  if [[ -z $into ]] && ((! M_LOCAL_LIST)); then
+    migrate_take_over || problems+=("couldn't record that this computer carries on from $M_LABEL; its first backup may send more than it needs to")
+  fi
   if [[ -z $into ]]; then
     log "installing the apps in your saved config"
     mapfile -t repo < <(jq -r '.installs[] | select(.how == "pacman") | .state | to_entries[] | select(.value == "repo") | .key' "$plan")
@@ -2567,17 +2670,7 @@ cmd_migrate_apply() {
     # ticked in the list, so what was left behind doesn't come back with
     # them. Written once, by the first Migrate my saved config, and never over a
     # rescue's own marker.
-    local pm="$OMARCHY_TM_STATE/partial-restore.json"
-    if ((! M_LOCAL_LIST)) && [[ ! -e $pm ]]; then
-      local -a only=()
-      mapfile -t only < <(jq -r '.files[].paths[]' "$plan" | sed -n 's|^~/\([^/][^/]*\)$|\1|p' | grep -vx '\.\{1,2\}' || true)
-      if ((${#only[@]})); then
-        jq -n --arg s "$M_TS" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --arg src "$(dest_id)" --args \
-          '{snapshot: $s, level: "migrate", restored_at: $at, skipped_system: [], source: $src, only: $ARGS.positional}' \
-          "${only[@]}" >"$pm"
-        chown --reference="$OMARCHY_TM_STATE" "$pm" 2>/dev/null || true
-      fi
-    fi
+    ((M_LOCAL_LIST)) || migrate_mark_files_pending
     # The old system's list comes along, so the picker can add to it here.
     local ll="$home/.config/omarchy-backups/migrate.json"
     if ((! M_LOCAL_LIST)) && [[ ! -e $ll ]]; then

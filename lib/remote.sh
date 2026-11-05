@@ -14,6 +14,9 @@ OMA_REMOTE_ACCOUNT=omabackups
 # someone else and this runs as root. Only branches that exist on GitHub.
 if [[ -z ${OMA_REPO_RAW:-} ]]; then
   _oma_branch="$(sed -n 's|^ref: refs/heads/||p' "$OMARCHY_TM_ROOT/.git/HEAD" 2>/dev/null || true)"
+  # The root-owned copy the panel runs has no .git: link --refresh notes the
+  # branch it was copied from in BRANCH instead.
+  [[ -n $_oma_branch ]] || _oma_branch="$(head -c 40 "$OMARCHY_TM_ROOT/BRANCH" 2>/dev/null | tr -cd 'a-z' || true)"
   [[ $_oma_branch == edge ]] || _oma_branch=main
   OMA_REPO_RAW="https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/$_oma_branch"
   unset _oma_branch
@@ -136,7 +139,7 @@ remote_refresh_addresses() {
 # session finishes, not the last; before 12 they send again files the disk
 # already has, and never check the disk's health; before 13 a health check
 # carries on right through a backup instead of pausing for it.
-OMA_GATE_WANT=13
+OMA_GATE_WANT=15
 
 # The one-liner that updates (or with --uninstall, removes) the Pi's side.
 # OMA_REPO_RAW is where this copy came from, so someone testing another

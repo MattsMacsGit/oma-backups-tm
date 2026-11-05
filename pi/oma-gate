@@ -29,7 +29,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-VERSION = "14"
+VERSION = "15"
 LIB = Path(__file__).resolve().parent
 MAPPER = "oma-capsule"
 TOP_DIRS = {"os", "home", "esp", "meta"}
@@ -502,9 +502,19 @@ def v_reseed(args: list[str]) -> None:
     swapped in, so an interruption never leaves no working copy at all.
     """
     require_mounted()
-    kind, ts = args
+    kind, ts = args[0], args[1]
     if kind not in ("os", "home", "esp") or not STAMP.match(ts):
         raise Refused(f"can't rebuild {kind!r} from {ts!r}")
+    # reseed home TS FROM TO: the user folder FROM is TO in the rebuilt copy --
+    # a migration onto a system where the user has another name -- so the
+    # next backup finds the files under the new name and sends only changes.
+    rename = None
+    if len(args) == 4:
+        old, newname = args[2], args[3]
+        user_re = re.compile(r"^[a-z_][a-z0-9_.-]*$")
+        if kind != "home" or not user_re.match(old) or not user_re.match(newname) or old == newname:
+            raise Refused("reseed: a user folder can only be renamed in home, to a different user name")
+        rename = (old, newname)
     src = target(f"{kind}/{ts}")
     if not is_subvolume(src):
         raise Refused(f"{kind}/{ts} is not a restore point here")
@@ -515,6 +525,11 @@ def v_reseed(args: list[str]) -> None:
             raise Refused(f"{kind}/current.new exists but is not a btrfs subvolume")
         run("btrfs", "subvolume", "delete", str(new))
     run("btrfs", "subvolume", "snapshot", str(src), str(new))
+    if rename:
+        a, b = new / rename[0], new / rename[1]
+        if a.is_dir() and not a.is_symlink() and not b.exists() and not b.is_symlink():
+            os.rename(a, b)
+            log(f"user folder {rename[0]} is {rename[1]} now in {kind}/current")
     if cur.exists():
         if not is_subvolume(cur):
             raise Refused(f"{kind}/current exists but is not a btrfs subvolume")
@@ -867,7 +882,7 @@ VERBS = {
     "subvol-create": (v_subvol_create, 1),
     "snapshot": (v_snapshot, 2),
     "set-writable": (v_set_writable, 1),
-    "reseed": (v_reseed, 2),
+    "reseed": (v_reseed, (2, 4)),
     "reuse": (v_reuse, None),
     "health-start": (v_health_start, 1),
     "health-pause": (v_health_pause, 1),

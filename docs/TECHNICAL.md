@@ -157,10 +157,13 @@ and refreshed after each backup, so a new DHCP lease sorts itself out. Whatever
 address is used, the Pi's key is still checked under the name you paired it as.
 
 After updating OmaBackups, update the Pi's gatekeeper too (keeps the pairing).
-This version wants gatekeeper 13; with an older one, backups still work, and
+This version wants gatekeeper 15; with an older one, backups still work, and
 the panel says so. Before 12 the Pi's disk isn't health-checked and files it
 already has can be sent again; with 12, a health check doesn't pause for a
-backup, so the two slow each other down.
+backup, so the two slow each other down. Before 14 a laptop can't pair over
+the network (the backup disk staying in the Pi); before 15, after Migrate my
+saved config onto a system where your user name changed, the first backup
+sends your files again instead of carrying on from the old ones.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main/pi/pi-setup.sh | sudo bash -s -- --update
