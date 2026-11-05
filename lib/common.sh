@@ -793,6 +793,7 @@ refresh_root_copy() {
   # Which branch this copy came from (it has no .git): the Pi's setup script
   # is fetched from the same one.
   sed -n 's|^ref: refs/heads/||p' "$OMARCHY_TM_ROOT/.git/HEAD" 2>/dev/null >"$OMA_ROOT_COPY/BRANCH" || true
+  chmod 644 "$OMA_ROOT_COPY/BRANCH" 2>/dev/null || true
   chown -R root:root "$OMA_ROOT_COPY"
   chmod -R go-w "$OMA_ROOT_COPY"
   # install.sh only ever put `oma-backups` in the user's own ~/.local/bin,
