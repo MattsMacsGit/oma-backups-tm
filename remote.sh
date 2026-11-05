@@ -75,6 +75,31 @@ pair_network_key() {
     fail "The Pi added the key, but it doesn't open the disk. Pair again; if it keeps happening, see $OMARCHY_TM_LOG."
 }
 
+# Put back what this laptop had before a pairing that didn't finish.
+pair_undo() {
+  [[ ${PAIR_DONE:-1} == 1 ]] && return 0
+  if [[ -n ${PAIR_PREV:-} ]]; then mv -f "$PAIR_PREV" "$OMA_REMOTE_CONF"; else rm -f "$OMA_REMOTE_CONF"; fi
+  [[ -n ${PAIR_PREV_KNOWN:-} ]] && mv -f "$PAIR_PREV_KNOWN" "$OMA_REMOTE_KNOWN"
+  PAIR_DONE=1
+}
+
+# The command for the Pi, on screen and in a file, so closing the window
+# doesn't lose it.
+show_pi_command() {
+  # Where the user can open it (the remote folder holds the private key: root only).
+  local f="$OMARCHY_TM_STATE/pi-setup-command.txt"
+  mkdir -p "$OMARCHY_TM_STATE" 2>/dev/null || true
+  if printf '%s\n' "$1" >"$f" 2>/dev/null; then
+    chmod 644 "$f" 2>/dev/null || true
+    [[ -n ${SUDO_USER:-} ]] && chown "$SUDO_USER:" "$f" 2>/dev/null || true
+  else
+    f=""
+  fi
+  echo; echo "$1"; echo
+  [[ -n $f ]] && gum style --foreground 8 "  (Also saved in $f)"
+  return 0
+}
+
 cmd_pair() {
   local login=${1:-}
   [[ -n $login ]] || die "usage: oma-backups remote pair HOST"
@@ -93,6 +118,17 @@ cmd_pair() {
   echo
   gum style --bold "Pair the backup disk with $host"
   echo
+
+  # Can it be reached at all? Checked before anything is written, so a name
+  # this computer doesn't know yet (a Tailscale name on a fresh install,
+  # before Tailscale is back) can simply be typed again.
+  step "Looking for $host on the network"
+  if ! timeout 8 bash -c ': </dev/tcp/"$1"/"$2"' _ "$host" "$port" 2>/dev/null; then
+    fail "Couldn't reach \"$host\" (port $port). Check the Pi is switched on and on the same network.
+On a fresh install a Tailscale name doesn't work until Tailscale is set up again: use the Pi's
+address on your home network instead, for example 192.168.1.50 (your router's app lists it).
+Nothing was changed, so you can try again straight away."
+  fi
 
   # The backup disk plugged into this laptop: its unlock key goes on here,
   # and the disk moves to the Pi afterwards. Not plugged in: pair over the
@@ -125,6 +161,13 @@ cmd_pair() {
   # half way doesn't leave the backups without it.
   ((network)) && [[ -z $uuid ]] &&
     uuid="$(jq -r --arg h "$host" 'select(.host == $h) | .luks_uuid // ""' "$OMA_REMOTE_CONF" 2>/dev/null || true)"
+  # Until the Pi has answered, this pairing is only a try: if anything below
+  # fails, the Pi this laptop had before (or none) is put back, so the next
+  # try starts clean instead of thinking it's already paired.
+  PAIR_PREV="" PAIR_PREV_KNOWN="" PAIR_DONE=0
+  if [[ -f $OMA_REMOTE_CONF ]]; then PAIR_PREV="$(mktemp)"; cp -p "$OMA_REMOTE_CONF" "$PAIR_PREV"; fi
+  if [[ -f $OMA_REMOTE_KNOWN ]]; then PAIR_PREV_KNOWN="$(mktemp)"; cp -p "$OMA_REMOTE_KNOWN" "$PAIR_PREV_KNOWN"; fi
+  trap pair_undo EXIT
   jq -n --arg host "$host" --argjson port "$port" --arg uuid "$uuid" --arg laptop "$(hostname)" --arg at "$(ts)" \
     '{host: $host, port: $port, luks_uuid: $uuid, laptop: $laptop, paired_at: $at}' >"$OMA_REMOTE_CONF.tmp"
   chmod 644 "$OMA_REMOTE_CONF.tmp"
@@ -147,12 +190,12 @@ cmd_pair() {
   if gum confirm "$ask"; then
     if ! as_user ssh -t "$login" "$setup"; then
       warn "That didn't work. Run this on the Pi yourself instead:"
-      echo; echo "$setup"; echo
+      show_pi_command "$setup"
       press_ready
     fi
   else
     gum style --foreground 8 "  Run this on the Pi:"
-    echo; echo "$setup"; echo
+    show_pi_command "$setup"
     press_ready
   fi
 
@@ -168,6 +211,8 @@ cmd_pair() {
   "$OMARCHY_TM_ROOT/link.sh" --quiet || warn "Couldn't link this laptop; backups will ask for your password. Try: oma-backups link"
   # It's about to be unplugged; pulling it while mounted leaves a dead mount.
   ((network)) || "$OMARCHY_TM_ROOT/mount.sh" umount >/dev/null 2>&1 || true
+  PAIR_DONE=1
+  rm -f "$OMARCHY_TM_STATE/pi-setup-command.txt"
   echo
   gum style --bold --foreground 2 "● Paired with $host."
   if ((network)); then

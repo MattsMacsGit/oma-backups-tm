@@ -67,10 +67,28 @@ case "${1:-}" in
         fi
       fi
       if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
-        gum style --foreground 8 "  Backups on a Pi? Type its name or address. (Or plug in the backup disk and start again.)"
-        pi="$(gum input --placeholder "Pi name or IP, e.g. my-pi")" || exit 1
-        [[ $pi =~ ^[A-Za-z0-9@._:-]+$ ]] || { echo "That doesn't look like a Pi's name."; exit 1; }
-        sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$pi" || exit 1
+        gum style --foreground 8 "  Backups on a Pi? Type its address on your home network, like 192.168.1.50."
+        gum style --foreground 8 "  (A Tailscale name won't work yet: Tailscale comes back with your settings.)"
+        gum style --foreground 8 "  Or plug in the backup disk and start again."
+        while true; do
+          pi="$(gum input --header "The Pi's address" --placeholder "e.g. 192.168.1.50")" || exit 1
+          [[ -n $pi ]] || exit 1
+          if [[ ! $pi =~ ^[A-Za-z0-9._:-]+$ ]]; then
+            echo "That doesn't look like an address. Try again."
+            continue
+          fi
+          who="$(gum input --header "Your login on the Pi (the user you sign in to it with)" --value "$USER")" || exit 1
+          if [[ ! $who =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
+            echo "That doesn't look like a login name. Try again."
+            continue
+          fi
+          # A pairing that fails changes nothing, so another try starts clean.
+          if sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$who@$pi"; then
+            break
+          fi
+          echo
+          gum confirm "Try again with a different address or login?" || exit 1
+        done
       fi
       [[ -f /etc/omarchy-backups/capsule.json || -f /etc/omarchy-backups/remote.json ]] ||
         { echo "Not connected to a backup, so there's nothing to migrate from yet."; exit 1; }
