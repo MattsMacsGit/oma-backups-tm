@@ -324,7 +324,9 @@ require_root() {
   fi
   if [[ -t 0 && -t 1 ]]; then
     log "re-executing with sudo"
-    exec sudo --preserve-env=OMARCHY_TM_ROOT,OMARCHY_BACKUPS_ROOT,OMARCHY_TM_DRY_RUN,OMARCHY_TM_YES,OMARCHY_TM_FORCE,OMARCHY_TM_PYTHON,OMARCHY_TM_ALLOW_INTERNAL,OMARCHY_TM_HOME_ONLY \
+    sudo -n true 2>/dev/null ||
+      echo "This needs your password on THIS computer (as ${USER:-you}), to change settings here." >&2
+    exec sudo -p "  Password for ${USER:-you} on THIS computer: " --preserve-env=OMARCHY_TM_ROOT,OMARCHY_BACKUPS_ROOT,OMARCHY_TM_DRY_RUN,OMARCHY_TM_YES,OMARCHY_TM_FORCE,OMARCHY_TM_PYTHON,OMARCHY_TM_ALLOW_INTERNAL,OMARCHY_TM_HOME_ONLY \
       "$0" "$@"
   fi
   die "this command needs root; run it in a terminal so sudo can prompt"

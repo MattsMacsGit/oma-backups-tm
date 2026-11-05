@@ -59,8 +59,12 @@ pair_network_key() {
   fi
   step "Adding this laptop's unlock key to the backup disk on $host"
   while :; do
-    gum style --foreground 8 "  Enter the backup disk password (the one you chose when setting it up)."
-    pass="$(gum input --password --placeholder "Backup disk password" </dev/tty)" || fail "Pairing stopped."
+    echo
+    gum style --bold "The backup disk's password"
+    gum style --foreground 8 "  The password that unlocks the encrypted backup disk plugged into the Pi: the one"
+    gum style --foreground 8 "  you chose when you first set up the disk. Not this computer's, not the Pi's."
+    gum style --foreground 8 "  It's used once, so this laptop can unlock the disk by itself from now on."
+    pass="$(gum input --password --header "Backup disk password" --placeholder "the disk's password" </dev/tty)" || fail "Pairing stopped."
     [[ -n $pass ]] || continue
     n="$(printf '%s' "$pass" | wc -c)"
     if { printf '%d\n' "$n"; printf '%s' "$pass"; cat "$OMA_CAPSULE_KEY"; } | rgate add-unlock-key >/dev/null 2>>"$OMARCHY_TM_LOG"; then
@@ -68,7 +72,7 @@ pair_network_key() {
     fi
     tries=$((tries + 1))
     ((tries < 3)) || { pass=""; fail "That password didn't open the backup disk. Pair again when you have it."; }
-    warn "That password didn't open the backup disk. Try again."
+    warn "That password didn't open the backup disk (it's the disk's own password, not this computer's or the Pi's). Try again."
   done
   pass=""
   rgate check-pass <"$OMA_CAPSULE_KEY" >/dev/null 2>>"$OMARCHY_TM_LOG" ||
@@ -113,6 +117,10 @@ cmd_pair() {
   host="$(awk '$1=="hostname"{print $2; exit}' <<<"$cfg")"
   port="$(awk '$1=="port"{print $2; exit}' <<<"$cfg")"
   host=${host:-$alias} port=${port:-22}
+  # Who the user logs in to the Pi as: for the on-screen prompts only.
+  local piuser
+  if [[ $login == *@* ]]; then piuser=${login%@*}; else piuser="$(awk '$1=="user"{print $2; exit}' <<<"$cfg")"; fi
+  piuser=${piuser:-${SUDO_USER:-$USER}}
   [[ $host =~ ^[A-Za-z0-9._:-]+$ ]] || fail "\"$alias\" doesn't look like a host name."
 
   echo
@@ -177,16 +185,25 @@ Nothing was changed, so you can try again straight away."
   local setup ask PI_DONE_TEXT="This Pi is ready"
   if ((network)); then
     PI_DONE_TEXT="Done. Gatekeeper version"
-    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --repo $OMA_REPO_RAW --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
-    ask="Let this laptop in on $host now? You'll log in to it as usual and type its sudo password."
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo -p '[On the Pi] sudo password for %p: ' bash -s -- --repo $OMA_REPO_RAW --add-key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    ask="Log in to the Pi ($piuser@$host) now to let this laptop in?"
     echo
     step "Next, the Pi needs to let this laptop in."
   else
-    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo bash -s -- --repo $OMA_REPO_RAW --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
-    ask="Set up $host now? You'll log in to it as usual and type its sudo password."
+    setup="curl -fsSL $OMA_REPO_RAW/pi/pi-setup.sh | sudo -p '[On the Pi] sudo password for %p: ' bash -s -- --repo $OMA_REPO_RAW --uuid $uuid --key '$(cat "$OMA_REMOTE_KEY.pub")'"
+    ask="Log in to the Pi ($piuser@$host) now to set it up?"
     echo
     step "Next, the Pi needs a one-time setup."
   fi
+  echo
+  gum style --bold "The Pi's password (for $piuser)"
+  gum style --foreground 8 "  This logs in to the Pi over ssh, as you would by hand, to install the small"
+  gum style --foreground 8 "  program that lets this laptop back up there. It's the Pi's password now, not this computer's:"
+  gum style --foreground 8 "    $piuser@$host's password:          the password for $piuser on the Pi (to log in)"
+  gum style --foreground 8 "    [On the Pi] sudo password for $piuser:   the same password again, if the Pi asks (to install)"
+  gum style --foreground 8 "  If it first asks \"Are you sure you want to continue connecting\", type yes."
+  gum style --foreground 8 "  If you log in to the Pi with a key, there may be no password to type."
+  echo
   if gum confirm "$ask"; then
     if ! as_user ssh -t "$login" "$setup"; then
       warn "That didn't work. Run this on the Pi yourself instead:"

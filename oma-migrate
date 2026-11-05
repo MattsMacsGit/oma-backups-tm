@@ -7,6 +7,25 @@ ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
 PY="${OMARCHY_TM_PYTHON:-/usr/bin/python3}"
 [[ -x $PY ]] || PY="$(command -v python3)"
 
+# sudo's own prompt ("[sudo] password for you:") reads as if it wants the
+# Pi's password when it comes straight after asking for the Pi's login. It
+# wants this computer's, so every sudo here says so, and laptop_password asks
+# for it up front, with the reason, before anything about the Pi.
+SUDO_PROMPT="  Password for $USER on THIS computer: "
+
+# Ask for this computer's password now (sudo then remembers it for a few
+# minutes), saying why. Nothing is shown when sudo already has it.
+laptop_password() {
+  [[ $EUID -eq 0 ]] && return 0
+  sudo -n true 2>/dev/null && return 0
+  echo
+  gum style --bold "This computer's password"
+  gum style --foreground 8 "  $1"
+  gum style --foreground 8 "  Type the password you log in to THIS computer with (as $USER)."
+  gum style --foreground 8 "  Not the Pi's password: that comes later, and it'll say so."
+  sudo -v -p "$SUDO_PROMPT" || { echo "That wasn't this computer's password, so nothing was changed."; exit 1; }
+}
+
 usage() {
   cat <<USAGE
 oma-migrate $(cat "$ROOT/VERSION" 2>/dev/null || echo) — pick what comes back after a fresh install
@@ -45,10 +64,11 @@ case "${1:-}" in
     # Connect to your old backup: a Pi by name (pairs over the network), or
     # the OmaBackups disk plugged in here.
     shift
+    laptop_password "Connecting to your old backup changes settings on this computer, which needs your password."
     if [[ -n ${1:-} && ${1:-} != /dev/* ]]; then
-      exec sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$1"
+      exec sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$1"
     fi
-    exec sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect "$@" ;;
+    exec sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect "$@" ;;
   scan) shift; exec "$PY" "$ROOT/lib/migrate_scan.py" "$@" ;;
   apply)
     shift
@@ -60,30 +80,42 @@ case "${1:-}" in
     if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
       echo
       gum style --bold "First: Connect to your old backup"
+      gum style --foreground 8 "  This asks for a few things, one at a time, and says each time which one:"
+      gum style --foreground 8 "    1. THIS computer's password (to change settings here)"
+      gum style --foreground 8 "    2. If your backups are on a Pi: its address, your login name on it, then"
+      gum style --foreground 8 "       the Pi's password (once to log in, maybe once more for sudo on the Pi)"
+      gum style --foreground 8 "    3. Maybe the backup disk's password (the one you chose when setting it up)"
+      laptop_password "Connecting to your old backup changes settings on this computer, which needs your password."
       if lsblk -nr -o LABEL 2>/dev/null | grep -qxE 'OMABOOT|OMARCHY-EFI|OmaRescue|OMARCHY-LIVE'; then
         gum style --foreground 8 "  A backup disk is plugged in here."
         if gum confirm "Use the backup disk plugged in here?"; then
-          sudo --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect || exit 1
+          sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect || exit 1
         fi
       fi
       if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
-        gum style --foreground 8 "  Backups on a Pi? Type its address on your home network, like 192.168.1.50."
-        gum style --foreground 8 "  (A Tailscale name won't work yet: Tailscale comes back with your settings.)"
-        gum style --foreground 8 "  Or plug in the backup disk and start again."
+        echo
+        gum style --bold "The Pi's address"
+        gum style --foreground 8 "  Backups on a Pi? Type its address on your home network, like 192.168.1.50"
+        gum style --foreground 8 "  (your router's app lists it). A Tailscale name won't work yet: Tailscale"
+        gum style --foreground 8 "  comes back with your settings. Or press Esc, plug in the backup disk and start again."
         while true; do
-          pi="$(gum input --header "The Pi's address" --placeholder "e.g. 192.168.1.50")" || exit 1
+          pi="$(gum input --header "The Pi's address (IP on your home network)" --placeholder "e.g. 192.168.1.50")" || exit 1
           [[ -n $pi ]] || exit 1
           if [[ ! $pi =~ ^[A-Za-z0-9._:-]+$ ]]; then
             echo "That doesn't look like an address. Try again."
             continue
           fi
-          who="$(gum input --header "Your login on the Pi (the user you sign in to it with)" --value "$USER")" || exit 1
+          echo
+          gum style --bold "Your login name on the Pi"
+          gum style --foreground 8 "  The user name you sign in to the Pi with, e.g. pi or matt (as in ssh NAME@$pi)."
+          gum style --foreground 8 "  Just the name here: its password is asked for in a moment."
+          who="$(gum input --header "Login name on the Pi at $pi" --value "$USER")" || exit 1
           if [[ ! $who =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
             echo "That doesn't look like a login name. Try again."
             continue
           fi
           # A pairing that fails changes nothing, so another try starts clean.
-          if sudo --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$who@$pi"; then
+          if sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$who@$pi"; then
             break
           fi
           echo
@@ -96,7 +128,8 @@ case "${1:-}" in
       gum style --bold "Now: Migrate my saved config"
     fi
     if [[ $EUID -ne 0 ]]; then
-      exec sudo --preserve-env=OMARCHY_TM_PYTHON,OMARCHY_TM_YES "$ROOT/omarchy-backups" "$sub" "$@"
+      laptop_password "Putting your saved config back changes settings on this computer, which needs your password."
+      exec sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON,OMARCHY_TM_YES "$ROOT/omarchy-backups" "$sub" "$@"
     fi
     exec "$ROOT/omarchy-backups" "$sub" "$@" ;;
   -h | --help | help) usage ;;
