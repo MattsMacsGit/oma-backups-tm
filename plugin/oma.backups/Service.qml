@@ -788,7 +788,11 @@ Item {
   // can be read before it closes.
   function migrateTerminal(args) {
     var cmd = root.shQuote([root.shareRoot + "/oma-migrate"].concat(args || []))
-    var inner = root.shQuote(["sh", "-c", cmd + "; echo; printf 'Press Enter to close.'; read _"])
+    // ONE argument: Omarchy's terminal launcher joins its arguments with
+    // spaces ("$*") and hands the result to bash -c, so quoting spread over
+    // several arguments is lost -- "sh -c CMD" then ran oma-migrate with no
+    // arguments at all, and Migrate my saved config opened the picker.
+    var inner = root.shQuote([cmd + "; echo; printf 'Press Enter to close.'; read _"])
     var term = "omarchy-launch-floating-terminal-with-presentation"
     Quickshell.execDetached(["sh", "-c",
       "if command -v " + term + " >/dev/null 2>&1; then exec " + term + " " + inner + "; fi; "
