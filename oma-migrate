@@ -22,8 +22,18 @@ laptop_password() {
   gum style --bold "This computer's password"
   gum style --foreground 8 "  $1"
   gum style --foreground 8 "  Type the password you log in to THIS computer with (as $USER)."
-  gum style --foreground 8 "  Not the Pi's password: that comes later, and it'll say so."
+  [[ -n ${2:-} ]] && gum style --foreground 8 "  $2"
   sudo -v -p "$SUDO_PROMPT" || { echo "That wasn't this computer's password, so nothing was changed."; exit 1; }
+}
+
+# Connected to an old backup: the backup disk set up here, or a Pi paired
+# all the way. A pairing that stopped half way (window closed while it
+# waited for the Pi) leaves remote.json without the disk's ID, and this
+# laptop's key never went on the disk: that isn't connected, and treating
+# it as connected sent Migrate straight to "couldn't unlock the backup disk".
+connected() {
+  [[ -f /etc/omarchy-backups/capsule.json ]] && return 0
+  [[ -n $(jq -r '.luks_uuid // ""' /etc/omarchy-backups/remote.json 2>/dev/null) ]]
 }
 
 usage() {
@@ -64,7 +74,7 @@ case "${1:-}" in
     # Connect to your old backup: a Pi by name (pairs over the network), or
     # the OmaBackups disk plugged in here.
     shift
-    laptop_password "Connecting to your old backup changes settings on this computer, which needs your password."
+    laptop_password "Connecting to your old backup changes settings on this computer, which needs your password." "Not the Pi's password: that comes later, and it'll say so."
     if [[ -n ${1:-} && ${1:-} != /dev/* ]]; then
       exec sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON,OMA_REPO_RAW "$ROOT/omarchy-backups" remote pair "$1"
     fi
@@ -77,22 +87,25 @@ case "${1:-}" in
     if [[ ${1:-} == --dry-run ]]; then sub=migrate-plan; shift; fi
     # On a fresh install nothing is connected yet: Connect to your old backup
     # first (the backup disk plugged in here, or a Pi by name), then go on.
-    if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
+    if ! connected; then
       echo
       gum style --bold "First: Connect to your old backup"
+      if [[ -f /etc/omarchy-backups/remote.json ]]; then
+        gum style --foreground 8 "  Pairing with $(jq -r '.host // "the Pi"' /etc/omarchy-backups/remote.json 2>/dev/null) didn't finish last time, so it starts again."
+      fi
       gum style --foreground 8 "  This asks for a few things, one at a time, and says each time which one:"
       gum style --foreground 8 "    1. THIS computer's password (to change settings here)"
       gum style --foreground 8 "    2. If your backups are on a Pi: its address, your login name on it, then"
       gum style --foreground 8 "       the Pi's password (once to log in, maybe once more for sudo on the Pi)"
       gum style --foreground 8 "    3. Maybe the backup disk's password (the one you chose when setting it up)"
-      laptop_password "Connecting to your old backup changes settings on this computer, which needs your password."
+      laptop_password "Connecting to your old backup changes settings on this computer, which needs your password." "Not the Pi's password: that comes later, and it'll say so."
       if lsblk -nr -o LABEL 2>/dev/null | grep -qxE 'OMABOOT|OMARCHY-EFI|OmaRescue|OMARCHY-LIVE'; then
         gum style --foreground 8 "  A backup disk is plugged in here."
         if gum confirm "Use the backup disk plugged in here?"; then
           sudo -p "$SUDO_PROMPT" --preserve-env=OMARCHY_TM_PYTHON "$ROOT/omarchy-backups" connect || exit 1
         fi
       fi
-      if [[ ! -f /etc/omarchy-backups/capsule.json && ! -f /etc/omarchy-backups/remote.json ]]; then
+      if ! connected; then
         echo
         gum style --bold "The Pi's address"
         gum style --foreground 8 "  Backups on a Pi? Type its address on your home network, like 192.168.1.50"
@@ -122,7 +135,7 @@ case "${1:-}" in
           gum confirm "Try again with a different address or login?" || exit 1
         done
       fi
-      [[ -f /etc/omarchy-backups/capsule.json || -f /etc/omarchy-backups/remote.json ]] ||
+      connected ||
         { echo "Not connected to a backup, so there's nothing to migrate from yet."; exit 1; }
       echo
       gum style --bold "Now: Migrate my saved config"
