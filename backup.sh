@@ -416,7 +416,9 @@ point_user() {
     for u in "${users[@]}"; do [[ $u == "$rec" ]] && { printf '%s\n' "$rec"; return 0; }; done
   fi
   if ((${#users[@]} == 1)) && [[ ${users[0]} =~ ^[a-z_][a-z0-9_.-]*$ ]]; then
-    log "no $user folder in $ts; its only user folder is ${users[0]}, so that's this user's"
+    # log_file, not log: callers capture stdout as the user name, and log
+    # prints there too (that turned the name into this sentence).
+    log_file "no $user folder in $ts; its only user folder is ${users[0]}, so that's this user's"
     printf '%s\n' "${users[0]}"
     return 0
   fi

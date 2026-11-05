@@ -627,7 +627,7 @@
   },
   {
    "id": "desktop",
-   "name": "Your desktop tweaks",
+   "name": "Keybindings, bar & theme",
    "paths": [
     "~/.config/hypr",
     "~/.config/omarchy"

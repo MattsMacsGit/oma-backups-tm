@@ -62,6 +62,16 @@ class Model:
     def __init__(self, scan: dict, previous: dict | None):
         self.scan = scan
         self.items = scan["items"]
+        # A saved config keeps the names it was saved with; a setting renamed
+        # since ("Your desktop tweaks" is "Keybindings, bar & theme" now)
+        # shows its current name.
+        try:
+            known = {"setting:" + s["id"]: s["name"] for s in json.loads(ms.KNOWN_FILE.read_text()).get("settings", [])}
+        except (OSError, ValueError, KeyError):
+            known = {}
+        for i in self.items:
+            if i.get("id") in known:
+                i["name"] = known[i["id"]]
         picks = (previous or {}).get("picks", {})
         self.loaded_from = (previous or {}).get("saved_at")
         for i in self.items:
