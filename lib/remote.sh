@@ -8,7 +8,16 @@ OMA_REMOTE_DIR=/etc/omarchy-backups/remote
 OMA_REMOTE_KEY=$OMA_REMOTE_DIR/id_ed25519
 OMA_REMOTE_KNOWN=$OMA_REMOTE_DIR/known_hosts
 OMA_REMOTE_ACCOUNT=omabackups
-OMA_REPO_RAW="${OMA_REPO_RAW:-https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/main}"
+# The Pi's setup script comes from the same branch as this copy: a laptop on
+# edge pairing with main's older pi-setup.sh got "unknown option: --repo".
+# Read .git/HEAD directly rather than ask git, which refuses a repo owned by
+# someone else and this runs as root. Only branches that exist on GitHub.
+if [[ -z ${OMA_REPO_RAW:-} ]]; then
+  _oma_branch="$(sed -n 's|^ref: refs/heads/||p' "$OMARCHY_TM_ROOT/.git/HEAD" 2>/dev/null || true)"
+  [[ $_oma_branch == edge ]] || _oma_branch=main
+  OMA_REPO_RAW="https://raw.githubusercontent.com/MattsMacsGit/oma-backups-tm/$_oma_branch"
+  unset _oma_branch
+fi
 
 REMOTE_HOST=""      # the name it was paired under: what the user sees
 REMOTE_ADDR=""      # what we actually connect to, LAN address when it answers
