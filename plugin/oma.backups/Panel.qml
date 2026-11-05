@@ -192,6 +192,7 @@ Panel {
   Component {
     id: safeIcon
     Item {
+      id: safe
       readonly property color tint: svc.diskBusy ? root.urgent : root.foreground
 
       Image {
@@ -220,13 +221,21 @@ Panel {
         visible: false
         layer.enabled: true
       }
-      MultiEffect {
-        anchors.fill: safeDialImg
-        source: safeDialImg
-        colorization: 1.0
-        colorizationColor: parent.tint
-        rotation: svc.diskBusy ? root.spin : 0
-        transformOrigin: Item.Center
+      // The bar sizes and centres an icon by the box its contents cover.
+      // A turning dial's box grows by up to 1.4x mid-turn, so the whole safe
+      // shrank and drifted as it spun. Clipped to the icon's square, the box
+      // never changes; the dial sits well inside it, so nothing is cut off.
+      Item {
+        anchors.fill: parent
+        clip: true
+        MultiEffect {
+          anchors.fill: parent
+          source: safeDialImg
+          colorization: 1.0
+          colorizationColor: safe.tint
+          rotation: svc.diskBusy ? root.spin : 0
+          transformOrigin: Item.Center
+        }
       }
     }
   }

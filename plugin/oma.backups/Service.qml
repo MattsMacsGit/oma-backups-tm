@@ -957,9 +957,13 @@ Item {
     progressBusy = true
     progressDetail = ""
     progressStep = 0
-    if (root.linked)
-      Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service", "oma-backups-scheduled.service"])
-    else
+    if (root.linked) {
+      // One unit per call: systemd 262 sends several units as a single
+      // EnqueueUnitJobMany, which the system bus refuses to an ordinary user
+      // before polkit is asked, so a combined stop did nothing at all.
+      Quickshell.execDetached(["systemctl", "stop", "oma-backups-backup.service"])
+      Quickshell.execDetached(["systemctl", "stop", "oma-backups-scheduled.service"])
+    } else
       privileged(["stop"])
   }
 
