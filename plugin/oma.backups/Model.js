@@ -111,7 +111,7 @@ function ago(sec, nowSec) {
 // The disk health line (lib/health.py's record) for the home view:
 // { text, urgent }. An empty text hides the line.
 // The check names a file once per restore point sharing the damage
-// (home/<point>/matt/a.mkv): one file, however many names.
+// (home/<point>/USER/a.mkv): one file, however many names.
 function damagedFiles(files) {
   var seen = {}
   var out = []

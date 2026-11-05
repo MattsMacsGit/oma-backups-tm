@@ -63,7 +63,7 @@ ERRORS = ("csum_errors", "read_errors", "verify_errors", "super_errors",
 DEVICE = ("write_io_errs", "read_io_errs", "flush_io_errs", "corruption_errs", "generation_errs")
 MAX_FILES = 200
 # "... checksum error at logical 123 on dev /dev/dm-0, physical 456, root 263,
-# inode 1000, offset 0, length 4096, links 1 (path: matt/Videos/a.mkv)"
+# inode 1000, offset 0, length 4096, links 1 (path: USER/Videos/a.mkv)"
 PATH_RE = re.compile(r"\broot (?P<root>\d+),.*\(path: (?P<path>.*)\)\s*$")
 
 
@@ -120,7 +120,7 @@ def device_stats(mount: str) -> dict:
 
 def damaged_files(mount: str, since: float) -> list[str]:
     """The files the kernel said failed their checksums since SINCE, as paths
-    on the backup disk (home/20260923T073121Z/matt/...)."""
+    on the backup disk (home/20260923T073121Z/USER/...)."""
     try:
         r = subprocess.run(["journalctl", "-k", "-o", "cat", "--no-pager", "--since", f"@{int(since)}"],
                            capture_output=True, text=True, timeout=60)
@@ -400,7 +400,7 @@ TREES = ("os", "home", "esp")
 
 def damaged_in(record: dict, tree: str) -> dict[str, list[str]]:
     """{path inside TREE: [every name the check gave it]}. The check names a
-    file once per restore point sharing the bad block: home/<point>/matt/a."""
+    file once per restore point sharing the bad block: home/<point>/USER/a."""
     out: dict[str, list[str]] = {}
     for f in record.get("files") or []:
         parts = str(f).split("/")
