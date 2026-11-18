@@ -26,7 +26,7 @@ keep that copy of 1.x. `--purge` also deletes 1.x's settings.
 **2. Install 2.0**
 
 ```
-git clone -b edge https://github.com/MattsMacsGit/omabackups
+git clone https://github.com/MattsMacsGit/omabackups
 ```
 
 ```
@@ -35,7 +35,7 @@ omabackups/packaging/install-edge.sh
 
 Then click the OmaBackups icon on the bar (a clock turning back) and set up
 backups. Everything else is in
-[the 2.0 guide](https://github.com/MattsMacsGit/omabackups/blob/edge/docs/GUIDE.md).
+[the 2.0 guide](https://github.com/MattsMacsGit/omabackups/blob/main/docs/GUIDE.md).
 
 **Your 1.x backups** stay where they are: removing 1.x doesn't touch the
 backup disk or the backup server, and they still open with 1.x's backup
